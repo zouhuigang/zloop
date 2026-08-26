@@ -93,6 +93,19 @@ Python 版 8 个不变，新增 4 个。仍然每个 ≤ 4 个 flag。
 
 `hook-stop` 保留为内部命令。
 
+### 5.1 `phase`：循环现在到哪了（2026-08-27 补充）
+
+用户实际使用时的第一个问题是"循环到底跑到哪一步了"。loopx 有这信息但散在 `lifecycle_phase` / `waiting_on` / `quota.state` / `scheduler_hint.execution_phase` / turn journal 五处；zloop 合成**一行**，出现在 `status` 第二行、`next --json` 的 `phase` 字段（第 10 个字段）、`context` 的目标段：
+
+| 优先级 | 来源 | 输出 |
+|---|---|---|
+| 1 | `state.in_progress`（`next` 非 peek 交出 todo 时写入，`done` 清除；runner 开轮/收轮同样维护） | `executing t3 · round 4 · since 06:20 (3m ago) · host claude · via next\|runner` |
+| 2 | runner journal 最后一条 `sleep`（新增事件，含 `until`） | `runner sleeping until 06:41 (2m10s left) · reason ready` |
+| 2 | runner journal 悬空 `begin` | `runner round 4 on t2 since … — no end recorded (process may have died)` |
+| 3 | `decide()` | `idle · next would run t4 …` / `waiting (user_gate) · retry in 10 min` / `stopped (done)` |
+
+`in_progress` 是 `state.json` 新增的可选顶层键（`{todo, started_at, round, via, host, session}`），旧文件没有它照常读取。
+
 ## 6. 会话追踪与 resume（G4）
 
 `session.rs`：

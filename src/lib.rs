@@ -6,6 +6,7 @@ pub mod cli;
 pub mod context;
 pub mod hosts;
 pub mod log;
+pub mod phase;
 pub mod prompt;
 pub mod runner;
 pub mod session;

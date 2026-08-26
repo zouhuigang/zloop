@@ -119,6 +119,21 @@ pub struct Tick {
     pub extra: Map<String, Value>,
 }
 
+/// The todo currently being worked on: set when `next` hands it out (or the runner
+/// starts a round), cleared by `done`. This is what `phase` reports as "executing".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InProgress {
+    pub todo: String,
+    pub started_at: String,
+    pub round: u64,
+    /// "next" (interactive round) or "runner"
+    pub via: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
     pub version: u64,
@@ -130,6 +145,8 @@ pub struct State {
     pub next_id: u64,
     #[serde(default)]
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_progress: Option<InProgress>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -196,6 +213,7 @@ pub fn default_state(goal_text: &str, goal_id: &str) -> State {
         ticks: Vec::new(),
         next_id: 1,
         updated_at: ts,
+        in_progress: None,
         extra: Map::new(),
     }
 }

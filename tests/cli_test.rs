@@ -243,3 +243,39 @@ fn plan_from_loopx_state_file() {
     assert_eq!(o.code, 0, "{}", o.err);
     assert_eq!(o.out.trim(), "t1 [P0] open one");
 }
+
+#[test]
+fn phase_tracks_the_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a", "--add", "[P1] b"], None, &[]);
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("phase: idle · next would run t1"), "{}", o.out);
+    zloop(d, &["next", "--peek"], None, &[]);
+    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: idle"));
+    let o = zloop(d, &["next", "--json"], None, &[("CLAUDE_CODE_SESSION_ID", "sess-p")]);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    assert!(v["phase"].as_str().unwrap().starts_with("executing t1 · round 1"), "{}", v["phase"]);
+    assert!(v.as_object().unwrap().len() <= 10);
+    let st = state::load(&state::state_path(d)).unwrap();
+    let ip = st.in_progress.as_ref().unwrap();
+    assert_eq!((ip.todo.as_str(), ip.via.as_str(), ip.host.as_deref(), ip.session.as_deref()), ("t1", "next", Some("claude"), Some("sess-p")));
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("phase: executing t1") && o.out.contains("host claude · via next"), "{}", o.out);
+    assert!(zloop(d, &["context"], None, &[]).out.contains("阶段：executing t1"));
+    zloop(d, &["done", "t1", "--note", "ok"], None, &[]);
+    assert!(state::load(&state::state_path(d)).unwrap().in_progress.is_none());
+    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: idle · next would run t2"));
+    zloop(d, &["done", "t2", "--block", "?"], None, &[]);
+    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: waiting (user_gate) · retry in 10 min"));
+    for _ in 0..3 { zloop(d, &["next"], None, &[]); }
+    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: stopped (user_gate)"));
+    let j = d.join(".zloop").join("runner");
+    fs::create_dir_all(&j).unwrap();
+    let until = (chrono::Local::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    fs::write(j.join("journal.jsonl"), format!("{{\"event\":\"sleep\",\"until\":\"{until}\",\"reason\":\"ready\",\"at\":\"x\"}}\n")).unwrap();
+    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: runner sleeping until"));
+    fs::write(j.join("journal.jsonl"), "{\"event\":\"begin\",\"round\":4,\"todo\":\"t2\",\"host\":\"claude\",\"at\":\"2026-08-27T00:00:00+08:00\"}\n").unwrap();
+    assert!(zloop(d, &["status"], None, &[]).out.contains("runner round 4 on t2"));
+}

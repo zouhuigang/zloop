@@ -23,7 +23,12 @@ fn resume_hint(host: Option<Host>) -> &'static str {
 pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, at: DateTime<FixedOffset>) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    sections.push(format!("## 目标\n{}\n项目目录：{}", state.goal.text, root.display()));
+    sections.push(format!(
+        "## 目标\n{}\n项目目录：{}\n阶段：{}",
+        state.goal.text,
+        root.display(),
+        crate::phase::compute(state, root, at).summary
+    ));
 
     let recent: Vec<String> = state
         .ticks

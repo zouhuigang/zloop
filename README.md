@@ -122,6 +122,21 @@ zloop sessions                # claude 36346c2a-… ticks 2 … ✓ transcript
 zloop log --todo t2           # 这条 todo 的每次执行留档
 ```
 
+## 循环现在到哪了：`phase`
+
+`zloop status` 第二行、`zloop next --json` 的 `phase` 字段、`zloop context` 的目标段都带一句阶段说明（loopx 把这类信息散在 `lifecycle_phase` / `waiting_on` / `quota.state` / `scheduler_hint.execution_phase` / turn journal 里，这里合成一行）：
+
+| phase | 含义 | 来源 |
+|---|---|---|
+| `executing t3 · round 4 · since 06:20 (3m ago) · host claude · via next` | 一条 todo 已被 `next` 交出去（或 runner 已开始一轮），还没 `done` | `state.in_progress`（`next` 写、`done` 清） |
+| `runner sleeping until 06:41 (2m10s left) · reason ready` | runner 在两轮之间睡觉 | `.zloop/runner/journal.jsonl` 的 `sleep` 事件 |
+| `runner round 4 on t2 since … — no end recorded` | runner 开了一轮没收尾（进程可能死了） | journal 悬空 `begin` |
+| `idle · next would run t4 [P1] …` | 没人在跑，下一轮会做 t4 | `decide()` |
+| `waiting (user_gate) · retry in 10 min` | 暂时没活可干，退避中 | `decide()` |
+| `stopped (done \| user_gate \| fail_streak)` | 循环已停，等人 | `decide()` |
+
+`next --peek` 不会把 todo 交出去，因此不改变 phase。
+
 ## `next` 怎么决定
 
 ```
@@ -168,7 +183,7 @@ zloop plan --from-loopx .codex/goals/<goal>/ACTIVE_GOAL_STATE.md
 | 源码文件 / 行数 | 819 / 317,699（Python） | 10 / 2,190（Rust） |
 | 顶层子命令 | 113（叶命令 307） | 12（+1 内部 `hook-stop`） |
 | 单命令最多 flag | 75（`todo`） | 5（`done`，含 `--evidence`） |
-| `next` 一次调用 | 20–30 KB JSON，数百 ms | 9 个字段，12 ms |
+| `next` 一次调用 | 20–30 KB JSON，数百 ms | 10 个字段（含 `phase`），12 ms |
 | 状态存放处 | ≥ 9 处（两级 registry、Markdown 状态、runs/、turns/、leases/…） | 1 个 JSON（+ 可读的 log/*.md） |
 | Todo 元数据字段 | ≈ 50（URL 编码塞进 Markdown 注释） | 8 |
 | 每轮写回 | `refresh-state` + `spend-slot` + `todo complete`，顺序错一步丢账 | `zloop done` 一条 |

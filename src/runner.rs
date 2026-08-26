@@ -55,14 +55,16 @@ fn last_session(state: &State, host: Host) -> Option<String> {
         .and_then(|t| t.session.clone())
 }
 
-/// The child must not think it is inside *this* host session, and it must find
-/// the same `zloop` binary we are running (not another one earlier on PATH).
+/// The child must not think it is inside *this* host session, and it must be able
+/// to find a `zloop` binary. Our own directory is *appended* to PATH as a fallback:
+/// prepending it would shadow the user's `claude` / `codex` when zloop lives next
+/// to them (e.g. all in `~/.local/bin`).
 fn isolate_child_env(cmd: &mut Command) {
     cmd.env_remove("CLAUDE_CODE_SESSION_ID").env_remove("CLAUDECODE").env_remove("CODEX_THREAD_ID");
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let old = std::env::var("PATH").unwrap_or_default();
-            cmd.env("PATH", format!("{}:{}", dir.display(), old));
+            cmd.env("PATH", format!("{old}:{}", dir.display()));
         }
     }
 }
@@ -176,6 +178,7 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 }
                 Some(m) => {
                     println!("runner: wait ({}) · sleeping {} {}", d.reason, m, if opts.fast { "s" } else { "min" });
+                    journal_sleep(root, m, opts.fast, &d.reason)?;
                     sleep_interval(m, opts.fast);
                     continue;
                 }
@@ -195,6 +198,17 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
             &json!({"event": "begin", "round": round_no, "todo": todo.id, "host": opts.host.as_str(),
                     "resume": resume_sid, "at": state::now_iso()}),
         )?;
+        state::transaction(&path, |st| {
+            st.in_progress = Some(state::InProgress {
+                todo: todo.id.clone(),
+                started_at: state::now_iso(),
+                round: round_no,
+                via: "runner".into(),
+                host: Some(opts.host.as_str().to_string()),
+                session: resume_sid.clone(),
+            });
+            Ok(())
+        })?;
         println!("runner: round {round_no} → {} [{}]{}", todo.id, opts.host.as_str(),
                  resume_sid.as_deref().map(|s| format!(" resume {s}")).unwrap_or_default());
 
@@ -226,6 +240,7 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 };
                 tick::record(st, "fail", Some(&todo.id), &note, &who)?;
             }
+            st.in_progress = None; // round settled either way
             Ok(wrote)
         })?;
         journal_append(
@@ -255,12 +270,27 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 println!("runner: stop ({})", d.reason);
                 return Ok(0);
             }
-            Some(m) => sleep_interval(m, opts.fast),
+            Some(m) => {
+                journal_sleep(root, m, opts.fast, &d.reason)?;
+                sleep_interval(m, opts.fast);
+            }
         }
     }
 }
 
+fn sleep_secs(minutes: u32, fast: bool) -> u64 {
+    if fast { minutes as u64 } else { minutes as u64 * 60 }
+}
+
+/// Record when the runner will wake up so `zloop status` can show "sleeping until …".
+fn journal_sleep(root: &Path, minutes: u32, fast: bool, reason: &str) -> Result<()> {
+    let until = state::now() + chrono::Duration::seconds(sleep_secs(minutes, fast) as i64);
+    journal_append(
+        root,
+        &json!({"event": "sleep", "until": state::format_iso(&until), "reason": reason, "at": state::now_iso()}),
+    )
+}
+
 fn sleep_interval(minutes: u32, fast: bool) {
-    let secs = if fast { minutes as u64 } else { minutes as u64 * 60 };
-    thread::sleep(Duration::from_secs(secs));
+    thread::sleep(Duration::from_secs(sleep_secs(minutes, fast)));
 }

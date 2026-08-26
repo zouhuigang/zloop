@@ -3,7 +3,7 @@
 
 use crate::session::{self, Host};
 use crate::state::{self, StateError};
-use crate::{context, hosts, log, prompt, runner, tick, todo};
+use crate::{context, hosts, log, phase, prompt, runner, tick, todo};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::io::{IsTerminal, Read};
@@ -173,7 +173,7 @@ pub fn run(cli: Cli) -> Result<i32> {
     match cli.cmd {
         Cmd::Init { goal, force } => cmd_init(&cli.dir, &goal, force),
         Cmd::Plan { add, file, replace, from_loopx } => cmd_plan(&path, add, file, replace, from_loopx),
-        Cmd::Next { json, peek } => cmd_next(&path, json, peek),
+        Cmd::Next { json, peek } => cmd_next(&root, &path, json, peek),
         Cmd::Done { id, note, outcome, block, next, evidence } => {
             cmd_done(&root, &path, &id, note, &outcome, block, next, evidence)
         }
@@ -266,16 +266,36 @@ fn cmd_plan(path: &Path, add: Vec<String>, file: Option<PathBuf>, replace: bool,
     Ok(0)
 }
 
-fn cmd_next(path: &Path, json: bool, peek: bool) -> Result<i32> {
+fn cmd_next(root: &Path, path: &Path, json: bool, peek: bool) -> Result<i32> {
     let who = session::detect();
-    let (decision, payload) = state::transaction(path, |st| {
-        let d = tick::decide(st, state::now());
-        if !d.should_run && !peek {
-            tick::record(st, "noop", None, &d.reason, &who)?;
+    let (decision, mut payload) = state::transaction(path, |st| {
+        let now = state::now();
+        let d = tick::decide(st, now);
+        if !peek {
+            if d.should_run {
+                // Hand the todo out: from now until `done`, phase reports "executing".
+                let t = d.todo.as_ref().unwrap();
+                st.in_progress = Some(state::InProgress {
+                    todo: t.id.clone(),
+                    started_at: state::format_iso(&now),
+                    round: tick::current_round(&st.ticks) + 1,
+                    via: "next".into(),
+                    host: Some(who.host.as_str().to_string()),
+                    session: who.session.clone(),
+                });
+            } else {
+                st.in_progress = None;
+                tick::record(st, "noop", None, &d.reason, &who)?;
+            }
         }
         let payload = tick::to_json(&d, st);
         Ok((d, payload))
     })?;
+    let st = state::load(path)?;
+    let ph = phase::compute(&st, root, state::now());
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("phase".into(), serde_json::Value::String(ph.summary.clone()));
+    }
     if json {
         print_json(&payload);
     } else if decision.should_run {
@@ -283,6 +303,7 @@ fn cmd_next(path: &Path, json: bool, peek: bool) -> Result<i32> {
         println!("RUN  {}", fmt_todo(t));
         println!("     writeback: {}", payload["writeback"].as_str().unwrap_or(""));
         println!("     interval: {} min · remaining {}", payload["interval_min"], payload["remaining"]);
+        println!("     phase: {}", ph.summary);
     } else {
         let interval = match decision.interval_min {
             None => "stop".to_string(),
@@ -319,6 +340,7 @@ fn cmd_done(
             last.log = Some(rel.clone());
         }
         tick_rec.log = Some(rel);
+        st.in_progress = None; // the round is written back; phase goes back to idle/stopped
         let d = tick::decide(st, state::now());
         Ok(Ok((tick_rec, d, todo::remaining(st))))
     })?;
@@ -420,6 +442,7 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool) -> Result<i32> {
     }
     let d = tick::decide(&st, state::now());
     println!("goal ({}): {}", st.goal.status, st.goal.text);
+    println!("phase: {}", phase::compute(&st, root, state::now()).summary);
     println!("state: {}", path.display());
     let head = if d.should_run {
         format!("RUN {}", d.todo.as_ref().map(|t| t.id.as_str()).unwrap_or("-"))
