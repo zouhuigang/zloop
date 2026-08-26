@@ -1,0 +1,10 @@
+# LoopX private state used while building zloop
+.loopx/
+.codex/
+
+# zloop runtime state (this repo may dogfood itself)
+.zloop/*.lock
+.zloop/*.tmp
+
+# Rust
+target/

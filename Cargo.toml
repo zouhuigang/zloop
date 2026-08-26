@@ -1,0 +1,29 @@
+[package]
+name = "zloop"
+version = "0.2.0"
+edition = "2021"
+description = "Minimal goal-loop scheduler for Claude Code and Codex: one JSON file, a dozen commands, zero runtime deps."
+license = "MIT"
+default-run = "zloop"
+
+[[bin]]
+name = "zloop"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+chrono = { version = "0.4", features = ["clock"] }
+anyhow = "1"
+fd-lock = "4"
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
