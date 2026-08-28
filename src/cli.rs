@@ -760,67 +760,129 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         c.bold(&format!("{pct}%")),
         // Every recorded round, failures included — `tick::current_round` counts only the
         // productive ones, which reads as "0 轮" right after three failures.
-        c.dim(&format!("{finished}/{total} 条待办 · 跑了 {} 轮{money}", st.ticks.iter().filter(|t| t.outcome != "noop").count()))
+        // 「几条待办」交给下面的步骤清单说，标题只留轮数和花费。
+        c.dim(&format!("跑了 {} 轮{money}", st.ticks.iter().filter(|t| t.outcome != "noop").count()))
     );
-    println!("  {}", style::truncate(&st.goal.text, text));
+    println!("  {}    {}", c.dim("目标"), style::truncate(&st.goal.text, text.saturating_sub(8)));
 
-    // ---- open todos; ▶ is the one `zloop next` would hand out ----
-    let open = todo::open_ordered(&st);
-    if !open.is_empty() {
-        println!();
+    // ---- 步骤清单：做过的、正在做的、还没做的，一张勾选表 ----
+    // 顺序用 state.todos 的原始顺序（= 步骤顺序，也对应 t1/t2/t3），执行顺序由「下一个」标出来，
+    // 因为 `next` 是按优先级挑的，不一定是清单的下一行。
+    const MAX_ROWS: usize = 15;
+    if !st.todos.is_empty() {
         let next_id = d.todo.as_ref().map(|t| t.id.clone());
-        for i in open {
-            let t = &st.todos[i];
-            let is_next = next_id.as_deref() == Some(t.id.as_str());
-            let waiting_on_you = t.status == "blocked" && t.blocked_by.iter().any(|b| b == todo::USER);
+        let step_of: std::collections::HashMap<&str, usize> =
+            st.todos.iter().enumerate().map(|(i, t)| (t.id.as_str(), i + 1)).collect();
+
+        struct Row {
+            n: usize,
+            text: String,
+            /// 右栏：id（做完的不用）+ 图标 + 状态词
+            meta: String,
+            finished: bool,
+            paint: u8, // 0 dim, 1 done, 2 active, 3 wait
+            sub: Vec<(String, String, u8)>, // (前缀, 内容, paint)
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        for (i, t) in st.todos.iter().enumerate() {
             let running_now = st.in_progress.as_ref().map(|ip| ip.todo.as_str()) == Some(t.id.as_str());
-            // 光有符号猜不出是"排队"还是"没人管"，所以每条都带一个状态词。
-            let (marker, word) = if running_now {
-                ("🔄", "执行中".to_string())
+            let waiting_on_you = t.blocked_by.iter().any(|b| b == todo::USER);
+            // 和 todo::is_executable 同一口径：依赖还没 done 就算被挡着，与 status 是 open 还是 blocked 无关。
+            let pending_dep = t.blocked_by.iter().find(|dep| {
+                dep.as_str() != todo::USER && !st.todos.iter().any(|x| &x.id == *dep && x.status == "done")
+            });
+            let is_next = next_id.as_deref() == Some(t.id.as_str());
+            let (icon, word, paint) = if t.status == "done" {
+                ("✅", String::new(), 1)
+            } else if t.status == "deferred" {
+                ("⏭", "已延后".into(), 0)
+            } else if running_now {
+                ("🔄", "执行中".into(), 2)
             } else if waiting_on_you {
-                ("!", "等你回话".to_string())
-            } else if t.status == "blocked" {
-                let dep = t.blocked_by.iter().find(|b| b.as_str() != todo::USER);
-                ("⏳", dep.map(|d| format!("等 {d}")).unwrap_or_else(|| "等依赖".into()))
+                ("!", "等你回话".into(), 3)
+            } else if let Some(dep) = pending_dep {
+                let label = match step_of.get(dep.as_str()) {
+                    Some(n) => format!("等第 {n} 步"),
+                    None => format!("等 {dep}"),
+                };
+                ("⏳", label, 0)
             } else if is_next {
-                ("▶", "下一个".to_string())
+                ("▶", "下一个".into(), 2)
             } else {
-                ("○", "排队中".to_string())
+                ("○", "排队中".into(), 0)
             };
-            let head = format!(
-                "{}{} {}{}",
-                marker,
-                " ".repeat(2usize.saturating_sub(style::width(marker))),
-                word,
-                " ".repeat(9usize.saturating_sub(style::width(&word)))
-            );
-            let line = style::truncate(&fmt_todo(t), text.saturating_sub(style::width(&head)));
-            let (head, line) = if running_now {
-                (c.cyan(&head), c.bold(&line))
-            } else if waiting_on_you {
-                (c.yellow(&head), c.yellow(&line))
-            } else if t.status == "blocked" {
-                (c.dim(&head), c.dim(&line))
-            } else if is_next {
-                (c.cyan(&head), c.bold(&line))
-            } else {
-                (c.dim(&head), c.dim(&line))
+            // 做完的那些不需要 id——需要敲命令的才需要。
+            let meta = match (t.status.as_str(), word.is_empty()) {
+                ("done", _) => icon.to_string(),
+                (_, true) => format!("{} {icon}", t.id),
+                (_, false) => format!("{} {icon} {word}", t.id),
             };
-            println!("  {head}{line}");
-            if t.status == "blocked" && !t.note.is_empty() {
-                println!("     {}", c.yellow(&format!("↳ {}", style::truncate(&t.note, text.saturating_sub(5)))));
+            let mut sub = Vec::new();
+            if waiting_on_you && !t.note.is_empty() {
+                sub.push(("↳".into(), t.note.clone(), 3));
             }
-            // 每条挡住的 todo 都自带解锁命令，不用从页脚那一条去推别的 id。
             if waiting_on_you {
-                println!("     {} {}", c.dim("答完敲"), c.bold(&format!("zloop edit {} --status open", t.id)));
+                sub.push(("答完敲".into(), format!("zloop edit {} --status open", t.id), 4));
             }
             if let Some(a) = &t.acceptance {
-                println!("     {}", c.dim(&format!("验收：{}", style::truncate(a, text.saturating_sub(7)))));
+                if t.status != "done" {
+                    sub.push(("验收：".into(), a.clone(), 0));
+                }
+            }
+            rows.push(Row { n: i + 1, text: t.text.clone(), meta, finished: todo::is_terminal(&t.status), paint, sub });
+        }
+
+        // 太长就折叠：没做完的全留着，前面垫 3 步做过的当上下文，其余收成一行。
+        let first_open = rows.iter().position(|r| !r.finished).unwrap_or(rows.len());
+        let dropped = if rows.len() <= MAX_ROWS { 0 } else { first_open.saturating_sub(3).min(rows.len().saturating_sub(1)) };
+        let mut shown = &rows[dropped..];
+        let mut tail = 0;
+        if shown.len() > MAX_ROWS {
+            tail = shown.len() - MAX_ROWS;
+            shown = &shown[..MAX_ROWS];
+        }
+        let meta_w = shown.iter().map(|r| style::width(&r.meta)).max().unwrap_or(0);
+        let num_w = shown.iter().map(|r| r.n.to_string().len()).max().unwrap_or(1);
+        let longest = shown.iter().map(|r| style::width(&r.text)).max().unwrap_or(0);
+        // 文本列按实际最长的一条收窄（省掉一大片空白），和右栏之间留 4 列。
+        let gap = 4;
+        let text_w = text.saturating_sub(num_w + 2 + meta_w + gap).max(12).min(longest.max(12));
+
+        println!();
+        println!(
+            "  {}{}{}",
+            c.dim("步骤"),
+            " ".repeat(4),
+            c.bold(&format!("{finished}/{total} 完成"))
+        );
+        if dropped > 0 {
+            println!("  {}", c.dim(&format!("…  前 {dropped} 步已收起 · zloop log 里有它们的记录")));
+        }
+        for r in shown {
+            let body = style::truncate(&r.text, text_w);
+            let pad = " ".repeat(text_w.saturating_sub(style::width(&body)) + gap + meta_w.saturating_sub(style::width(&r.meta)));
+            let (body, meta) = match r.paint {
+                1 => (c.dim(&body), c.green(&r.meta)),
+                2 => (c.bold(&body), c.cyan(&r.meta)),
+                3 => (c.yellow(&body), c.yellow(&r.meta)),
+                _ => (c.dim(&body), c.dim(&r.meta)),
+            };
+            println!("  {:>num_w$}. {body}{pad}{meta}", r.n);
+            for (prefix, content, paint) in &r.sub {
+                let indent = " ".repeat(num_w + 4);
+                let room = text.saturating_sub(num_w + 4 + style::width(prefix) + 1);
+                // 命令不裁：半条命令比折行更糟。
+                let content = if *paint == 4 { content.clone() } else { style::truncate(content, room) };
+                let line = match paint {
+                    3 => format!("{} {}", c.yellow(prefix), c.yellow(&content)),
+                    4 => format!("{} {}", c.dim(prefix), c.bold(&content)),
+                    _ => c.dim(&format!("{prefix}{content}")),
+                };
+                println!("  {indent}{line}");
             }
         }
-        let hidden = st.todos.iter().filter(|t| todo::is_terminal(&t.status)).count();
-        if hidden > 0 {
-            println!("  {}", c.dim(&format!("… 另有 {hidden} 条已完成/已延后 · zloop log 看它们的记录")));
+        if tail > 0 {
+            println!("  {}", c.dim(&format!("…  后面还有 {tail} 步 · zloop status --json 看全部")));
         }
     }
 

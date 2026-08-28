@@ -581,10 +581,12 @@ fn status_headline_names_the_state_and_colour_is_opt_in() {
     // 就绪：有活可做
     let o = zloop(d, &["status"], None, &[]);
     assert!(o.out.contains("就绪"), "{}", o.out);
-    assert!(o.out.contains("0/2"), "counts in the headline: {}", o.out);
     assert!(o.out.contains("░"), "progress bar: {}", o.out);
-    assert!(o.out.contains("下一个") && o.out.contains("t1 [P0]"), "每条待办自己说清是什么状态: {}", o.out);
-    assert!(o.out.contains("排队中"), "排队的也要说: {}", o.out);
+    assert!(o.out.contains("目标") && o.out.contains("把启动时间降到 1 秒"), "目标单独一行: {}", o.out);
+    // 步骤清单：编号 + 文本 + 右栏（id + 图标 + 状态词）
+    assert!(o.out.contains("步骤") && o.out.contains("0/2 完成"), "步骤进度: {}", o.out);
+    assert!(o.out.contains("1. a") && o.out.contains("2. b"), "每一步都编号列出: {}", o.out);
+    assert!(o.out.contains("t1 ▶ 下一个") && o.out.contains("t2 ○ 排队中"), "每一步自己说清状态: {}", o.out);
     assert!(o.out.contains("开跑") && o.out.contains("zloop start"), "next action spelled out: {}", o.out);
     assert!(!o.out.contains('\u{1b}'), "piped output carries no escape codes: {:?}", o.out);
 
@@ -627,7 +629,10 @@ fn status_headline_names_the_state_and_colour_is_opt_in() {
     zloop(d, &["done", "t2", "--note", "y", "--approach", "怎么做的"], None, &[]);
     let o = zloop(d, &["status"], None, &[]);
     assert!(o.out.contains("完成"), "{}", o.out);
-    assert!(o.out.contains("2/2") && o.out.contains("100%"), "{}", o.out);
+    assert!(o.out.contains("2/2 完成") && o.out.contains("100%"), "{}", o.out);
+    // 做完的步骤要留在清单上打勾——「做过哪几步」是复盘时最想看的
+    assert_eq!(o.out.matches('✅').count(), 3, "标题一个 ✅ + 两步各一个: {}", o.out);
+    assert!(o.out.contains("1. a") && o.out.contains("2. b"), "完成后清单还在: {}", o.out);
     assert!(o.out.contains("zloop plan --add") && o.out.contains("zloop init --force"), "what to do next: {}", o.out);
     assert!(o.out.contains("zloop doc --all"), "and how to collect the documents: {}", o.out);
     assert!(!o.out.contains('░'), "a finished bar is entirely full: {}", o.out);
