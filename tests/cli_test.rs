@@ -302,7 +302,7 @@ fn phase_tracks_the_round() {
     let ip = st.in_progress.as_ref().unwrap();
     assert_eq!((ip.todo.as_str(), ip.via.as_str(), ip.host.as_deref(), ip.session.as_deref()), ("t1", "next", Some("claude"), Some("sess-p")));
     let o = zloop(d, &["status"], None, &[]);
-    assert!(o.out.contains("执行中") && o.out.contains("t1 · 第 1 轮") && o.out.contains("claude"), "{}", o.out);
+    assert!(o.out.contains("执行中") && o.out.contains("claude 正在做 t1") && o.out.contains("第 1 轮"), "{}", o.out);
     assert!(zloop(d, &["context"], None, &[]).out.contains("阶段：executing t1"));
     assert!(zloop(d, &["context"], None, &[]).out.contains("host claude · via next"));
     zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
@@ -321,12 +321,12 @@ fn phase_tracks_the_round() {
     assert!(zloop(d, &["context"], None, &[]).out.contains("runner sleeping until"));
     // 此刻所有 todo 都在等人回话，所以标题让位给「等你决定」，休眠时间退到明细行。
     let o = zloop(d, &["status"], None, &[]);
-    assert!(o.out.contains("等你决定") && o.out.contains("醒来"), "{}", o.out);
+    assert!(o.out.contains("等你决定") && o.out.contains("睡到"), "{}", o.out);
     zloop(d, &["edit", "t2", "--status", "open"], None, &[]);
     assert!(zloop(d, &["status"], None, &[]).out.contains("休眠中"), "有活可干时才轮到休眠当标题");
     fs::write(j.join("journal.jsonl"), "{\"event\":\"begin\",\"round\":4,\"todo\":\"t2\",\"host\":\"claude\",\"at\":\"2026-08-27T00:00:00+08:00\"}\n").unwrap();
     assert!(zloop(d, &["context"], None, &[]).out.contains("runner round 4 on t2"));
-    assert!(zloop(d, &["status"], None, &[]).out.contains("t2 · 第 4 轮"), "{}", zloop(d, &["status"], None, &[]).out);
+    assert!(zloop(d, &["status"], None, &[]).out.contains("第 4 轮做 t2"), "{}", zloop(d, &["status"], None, &[]).out);
 }
 
 #[test]
@@ -379,7 +379,7 @@ fn status_shows_spend_and_notify_cmd_receives_events() {
     st.policy.notify_cmd = Some(format!("cat >> {}", d.join("notify.log").display()));
     state::save(&p, &mut st).unwrap();
     let o = zloop(d, &["status"], None, &[]);
-    assert!(o.out.contains("$0.25/2.00"), "{}", o.out);
+    assert!(o.out.contains("花了 $0.25（上限 $2.00）"), "{}", o.out);
     assert!(zloop(d, &["context"], None, &[]).out.contains("已花费：$0.25 / 上限 $2.00"));
     let o = zloop(d, &["notify", "hello there"], None, &[]);
     assert_eq!(o.code, 0, "{}", o.err);
@@ -583,7 +583,8 @@ fn status_headline_names_the_state_and_colour_is_opt_in() {
     assert!(o.out.contains("就绪"), "{}", o.out);
     assert!(o.out.contains("0/2"), "counts in the headline: {}", o.out);
     assert!(o.out.contains("░"), "progress bar: {}", o.out);
-    assert!(o.out.contains("▶ t1 [P0]"), "the next todo is marked: {}", o.out);
+    assert!(o.out.contains("下一个") && o.out.contains("t1 [P0]"), "每条待办自己说清是什么状态: {}", o.out);
+    assert!(o.out.contains("排队中"), "排队的也要说: {}", o.out);
     assert!(o.out.contains("开跑") && o.out.contains("zloop start"), "next action spelled out: {}", o.out);
     assert!(!o.out.contains('\u{1b}'), "piped output carries no escape codes: {:?}", o.out);
 
@@ -609,7 +610,8 @@ fn status_headline_names_the_state_and_colour_is_opt_in() {
     let o = zloop(d, &["status"], None, &[]);
     assert!(o.out.contains("等你决定"), "{}", o.out);
     assert!(o.out.contains("↳ 用哪个库？"), "the blocking question is shown inline: {}", o.out);
-    assert!(o.out.contains("zloop edit t1 --status open"), "and how to unblock: {}", o.out);
+    assert!(o.out.contains("等你回话") && o.out.contains("答完敲 zloop edit t1 --status open"), "解锁命令贴在那条 todo 自己下面: {}", o.out);
+    assert!(o.out.contains("答完敲 zloop edit t2 --status open"), "每条被挡住的都有自己的命令: {}", o.out);
     // 被 --block 的轮次不欠文档
     assert!(!o.out.contains("只有结果记录"), "block rounds owe no document: {}", o.out);
 

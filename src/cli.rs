@@ -741,8 +741,8 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     let pct = if total > 0 { finished * 100 / total } else { 0 };
     let spent = tick::spent_usd(&st.ticks);
     let money = if spent > 0.0 {
-        let cap = if st.policy.max_total_usd > 0.0 { format!("/{:.2}", st.policy.max_total_usd) } else { String::new() };
-        format!(" · ${spent:.2}{cap}")
+        let cap = if st.policy.max_total_usd > 0.0 { format!("（上限 ${:.2}）", st.policy.max_total_usd) } else { String::new() };
+        format!(" · 花了 ${spent:.2}{cap}")
     } else {
         String::new()
     };
@@ -760,7 +760,7 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         c.bold(&format!("{pct}%")),
         // Every recorded round, failures included — `tick::current_round` counts only the
         // productive ones, which reads as "0 轮" right after three failures.
-        c.dim(&format!("{finished}/{total} todo · {} 轮{money}", st.ticks.iter().filter(|t| t.outcome != "noop").count()))
+        c.dim(&format!("{finished}/{total} 条待办 · 跑了 {} 轮{money}", st.ticks.iter().filter(|t| t.outcome != "noop").count()))
     );
     println!("  {}", style::truncate(&st.goal.text, text));
 
@@ -772,35 +772,86 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         for i in open {
             let t = &st.todos[i];
             let is_next = next_id.as_deref() == Some(t.id.as_str());
-            let line = style::truncate(&fmt_todo(t), text.saturating_sub(2));
-            let (marker, body) = match t.status.as_str() {
-                "blocked" if t.blocked_by.iter().any(|b| b == todo::USER) => (c.yellow("!"), c.yellow(&line)),
-                "blocked" => (c.dim("⏳"), c.dim(&line)),
-                _ if is_next => (c.cyan("▶"), c.bold(&line)),
-                _ => (c.dim("○"), c.dim(&line)),
+            let waiting_on_you = t.status == "blocked" && t.blocked_by.iter().any(|b| b == todo::USER);
+            let running_now = st.in_progress.as_ref().map(|ip| ip.todo.as_str()) == Some(t.id.as_str());
+            // 光有符号猜不出是"排队"还是"没人管"，所以每条都带一个状态词。
+            let (marker, word) = if running_now {
+                ("🔄", "执行中".to_string())
+            } else if waiting_on_you {
+                ("!", "等你回话".to_string())
+            } else if t.status == "blocked" {
+                let dep = t.blocked_by.iter().find(|b| b.as_str() != todo::USER);
+                ("⏳", dep.map(|d| format!("等 {d}")).unwrap_or_else(|| "等依赖".into()))
+            } else if is_next {
+                ("▶", "下一个".to_string())
+            } else {
+                ("○", "排队中".to_string())
             };
-            println!("  {marker} {body}");
+            let head = format!(
+                "{}{} {}{}",
+                marker,
+                " ".repeat(2usize.saturating_sub(style::width(marker))),
+                word,
+                " ".repeat(9usize.saturating_sub(style::width(&word)))
+            );
+            let line = style::truncate(&fmt_todo(t), text.saturating_sub(style::width(&head)));
+            let (head, line) = if running_now {
+                (c.cyan(&head), c.bold(&line))
+            } else if waiting_on_you {
+                (c.yellow(&head), c.yellow(&line))
+            } else if t.status == "blocked" {
+                (c.dim(&head), c.dim(&line))
+            } else if is_next {
+                (c.cyan(&head), c.bold(&line))
+            } else {
+                (c.dim(&head), c.dim(&line))
+            };
+            println!("  {head}{line}");
             if t.status == "blocked" && !t.note.is_empty() {
-                println!("    {}", c.yellow(&format!("↳ {}", style::truncate(&t.note, text.saturating_sub(4)))));
+                println!("     {}", c.yellow(&format!("↳ {}", style::truncate(&t.note, text.saturating_sub(5)))));
+            }
+            // 每条挡住的 todo 都自带解锁命令，不用从页脚那一条去推别的 id。
+            if waiting_on_you {
+                println!("     {} {}", c.dim("答完敲"), c.bold(&format!("zloop edit {} --status open", t.id)));
             }
             if let Some(a) = &t.acceptance {
-                println!("    {}", c.dim(&format!("验收：{}", style::truncate(a, text.saturating_sub(6)))));
+                println!("     {}", c.dim(&format!("验收：{}", style::truncate(a, text.saturating_sub(7)))));
             }
         }
         let hidden = st.todos.iter().filter(|t| todo::is_terminal(&t.status)).count();
         if hidden > 0 {
-            println!("  {}", c.dim(&format!("… 另有 {hidden} 条已完成/已延后")));
+            println!("  {}", c.dim(&format!("… 另有 {hidden} 条已完成/已延后 · zloop log 看它们的记录")));
         }
     }
 
     // ---- facts worth a line, i.e. the ones the headline does not already state ----
     let mut rows: Vec<(&str, String)> = Vec::new();
-    if !ph.detail.is_empty() {
-        rows.push(("阶段", style::truncate(&ph.detail, val)));
-    }
-    if let Some(pid) = running {
-        rows.push(("后台", c.dim(&style::truncate(&format!("pid {pid} · 日志 .zloop/runner/console.log"), val))));
-    }
+    // 「现在在哪一步」是用户最想要的一行，所以它常驻：phase 没有新消息时，
+    // 就由状态本身兜底成一句人话，而不是让这一行消失。
+    let stage = if !ph.detail.is_empty() {
+        ph.detail.clone()
+    } else if st.goal.status == "done" || d.reason == "all_done" {
+        format!("{total} 条待办全部完成，目标结束")
+    } else if st.goal.status == "paused" {
+        "你按了暂停，待办原地保留".into()
+    } else if d.should_run {
+        match (running, d.todo.as_ref()) {
+            (Some(_), Some(t)) => format!("runner 在跑，下一轮做 {}", t.id),
+            (None, Some(t)) => format!("没人在跑 · 下一条是 {}", t.id),
+            _ => "等着开跑".into(),
+        }
+    } else {
+        phase::reason_zh(&d.reason)
+    };
+    rows.push(("阶段", style::truncate(&stage, val)));
+    // 后台也常驻：不说"没在跑"，就分不清是没人跑还是你忘了看。
+    rows.push((
+        "后台",
+        match running {
+            Some(pid) => c.dim(&style::truncate(&format!("runner 在跑（pid {pid}）· 日志 .zloop/runner/console.log"), val)),
+            None => c.dim("没有 runner 在跑"),
+        },
+    ));
     if let Some((s, warn)) = crate::awake::brief() {
         let s = style::truncate(&s, val.saturating_sub(2));
         rows.push(("睡眠", if warn { c.yellow(&format!("⚠ {s}")) } else { c.dim(&s) }));
@@ -817,12 +868,6 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
 
     // ---- and what you can type next ----
     let mut acts: Vec<(&str, String)> = Vec::new();
-    let blocked_id = st
-        .todos
-        .iter()
-        .find(|t| t.status == "blocked" && t.blocked_by.iter().any(|b| b == todo::USER))
-        .map(|t| t.id.clone())
-        .unwrap_or_else(|| "<id>".into());
     if st.goal.status == "paused" {
         acts.push(("继续", "zloop resume".into()));
     } else if st.goal.status == "done" || d.reason == "all_done" {
@@ -832,12 +877,10 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             acts.push(("出文档", "zloop doc --all".into()));
         }
     } else {
-        // A question waiting on you is worth answering even when the loop has other work to do.
-        if blocked_id != "<id>" {
-            acts.push(("解锁", format!("zloop edit {blocked_id} --status open")));
-        }
+        // 解锁命令已经贴在被挡住的那条 todo 下面了，页脚不再重复。
         match d.reason.as_str() {
             "blocked" => acts.push(("查依赖", "zloop status --json".into())),
+            "throttled" => acts.push(("放宽", "改 .zloop/state.json 的 policy.max_runs（0 = 不限）".into())),
             "fail_streak" => {
                 acts.push(("看失败", "zloop log".into()));
                 acts.push(("重跑", "zloop start".into()));
@@ -851,8 +894,16 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
                 acts.push(("看日志", "zloop log".into()));
                 acts.push(("停止", "zloop stop".into()));
             }
-            // While a session already holds the todo, "start another runner" is not the advice.
-            None if d.should_run && ph.kind != "executing" => acts.push(("开跑", "zloop start".into())),
+            // 有会话正拿着这条 todo：该敲的不是"再开一个 runner"，而是把这一轮写回去。
+            None if ph.kind == "executing" => {
+                if let Some(ip) = &st.in_progress {
+                    acts.push(("写回", format!("zloop done {} --note \"<一句话结果>\" --approach \"<怎么做的>\"", ip.todo)));
+                }
+            }
+            // 休眠说明有 runner 在跑，只是它是前台 `zloop run`（不写 pid 文件）——
+            // 这时劝人再开一个是错的，给"看日志"。
+            None if ph.kind == "sleeping" => acts.push(("看日志", "zloop log".into())),
+            None if d.should_run => acts.push(("开跑", "zloop start".into())),
             None => {}
         }
     }

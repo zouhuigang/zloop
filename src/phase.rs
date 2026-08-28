@@ -50,6 +50,15 @@ fn last_journal_event(root: &Path) -> Option<Value> {
 }
 
 /// Decision reasons read as jargon in a Chinese dashboard line; `zloop context` keeps the raw word.
+/// 90 分钟以上就别让人自己换算了。
+pub fn human_minutes(m: u32) -> String {
+    match m {
+        0..=89 => format!("{m} 分钟"),
+        90..=1439 => format!("约 {} 小时", (m + 30) / 60),
+        _ => format!("约 {} 天", (m + 720) / 1440),
+    }
+}
+
 pub fn reason_zh(r: &str) -> String {
     match r {
         "user_gate" => "等你回答".into(),
@@ -91,11 +100,11 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
                 stale
             ),
             detail: format!(
-                "{} · 第 {} 轮 · 已跑 {} · {}{}",
+                "{} 正在做 {} · 第 {} 轮 · 已跑 {}{}",
+                host,
                 ip.todo,
                 ip.round,
                 elapsed(&ip.started_at, now),
-                host,
                 stale_short
             ),
         };
@@ -116,7 +125,7 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
                                 left % 60,
                                 ev.get("reason").and_then(Value::as_str).unwrap_or("ready")
                             ),
-                            detail: format!("{} 醒来 · 还有 {}m{:02}s", hhmm(until), left / 60, left % 60),
+                            detail: format!("两轮之间的休息 · 睡到 {} 醒，还有 {}m{:02}s", hhmm(until), left / 60, left % 60),
                         };
                     }
                 }
@@ -135,7 +144,7 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
                     hhmm(at),
                     elapsed(at, now)
                 ),
-                detail: format!("{todo} · 第 {round} 轮 · 已跑 {} · ⚠ 没有结束记录", elapsed(at, now)),
+                detail: format!("第 {round} 轮做 {todo} · 已跑 {} · ⚠ 没有结束记录，进程可能死了", elapsed(at, now)),
             };
         }
     }
@@ -156,13 +165,13 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
             // "已完成 / 已暂停" is already the headline word; any other reason is news.
             detail: match d.reason.as_str() {
                 "all_done" | "done" | "paused" => String::new(),
-                other => reason_zh(other),
+                other => format!("{}，已停下等你处理", reason_zh(other)),
             },
         },
         Some(m) => Phase {
             kind: "waiting",
             summary: format!("waiting ({}) · retry in {} min", d.reason, m),
-            detail: format!("{} · {m} 分钟后重试", reason_zh(&d.reason)),
+            detail: format!("{} · {}后重试", reason_zh(&d.reason), human_minutes(m)),
         },
     }
 }

@@ -213,7 +213,7 @@ echo '{"session_id":"bg","is_error":false,"result":"ok"}'"#,
     let pid_file = d.join(".zloop/runner/pid");
     assert!(pid_file.exists());
     let (_, out, _) = run(&d, &["status"], &[]);
-    assert!(out.contains("后台") && out.contains("pid ") && out.contains(".zloop/runner/console.log"), "{out}");
+    assert!(out.contains("runner 在跑（pid ") && out.contains(".zloop/runner/console.log"), "{out}");
     // starting twice is refused
     let (code, _, err) = run(&d, &["start", "--fast"], &[("PATH", &with_fake_path(&fake))]);
     assert_eq!(code, 2);
@@ -228,9 +228,9 @@ echo '{"session_id":"bg","is_error":false,"result":"ok"}'"#,
     assert_eq!(code, 0);
     assert!(out.contains("stopped runner (pid"), "{out}");
     assert!(!pid_file.exists());
-    // 停了以后就没有「后台」这一行了：status 只说需要你知道的事。
+    // 停了以后「后台」这一行还在，但明说没人在跑——分不清"没人跑"和"忘了看"才是问题。
     let (_, out, _) = run(&d, &["status"], &[]);
-    assert!(!out.contains("后台"), "{out}");
+    assert!(out.contains("没有 runner 在跑"), "{out}");
     let st = state::load(&state::state_path(&d)).unwrap();
     assert!(st.ticks.iter().any(|t| t.outcome == "done"), "background runner made progress: {:?}", st.ticks);
     assert!(fs::read_to_string(d.join(".zloop/runner/console.log")).unwrap().contains("runner: round 1"));
