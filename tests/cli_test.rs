@@ -81,8 +81,8 @@ fn end_to_end() {
     assert!(o.out.contains("t4 [P2] open"));
 
     let o = zloop(d, &["status"], None, &[]);
-    assert!(o.out.contains("goal (active)"));
-    assert!(o.out.contains("round 1"));
+    assert!(o.out.contains("Ship zloop v0"), "{}", o.out);
+    assert!(o.out.contains("1 轮"), "{}", o.out);
 
     let o = zloop(d, &["status", "--md"], None, &[]);
     assert!(o.out.starts_with("# zloop"));
@@ -289,9 +289,9 @@ fn phase_tracks_the_round() {
     zloop(d, &["init", "g"], None, &[]);
     zloop(d, &["plan", "--add", "[P0] a", "--add", "[P1] b"], None, &[]);
     let o = zloop(d, &["status"], None, &[]);
-    assert!(o.out.contains("phase: idle · next would run t1"), "{}", o.out);
+    assert!(o.out.contains("idle · next would run t1"), "{}", o.out);
     zloop(d, &["next", "--peek"], None, &[]);
-    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: idle"));
+    assert!(zloop(d, &["status"], None, &[]).out.contains("idle · next would run"));
     let o = zloop(d, &["next", "--json"], None, &[("CLAUDE_CODE_SESSION_ID", "sess-p")]);
     let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
     assert!(v["phase"].as_str().unwrap().starts_with("executing t1 · round 1"), "{}", v["phase"]);
@@ -300,20 +300,20 @@ fn phase_tracks_the_round() {
     let ip = st.in_progress.as_ref().unwrap();
     assert_eq!((ip.todo.as_str(), ip.via.as_str(), ip.host.as_deref(), ip.session.as_deref()), ("t1", "next", Some("claude"), Some("sess-p")));
     let o = zloop(d, &["status"], None, &[]);
-    assert!(o.out.contains("phase: executing t1") && o.out.contains("host claude · via next"), "{}", o.out);
+    assert!(o.out.contains("executing t1") && o.out.contains("host claude · via next"), "{}", o.out);
     assert!(zloop(d, &["context"], None, &[]).out.contains("阶段：executing t1"));
     zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
     assert!(state::load(&state::state_path(d)).unwrap().in_progress.is_none());
-    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: idle · next would run t2"));
+    assert!(zloop(d, &["status"], None, &[]).out.contains("idle · next would run t2"));
     zloop(d, &["done", "t2", "--block", "?"], None, &[]);
-    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: waiting (user_gate) · retry in 10 min"));
+    assert!(zloop(d, &["status"], None, &[]).out.contains("waiting (user_gate) · retry in 10 min"));
     for _ in 0..3 { zloop(d, &["next"], None, &[]); }
-    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: stopped (user_gate)"));
+    assert!(zloop(d, &["status"], None, &[]).out.contains("stopped (user_gate)"));
     let j = d.join(".zloop").join("runner");
     fs::create_dir_all(&j).unwrap();
     let until = (chrono::Local::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
     fs::write(j.join("journal.jsonl"), format!("{{\"event\":\"sleep\",\"until\":\"{until}\",\"reason\":\"ready\",\"at\":\"x\"}}\n")).unwrap();
-    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: runner sleeping until"));
+    assert!(zloop(d, &["status"], None, &[]).out.contains("runner sleeping until"));
     fs::write(j.join("journal.jsonl"), "{\"event\":\"begin\",\"round\":4,\"todo\":\"t2\",\"host\":\"claude\",\"at\":\"2026-08-27T00:00:00+08:00\"}\n").unwrap();
     assert!(zloop(d, &["status"], None, &[]).out.contains("runner round 4 on t2"));
 }
@@ -391,10 +391,10 @@ fn remember_pause_resume_and_compact() {
     // pause / resume
     let o = zloop(d, &["pause"], None, &[]);
     assert!(o.out.contains("paused"));
-    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: stopped (paused)"));
+    assert!(zloop(d, &["status"], None, &[]).out.contains("stopped (paused)"));
     let o = zloop(d, &["resume"], None, &[]);
     assert!(o.out.contains("active"));
-    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: idle"));
+    assert!(zloop(d, &["status"], None, &[]).out.contains("idle · next would run"));
     // compact: nothing old yet
     let o = zloop(d, &["compact"], None, &[]);
     assert!(o.out.contains("nothing to compact"));
@@ -485,7 +485,7 @@ fn no_doc_escape_hatch_is_marked_everywhere() {
     assert!(o.out.contains("⚠ .zloop/log/"), "{}", o.out);
     assert!(o.out.contains("只有结果记录"), "{}", o.out);
     let o = zloop(d, &["status"], None, &[]);
-    assert!(o.out.contains("docs: 1 轮只有结果记录"), "{}", o.out);
+    assert!(o.out.contains("1 轮只有结果记录"), "{}", o.out);
     // policy off → plain done works again
     let p = state::state_path(d);
     let mut st = state::load(&p).unwrap();
@@ -554,4 +554,56 @@ fn changed_files_are_captured_from_git() {
     assert!(body.contains("keep.txt"), "modified file listed: {body}");
     assert!(body.contains("brand-new.rs (new)"), "untracked file listed: {body}");
     assert!(!body.contains(".zloop/"), "zloop's own state must not be listed: {body}");
+}
+
+// ---------- status 的观感 ----------
+
+#[test]
+fn status_headline_names_the_state_and_colour_is_opt_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "把启动时间降到 1 秒"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a", "--add", "[P1] b"], None, &[]);
+
+    // 就绪：有活可做
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("就绪"), "{}", o.out);
+    assert!(o.out.contains("0/2"), "counts in the headline: {}", o.out);
+    assert!(o.out.contains("░"), "progress bar: {}", o.out);
+    assert!(o.out.contains("下一步") && o.out.contains("t1 [P0]"), "next action spelled out: {}", o.out);
+    assert!(!o.out.contains('\u{1b}'), "piped output carries no escape codes: {:?}", o.out);
+
+    // 管道无色，CLICOLOR_FORCE 有色，--no-color 强制无色
+    let forced = zloop(d, &["status"], None, &[("CLICOLOR_FORCE", "1")]);
+    assert!(forced.out.contains('\u{1b}'), "CLICOLOR_FORCE=1 colourises: {:?}", forced.out);
+    let off = zloop(d, &["status", "--no-color"], None, &[("CLICOLOR_FORCE", "1")]);
+    assert!(!off.out.contains('\u{1b}'), "--no-color wins: {:?}", off.out);
+    let no_color_env = zloop(d, &["status"], None, &[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")]);
+    assert!(!no_color_env.out.contains('\u{1b}'), "NO_COLOR wins: {:?}", no_color_env.out);
+
+    // 等你决定
+    zloop(d, &["done", "t1", "--block", "用哪个库？"], None, &[]);
+    zloop(d, &["done", "t2", "--block", "要上线吗？"], None, &[]);
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("等你决定"), "{}", o.out);
+    assert!(o.out.contains("↳ 用哪个库？"), "the blocking question is shown inline: {}", o.out);
+    assert!(o.out.contains("zloop edit <id> --status open"), "and how to unblock: {}", o.out);
+    // 被 --block 的轮次不欠文档
+    assert!(!o.out.contains("只有结果记录"), "block rounds owe no document: {}", o.out);
+
+    // 已暂停
+    zloop(d, &["pause"], None, &[]);
+    assert!(zloop(d, &["status"], None, &[]).out.contains("已暂停"));
+    zloop(d, &["resume"], None, &[]);
+
+    // 完成
+    zloop(d, &["edit", "t1", "--status", "open"], None, &[]);
+    zloop(d, &["edit", "t2", "--status", "open"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "x", "--approach", "怎么做的"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "y", "--approach", "怎么做的"], None, &[]);
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("完成"), "{}", o.out);
+    assert!(o.out.contains("2/2") && o.out.contains("100%"), "{}", o.out);
+    assert!(o.out.contains("zloop plan --add") && o.out.contains("zloop init --force"), "what to do next: {}", o.out);
+    assert!(!o.out.contains('░'), "a finished bar is entirely full: {}", o.out);
 }

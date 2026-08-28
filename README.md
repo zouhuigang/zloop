@@ -289,8 +289,41 @@ zloop status
 
 ### 6. 看进度：`status` / `log` / `sessions` / `context`
 
+`zloop status` 第一眼就告诉你现在是什么状态——图标 + 彩色状态词 + 进度条 + 下一步该干嘛：
+
+```
+ ✅  完成    5/5  todo · 5 轮
+   把 demo 服务的启动时间降到 1 秒以内
+   ████████████████████████ 100%
+
+   下一步 没有待办了 · 加活 zloop plan --add "[P0] …" · 换目标 zloop init --force "…"
+
+   阶段    stopped (done)
+   后台    not running · 用 `zloop start` 开始
+   睡眠    default (lid-close protection ready; a running runner will enable it)
+   会话    claude · claude --resume 36346c2a-…
+```
+
+状态词一共六种，颜色各不相同：
+
+| 状态词 | 什么情况 | 颜色 |
+|---|---|---|
+| ✅ 完成 | 所有 todo 做完了 | 绿 |
+| 🔄 执行中 | 某条 todo 正被执行（`next` 交出去了，还没写回） | 青 |
+| 💤 轮次间休眠 | 后台 runner 在两轮之间睡觉 | 蓝 |
+| ▶ 就绪 | 有活可做，等你 `/zloop` 或 `zloop start` | 蓝 |
+| ⏳ 等你决定 | 有 todo 被 `--block` 了，问题就印在它下面 | 黄 |
+| ⛔ 已停 | 连续失败 / 原地踏步 / 超预算 | 红 |
+| ⏸ 已暂停 | 你 `zloop pause` 了 | 黄 |
+
+待办列表里 `▶` 是下一条（加粗）、`!` 是等你决定（黄，下一行 `↳` 显示问题）、`○` 是排队中、`⏳` 是等依赖。
+
+**颜色什么时候开**：输出到终端时开；管道、重定向、`NO_COLOR=1`、`--no-color` 时自动关，纯文本可直接 `grep`。`CLICOLOR_FORCE=1` 可强制开（比如想 `less -R`）。
+
 ```bash
-zloop status                  # 目标、phase、runner 是否在跑、未完成 todo、最近会话
+zloop status                  # 上面这一屏
+zloop status --no-color       # 纯文本
+zloop status --json           # 整份状态，脚本用这个而不是 grep 人类视图
 zloop status --md             # Markdown 投影（含每条 tick 的 resume 命令和 log 链接），可重定向到文件给人看
 zloop log                     # 最近 20 轮留档（时间倒序）
 zloop log --todo t2           # 某条 todo 的每一轮
@@ -426,7 +459,7 @@ zloop plan --from-loopx .codex/goals/<goal>/ACTIVE_GOAL_STATE.md
 | `zloop done <id>` | **唯一写回**：记 tick、改 todo 状态、写技术文档、可插后继 | `--note`, `--outcome progress\|fail`, `--block Q`, `--next LINE`, `--evidence`, `--approach`, `--decision`（可重复）, `--pitfall`（可重复）, `--no-doc` |
 | `zloop doc [<id>]` | 把轮次日志合成一份技术文档 | `--all`, `--out FILE` |
 | `zloop edit <id>` | 改文本 / 状态 / 优先级 / 依赖 / 验收标准；任何 edit 都算"人介入"，重置 fail / noop 计数 | `--text`, `--status open\|blocked\|deferred\|done`, `--priority 0-4`, `--blocked-by t1,t2\|user\|''`, `--acceptance` |
-| `zloop status` | 目标、phase、runner、累计花费、待办、最近会话 | `--json`（整份状态）, `--md`（Markdown 投影） |
+| `zloop status` | 一屏看清：状态词 + 进度条 + 下一步 + 待办 + runner / 睡眠 / 花费 / 会话 | `--json`（整份状态）, `--md`（Markdown 投影）, `--no-color` |
 | `zloop pause` / `zloop resume` | 暂停 / 恢复目标（runner 下次检查即停 / 续） | — |
 | `zloop remember "<一句话>"` | 记一条以后用得上的经验到 `.zloop/NOTES.md`，最近 5 条出现在 `context` | — |
 | `zloop compact` | 把完成超过 N 天的 todo 和它们的 tick 归档到 `.zloop/archive/`，state.json 保持小 | `--keep-days 7` |
@@ -492,7 +525,7 @@ paused/done  >  all_done  >  user_gate / blocked  >  fail_streak  >  progress_st
 
 | 维度 | loopx 0.5.2 | zloop 0.2 |
 |---|---|---|
-| 源码文件 / 行数 | 819 / 317,699（Python） | 17 / ≈4,000（Rust） |
+| 源码文件 / 行数 | 819 / 317,699（Python） | 18 / ≈4,200（Rust） |
 | 顶层子命令 | 113（叶命令 307） | 21（+1 内部 `hook-stop`） |
 | 单命令最多 flag | 75（`todo`） | 10（`run`） |
 | `next` 一次调用 | 20–30 KB JSON，数百 ms | 10 个字段，12 ms |
@@ -513,7 +546,7 @@ paused/done  >  all_done  >  user_gate / blocked  >  fail_streak  >  progress_st
 ### 开发
 
 ```bash
-cargo test                       # 68 个用例（tick / todo / state / cli / runner，runner 用假宿主，约 2 分钟）
+cargo test                       # 69 个用例（tick / todo / state / cli / runner，runner 用假宿主，约 2 分钟）
 cargo build --release && install -m755 target/release/zloop ~/.local/bin/zloop
 ```
 

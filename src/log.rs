@@ -149,7 +149,7 @@ pub fn write(root: &Path, state: &State, tick: &Tick, todo: &Todo, doc: &Doc) ->
     if let Some(files) = &doc.changed_files {
         section(&mut body, "改动文件", &format!("```\n{}\n```", files.trim_end()));
     }
-    if !doc.is_complete() {
+    if !doc.is_complete() && tick.outcome == "done" {
         body.push_str("\n> ⚠ 这一轮没有留下实现思路（`--approach`），只有结果记录。\n");
     }
     fs::write(dir.join(&name), body)?;

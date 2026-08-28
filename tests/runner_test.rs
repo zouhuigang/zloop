@@ -213,7 +213,7 @@ echo '{"session_id":"bg","is_error":false,"result":"ok"}'"#,
     let pid_file = d.join(".zloop/runner/pid");
     assert!(pid_file.exists());
     let (_, out, _) = run(&d, &["status"], &[]);
-    assert!(out.contains("runner: running in background (pid"), "{out}");
+    assert!(out.contains("running in background (pid"), "{out}");
     // starting twice is refused
     let (code, _, err) = run(&d, &["start", "--fast"], &[("PATH", &with_fake_path(&fake))]);
     assert_eq!(code, 2);
@@ -229,7 +229,7 @@ echo '{"session_id":"bg","is_error":false,"result":"ok"}'"#,
     assert!(out.contains("stopped runner (pid"), "{out}");
     assert!(!pid_file.exists());
     let (_, out, _) = run(&d, &["status"], &[]);
-    assert!(out.contains("runner: not running"), "{out}");
+    assert!(out.contains("not running · 用"), "{out}");
     let st = state::load(&state::state_path(&d)).unwrap();
     assert!(st.ticks.iter().any(|t| t.outcome == "done"), "background runner made progress: {:?}", st.ticks);
     assert!(fs::read_to_string(d.join(".zloop/runner/console.log")).unwrap().contains("runner: round 1"));
@@ -493,7 +493,7 @@ fn watchdog_restores_default_after_kill_9_and_holders_are_reference_counted() {
     }
     assert_eq!(pm_state(&e), "0", "watchdog restored default: {}", pm_log(&e));
     let (_, out, _) = run(&a, &["awake"], &vars);
-    assert!(out.contains("sleep: default"), "{out}");
+    assert!(out.contains("default (lid-close protection ready"), "{out}");
     assert_eq!(fs::read_dir(e.home.join(".zloop/awake")).map(|r| r.count()).unwrap_or(0), 0);
 }
 
@@ -511,7 +511,7 @@ fn awake_reconcile_fixes_a_stale_setting() {
     assert_eq!(pm_state(&e), "0");
     // status shows the sleep line
     let (_, out, _) = run(&d, &["status"], &awake_vars(&e, &path));
-    assert!(out.contains("sleep: default"), "{out}");
+    assert!(out.contains("default (lid-close protection ready"), "{out}");
 }
 
 /// The user's scenario, spelled out: sleep stays disabled for as long as the runner lives
@@ -574,5 +574,5 @@ echo '{"session_id":"lid","is_error":false,"result":"ok"}'"#,
     assert_eq!((last["event"].as_str(), last["reason"].as_str()), (Some("stop"), Some("done")));
     assert!(j.iter().any(|x| x["event"] == "awake_off" && x["restored_default"] == true));
     let (_, out, _) = run(&d, &["awake"], &vars);
-    assert!(out.contains("sleep: default"), "{out}");
+    assert!(out.contains("default (lid-close protection ready"), "{out}");
 }

@@ -15,5 +15,6 @@ pub mod prompt;
 pub mod runner;
 pub mod session;
 pub mod state;
+pub mod style;
 pub mod tick;
 pub mod todo;

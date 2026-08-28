@@ -3,7 +3,7 @@
 
 use crate::session::{self, Host};
 use crate::state::{self, StateError};
-use crate::{context, daemon, hosts, log, notify, phase, prompt, runner, tick, todo};
+use crate::{context, daemon, hosts, log, notify, phase, prompt, runner, style, tick, todo};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::io::{IsTerminal, Read};
@@ -15,6 +15,9 @@ pub struct Cli {
     /// Project directory (default: nearest .zloop upward from cwd)
     #[arg(long, global = true)]
     pub dir: Option<PathBuf>,
+    /// Never colourise output (also honoured: NO_COLOR, and any non-tty stdout)
+    #[arg(long = "no-color", global = true)]
+    pub no_color: bool,
     #[command(subcommand)]
     pub cmd: Cmd,
 }
@@ -326,7 +329,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             println!("{}", if ok { "notification sent" } else { "notification failed (see stderr)" });
             Ok(if ok { 0 } else { 1 })
         }
-        Cmd::Status { json, md } => cmd_status(&root, &path, json, md),
+        Cmd::Status { json, md } => cmd_status(&root, &path, json, md, style::Style::detect(cli.no_color)),
         Cmd::Heartbeat { host } => {
             let st = state::load(&path)?;
             println!("{}", prompt::heartbeat(&st, &host, &root)?);
@@ -590,13 +593,15 @@ fn cmd_done(
             };
         let todo_snapshot = st.todos[idx].clone();
         let rel = log::write(root, st, &tick_rec, &todo_snapshot, &doc)?;
-        let documented = doc.is_complete();
+        // Only a finished todo owes a technical document; progress / fail / block rounds are exempt,
+        // so they carry no verdict at all rather than showing up as "undocumented".
+        let documented = (tick_rec.outcome == "done").then(|| doc.is_complete());
         if let Some(last) = st.ticks.last_mut() {
             last.log = Some(rel.clone());
-            last.documented = Some(documented);
+            last.documented = documented;
         }
         tick_rec.log = Some(rel);
-        tick_rec.documented = Some(documented);
+        tick_rec.documented = documented;
         st.in_progress = None; // the round is written back; phase goes back to idle/stopped
         let d = tick::decide(st, state::now());
         Ok(Ok((tick_rec, d, todo::remaining(st), todo_snapshot.acceptance.clone())))
@@ -697,7 +702,7 @@ fn cmd_edit(
     }
 }
 
-fn cmd_status(root: &Path, path: &Path, json: bool, md: bool) -> Result<i32> {
+fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::Style) -> Result<i32> {
     let st = state::load(path)?;
     if json {
         print_json(&serde_json::to_value(&st)?);
@@ -707,50 +712,121 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool) -> Result<i32> {
         print!("{}", prompt::render_md(&st, root, 10));
         return Ok(0);
     }
-    let d = tick::decide(&st, state::now());
-    println!("goal ({}): {}", st.goal.status, st.goal.text);
-    println!("phase: {}", phase::compute(&st, root, state::now()).summary);
-    match daemon::running(root) {
-        Some(pid) => println!("runner: running in background (pid {pid}) · log {}", daemon::log_path(root).display()),
-        None => println!("runner: not running · start with `zloop start`"),
+    let c = &st_style;
+    let now = state::now();
+    let d = tick::decide(&st, now);
+    let ph = phase::compute(&st, root, now);
+    let running = daemon::running(root);
+
+    // ---- the verdict: one line you can read from across the room ----
+    let finished = st.todos.iter().filter(|t| t.status == "done").count();
+    let total = st.todos.len();
+    let (icon, word, paint): (&str, &str, fn(&style::Style, &str) -> String) = match () {
+        _ if st.goal.status == "done" => ("✅", "完成", |c, s| c.banner("32", s)),
+        _ if st.goal.status == "paused" => ("⏸", "已暂停", |c, s| c.banner("33", s)),
+        _ if matches!(d.reason.as_str(), "fail_streak" | "progress_streak" | "budget") => {
+            ("⛔", "已停", |c, s| c.banner("31", s))
+        }
+        _ if matches!(d.reason.as_str(), "user_gate" | "blocked") => ("⏳", "等你决定", |c, s| c.banner("33", s)),
+        _ if ph.kind == "executing" => ("🔄", "执行中", |c, s| c.banner("36", s)),
+        _ if ph.kind == "sleeping" => ("💤", "轮次间休眠", |c, s| c.banner("34", s)),
+        _ if d.should_run => ("▶", "就绪", |c, s| c.banner("34", s)),
+        _ => ("•", "空闲", |c, s| c.dim(s)),
+    };
+    let rounds = tick::current_round(&st.ticks);
+    println!(
+        "\n {} {}  {}  {}",
+        icon,
+        paint(c, &format!(" {word} ")),
+        c.bold(&format!("{finished}/{total}")),
+        c.dim(&format!("todo · {rounds} 轮"))
+    );
+    println!("   {}", style::truncate(&st.goal.text, 76));
+    let spent = tick::spent_usd(&st.ticks);
+    let money = if spent > 0.0 || st.policy.max_total_usd > 0.0 {
+        let cap = if st.policy.max_total_usd > 0.0 { format!(" / max ${:.2}", st.policy.max_total_usd) } else { String::new() };
+        format!("  spent: ${spent:.2}{cap}")
+    } else {
+        String::new()
+    };
+    let pct = if total > 0 { finished * 100 / total } else { 0 };
+    println!("   {} {}{}\n", style::bar(finished, total, 24, c), c.dim(&format!("{pct}%")), c.dim(&money));
+
+    // ---- what to do next ----
+    let next_line = if st.goal.status == "paused" {
+        format!("已暂停 · {}", c.bold("zloop resume"))
+    } else if st.goal.status == "done" || d.reason == "all_done" {
+        format!("没有待办了 · 加活 {} · 换目标 {}", c.bold("zloop plan --add \"[P0] …\""), c.bold("zloop init --force \"…\""))
+    } else if let Some(t) = &d.todo {
+        format!("{} {}", c.bold(&format!("{} [P{}]", t.id, t.priority)), style::truncate(&t.text, 60))
+    } else {
+        match d.reason.as_str() {
+            "user_gate" => format!("回答被 --block 的问题后 {}", c.bold("zloop edit <id> --status open")),
+            "blocked" => "等依赖完成".to_string(),
+            "fail_streak" => format!("{} 看失败原因，改完再 {}", c.bold("zloop log"), c.bold("zloop start")),
+            "progress_streak" => format!("todo 太大，{}", c.bold("zloop edit <id> --text \"更小的一步\"")),
+            "budget" => format!("已达花费上限，调大 {} 再继续", c.bold("policy.max_total_usd")),
+            other => other.to_string(),
+        }
+    };
+    println!("   {} {next_line}", c.dim("下一步"));
+
+    // ---- open todos ----
+    let open = todo::open_ordered(&st);
+    if !open.is_empty() {
+        println!();
+        let next_id = d.todo.as_ref().map(|t| t.id.clone());
+        for i in open {
+            let t = &st.todos[i];
+            let is_next = next_id.as_deref() == Some(t.id.as_str());
+            let (marker, body) = match t.status.as_str() {
+                "blocked" if t.blocked_by.iter().any(|b| b == todo::USER) => (c.yellow("!"), c.yellow(&fmt_todo(t))),
+                "blocked" => (c.dim("⏳"), c.dim(&fmt_todo(t))),
+                _ if is_next => (c.cyan("▶"), c.bold(&fmt_todo(t))),
+                _ => (c.dim("○"), fmt_todo(t)),
+            };
+            println!("   {marker} {body}");
+            if t.status == "blocked" && !t.note.is_empty() {
+                println!("     {}", c.yellow(&format!("↳ {}", style::truncate(&t.note, 66))));
+            }
+            if let Some(a) = &t.acceptance {
+                println!("     {}", c.dim(&format!("验收：{}", style::truncate(a, 66))));
+            }
+        }
+        let hidden = st.todos.iter().filter(|t| todo::is_terminal(&t.status)).count();
+        if hidden > 0 {
+            println!("   {}", c.dim(&format!("… 另有 {hidden} 条已完成/已延后")));
+        }
+    }
+
+    // ---- details, one aligned block ----
+    println!();
+    // Labels are CJK, so pad by display columns rather than by char count.
+    let row = |label: &str, value: &str| {
+        let pad = " ".repeat(8usize.saturating_sub(style::width(label)));
+        println!("   {}{pad}{value}", c.dim(label));
+    };
+    row("阶段", &ph.summary);
+    match running {
+        Some(pid) => row("后台", &format!("running in background (pid {pid}) · log {}", daemon::log_path(root).display())),
+        None => row("后台", &c.dim("not running · 用 `zloop start` 开始")),
     }
     if crate::awake::supported() {
-        println!("{}", crate::awake::describe());
-    }
-    println!("state: {}", path.display());
-    let head = if d.should_run {
-        format!("RUN {}", d.todo.as_ref().map(|t| t.id.as_str()).unwrap_or("-"))
-    } else {
-        format!("WAIT {}", d.reason)
-    };
-    println!("round {} · remaining {} · {}", tick::current_round(&st.ticks), todo::remaining(&st), head);
-    let spent = tick::spent_usd(&st.ticks);
-    if spent > 0.0 || st.policy.max_total_usd > 0.0 {
-        println!(
-            "spent: ${spent:.2}{}",
-            if st.policy.max_total_usd > 0.0 { format!(" / max ${:.2}", st.policy.max_total_usd) } else { " (no cap)".into() }
-        );
-    }
-    for i in todo::open_ordered(&st) {
-        let t = &st.todos[i];
-        let deps = if t.blocked_by.is_empty() { String::new() } else { format!(" ⏳{}", t.blocked_by.join(",")) };
-        let acc = t.acceptance.as_deref().map(|a| format!("\n      验收：{}", a)).unwrap_or_default();
-        println!("  {} {}{}{}", prompt::checkbox(&t.status), fmt_todo(t), deps, acc);
-    }
-    let done = st.todos.iter().filter(|t| todo::is_terminal(&t.status)).count();
-    if done > 0 {
-        println!("  … {done} done/deferred");
+        let s = crate::awake::describe();
+        row("睡眠", s.strip_prefix("sleep: ").unwrap_or(&s));
     }
     let undocumented = st.ticks.iter().filter(|t| t.documented == Some(false)).count();
     if undocumented > 0 {
-        println!("docs: {undocumented} 轮只有结果记录、没有实现思路（`zloop log` 里带 ⚠）");
+        row("文档", &c.yellow(&format!("{undocumented} 轮只有结果记录、没有实现思路（`zloop log` 里带 ⚠）")));
     }
     let sessions = session::summarize(&st, root);
     if let Some(last) = sessions.last() {
         if let Some(cmd) = &last.resume {
-            println!("last session: {} · `{}`", last.host, cmd);
+            row("会话", &format!("{} · {}", last.host, cmd));
         }
     }
+    row("状态", &c.dim(&path.display().to_string()));
+    println!();
     Ok(0)
 }
 
@@ -826,7 +902,8 @@ fn cmd_log(root: &Path, todo: Option<String>, last: usize, show: Option<String>)
     let mut undocumented = 0;
     for f in &files {
         let rel = f.strip_prefix(root).unwrap_or(f);
-        let mark = if log::file_is_documented(f) {
+        let expects_doc = f.file_name().map(|n| n.to_string_lossy().ends_with("-done.md")).unwrap_or(false);
+        let mark = if !expects_doc || log::file_is_documented(f) {
             "  "
         } else {
             undocumented += 1;
