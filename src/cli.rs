@@ -718,60 +718,53 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     let ph = phase::compute(&st, root, now);
     let running = daemon::running(root);
 
-    // ---- the verdict: one line you can read from across the room ----
+    // Fit the real terminal and truncate every line to it. A line that wraps loses the left
+    // gutter, and that — not the colours — is what made the fixed-width layout look ragged.
+    let w = style::term_width().clamp(46, 96);
+    let text = w.saturating_sub(4); // after the two-space gutter
+    let val = w.saturating_sub(12); // after gutter + eight-column label
+
+    // ---- the verdict, in one word ----
     let finished = st.todos.iter().filter(|t| t.status == "done").count();
     let total = st.todos.len();
-    let (icon, word, paint): (&str, &str, fn(&style::Style, &str) -> String) = match () {
-        _ if st.goal.status == "done" => ("✅", "完成", |c, s| c.banner("32", s)),
-        _ if st.goal.status == "paused" => ("⏸", "已暂停", |c, s| c.banner("33", s)),
-        _ if matches!(d.reason.as_str(), "fail_streak" | "progress_streak" | "budget") => {
-            ("⛔", "已停", |c, s| c.banner("31", s))
-        }
-        _ if matches!(d.reason.as_str(), "user_gate" | "blocked") => ("⏳", "等你决定", |c, s| c.banner("33", s)),
-        _ if ph.kind == "executing" => ("🔄", "执行中", |c, s| c.banner("36", s)),
-        _ if ph.kind == "sleeping" => ("💤", "轮次间休眠", |c, s| c.banner("34", s)),
-        _ if d.should_run => ("▶", "就绪", |c, s| c.banner("34", s)),
-        _ => ("•", "空闲", |c, s| c.dim(s)),
+    let (icon, word, code): (&str, &str, &str) = match () {
+        _ if st.goal.status == "done" => ("✅", "完成", "32"),
+        _ if st.goal.status == "paused" => ("⏸", "已暂停", "33"),
+        _ if matches!(d.reason.as_str(), "fail_streak" | "progress_streak" | "budget") => ("⛔", "已停", "31"),
+        _ if matches!(d.reason.as_str(), "user_gate" | "blocked") => ("⏳", "等你决定", "33"),
+        _ if ph.kind == "executing" => ("🔄", "执行中", "36"),
+        _ if ph.kind == "sleeping" => ("💤", "休眠中", "34"),
+        _ if d.reason == "throttled" => ("⏱", "限流中", "33"),
+        _ if d.should_run => ("▶", "就绪", "34"),
+        _ => ("•", "空闲", "2"),
     };
-    let rounds = tick::current_round(&st.ticks);
-    println!(
-        "\n {} {}  {}  {}",
-        icon,
-        paint(c, &format!(" {word} ")),
-        c.bold(&format!("{finished}/{total}")),
-        c.dim(&format!("todo · {rounds} 轮"))
-    );
-    println!("   {}", style::truncate(&st.goal.text, 76));
+    let pct = if total > 0 { finished * 100 / total } else { 0 };
     let spent = tick::spent_usd(&st.ticks);
-    let money = if spent > 0.0 || st.policy.max_total_usd > 0.0 {
-        let cap = if st.policy.max_total_usd > 0.0 { format!(" / max ${:.2}", st.policy.max_total_usd) } else { String::new() };
-        format!("  spent: ${spent:.2}{cap}")
+    let money = if spent > 0.0 {
+        let cap = if st.policy.max_total_usd > 0.0 { format!("/{:.2}", st.policy.max_total_usd) } else { String::new() };
+        format!(" · ${spent:.2}{cap}")
     } else {
         String::new()
     };
-    let pct = if total > 0 { finished * 100 / total } else { 0 };
-    println!("   {} {}{}\n", style::bar(finished, total, 24, c), c.dim(&format!("{pct}%")), c.dim(&money));
+    let icon = format!("{icon}{}", " ".repeat(2usize.saturating_sub(style::width(icon))));
+    let head = format!(
+        "{}{}",
+        if code == "2" { c.dim(word) } else { c.banner(code, word) },
+        " ".repeat(10usize.saturating_sub(style::width(word)).max(1))
+    );
+    // The bar is the first thing to go in a narrow window; the percentage carries the same news.
+    let bar = if w >= 70 { format!("{} ", style::bar(finished, total, 16, c)) } else { String::new() };
+    println!();
+    println!(
+        "  {icon} {head}{bar}{}  {}",
+        c.bold(&format!("{pct}%")),
+        // Every recorded round, failures included — `tick::current_round` counts only the
+        // productive ones, which reads as "0 轮" right after three failures.
+        c.dim(&format!("{finished}/{total} todo · {} 轮{money}", st.ticks.iter().filter(|t| t.outcome != "noop").count()))
+    );
+    println!("  {}", style::truncate(&st.goal.text, text));
 
-    // ---- what to do next ----
-    let next_line = if st.goal.status == "paused" {
-        format!("已暂停 · {}", c.bold("zloop resume"))
-    } else if st.goal.status == "done" || d.reason == "all_done" {
-        format!("没有待办了 · 加活 {} · 换目标 {}", c.bold("zloop plan --add \"[P0] …\""), c.bold("zloop init --force \"…\""))
-    } else if let Some(t) = &d.todo {
-        format!("{} {}", c.bold(&format!("{} [P{}]", t.id, t.priority)), style::truncate(&t.text, 60))
-    } else {
-        match d.reason.as_str() {
-            "user_gate" => format!("回答被 --block 的问题后 {}", c.bold("zloop edit <id> --status open")),
-            "blocked" => "等依赖完成".to_string(),
-            "fail_streak" => format!("{} 看失败原因，改完再 {}", c.bold("zloop log"), c.bold("zloop start")),
-            "progress_streak" => format!("todo 太大，{}", c.bold("zloop edit <id> --text \"更小的一步\"")),
-            "budget" => format!("已达花费上限，调大 {} 再继续", c.bold("policy.max_total_usd")),
-            other => other.to_string(),
-        }
-    };
-    println!("   {} {next_line}", c.dim("下一步"));
-
-    // ---- open todos ----
+    // ---- open todos; ▶ is the one `zloop next` would hand out ----
     let open = todo::open_ordered(&st);
     if !open.is_empty() {
         println!();
@@ -779,53 +772,107 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         for i in open {
             let t = &st.todos[i];
             let is_next = next_id.as_deref() == Some(t.id.as_str());
+            let line = style::truncate(&fmt_todo(t), text.saturating_sub(2));
             let (marker, body) = match t.status.as_str() {
-                "blocked" if t.blocked_by.iter().any(|b| b == todo::USER) => (c.yellow("!"), c.yellow(&fmt_todo(t))),
-                "blocked" => (c.dim("⏳"), c.dim(&fmt_todo(t))),
-                _ if is_next => (c.cyan("▶"), c.bold(&fmt_todo(t))),
-                _ => (c.dim("○"), fmt_todo(t)),
+                "blocked" if t.blocked_by.iter().any(|b| b == todo::USER) => (c.yellow("!"), c.yellow(&line)),
+                "blocked" => (c.dim("⏳"), c.dim(&line)),
+                _ if is_next => (c.cyan("▶"), c.bold(&line)),
+                _ => (c.dim("○"), c.dim(&line)),
             };
-            println!("   {marker} {body}");
+            println!("  {marker} {body}");
             if t.status == "blocked" && !t.note.is_empty() {
-                println!("     {}", c.yellow(&format!("↳ {}", style::truncate(&t.note, 66))));
+                println!("    {}", c.yellow(&format!("↳ {}", style::truncate(&t.note, text.saturating_sub(4)))));
             }
             if let Some(a) = &t.acceptance {
-                println!("     {}", c.dim(&format!("验收：{}", style::truncate(a, 66))));
+                println!("    {}", c.dim(&format!("验收：{}", style::truncate(a, text.saturating_sub(6)))));
             }
         }
         let hidden = st.todos.iter().filter(|t| todo::is_terminal(&t.status)).count();
         if hidden > 0 {
-            println!("   {}", c.dim(&format!("… 另有 {hidden} 条已完成/已延后")));
+            println!("  {}", c.dim(&format!("… 另有 {hidden} 条已完成/已延后")));
         }
     }
 
-    // ---- details, one aligned block ----
-    println!();
-    // Labels are CJK, so pad by display columns rather than by char count.
-    let row = |label: &str, value: &str| {
-        let pad = " ".repeat(8usize.saturating_sub(style::width(label)));
-        println!("   {}{pad}{value}", c.dim(label));
-    };
-    row("阶段", &ph.summary);
-    match running {
-        Some(pid) => row("后台", &format!("running in background (pid {pid}) · log {}", daemon::log_path(root).display())),
-        None => row("后台", &c.dim("not running · 用 `zloop start` 开始")),
+    // ---- facts worth a line, i.e. the ones the headline does not already state ----
+    let mut rows: Vec<(&str, String)> = Vec::new();
+    if !ph.detail.is_empty() {
+        rows.push(("阶段", style::truncate(&ph.detail, val)));
     }
-    if crate::awake::supported() {
-        let s = crate::awake::describe();
-        row("睡眠", s.strip_prefix("sleep: ").unwrap_or(&s));
+    if let Some(pid) = running {
+        rows.push(("后台", c.dim(&style::truncate(&format!("pid {pid} · 日志 .zloop/runner/console.log"), val))));
+    }
+    if let Some((s, warn)) = crate::awake::brief() {
+        let s = style::truncate(&s, val.saturating_sub(2));
+        rows.push(("睡眠", if warn { c.yellow(&format!("⚠ {s}")) } else { c.dim(&s) }));
     }
     let undocumented = st.ticks.iter().filter(|t| t.documented == Some(false)).count();
     if undocumented > 0 {
-        row("文档", &c.yellow(&format!("{undocumented} 轮只有结果记录、没有实现思路（`zloop log` 里带 ⚠）")));
+        rows.push(("文档", c.yellow(&format!("{undocumented} 轮缺实现思路 · zloop log 里带 ⚠"))));
     }
     let sessions = session::summarize(&st, root);
-    if let Some(last) = sessions.last() {
-        if let Some(cmd) = &last.resume {
-            row("会话", &format!("{} · {}", last.host, cmd));
+    if let Some(cmd) = sessions.last().and_then(|s| s.resume.as_deref()) {
+        // Never truncated: a half-copied resume command is worse than a line that wraps.
+        rows.push(("会话", cmd.to_string()));
+    }
+
+    // ---- and what you can type next ----
+    let mut acts: Vec<(&str, String)> = Vec::new();
+    let blocked_id = st
+        .todos
+        .iter()
+        .find(|t| t.status == "blocked" && t.blocked_by.iter().any(|b| b == todo::USER))
+        .map(|t| t.id.clone())
+        .unwrap_or_else(|| "<id>".into());
+    if st.goal.status == "paused" {
+        acts.push(("继续", "zloop resume".into()));
+    } else if st.goal.status == "done" || d.reason == "all_done" {
+        acts.push(("加活", "zloop plan --add \"[P0] 下一件事\"".into()));
+        acts.push(("换目标", "zloop init --force \"新目标\"".into()));
+        if st.ticks.iter().any(|t| t.log.is_some()) {
+            acts.push(("出文档", "zloop doc --all".into()));
+        }
+    } else {
+        // A question waiting on you is worth answering even when the loop has other work to do.
+        if blocked_id != "<id>" {
+            acts.push(("解锁", format!("zloop edit {blocked_id} --status open")));
+        }
+        match d.reason.as_str() {
+            "blocked" => acts.push(("查依赖", "zloop status --json".into())),
+            "fail_streak" => {
+                acts.push(("看失败", "zloop log".into()));
+                acts.push(("重跑", "zloop start".into()));
+            }
+            "progress_streak" => acts.push(("拆小", format!("zloop edit {} --text \"更小的一步\"", d.todo.as_ref().map(|t| t.id.as_str()).unwrap_or("<id>")))),
+            "budget" => acts.push(("提额", "改 .zloop/state.json 的 policy.max_total_usd".into())),
+            _ => {}
+        }
+        match running {
+            Some(_) => {
+                acts.push(("看日志", "zloop log".into()));
+                acts.push(("停止", "zloop stop".into()));
+            }
+            // While a session already holds the todo, "start another runner" is not the advice.
+            None if d.should_run && ph.kind != "executing" => acts.push(("开跑", "zloop start".into())),
+            None => {}
         }
     }
-    row("状态", &c.dim(&path.display().to_string()));
+
+    let line = |label: &str, value: &str, label_color: fn(&style::Style, &str) -> String| {
+        let pad = " ".repeat(8usize.saturating_sub(style::width(label)));
+        println!("  {}{pad}{value}", label_color(c, label));
+    };
+    if !rows.is_empty() {
+        println!();
+        for (label, value) in rows {
+            line(label, &value, |c, s| c.dim(s));
+        }
+    }
+    if !acts.is_empty() {
+        println!();
+        for (label, cmd) in acts {
+            line(label, &c.bold(&cmd), |c, s| c.cyan(s)); // commands are never truncated either
+        }
+    }
     println!();
     Ok(0)
 }

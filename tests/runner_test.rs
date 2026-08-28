@@ -213,7 +213,7 @@ echo '{"session_id":"bg","is_error":false,"result":"ok"}'"#,
     let pid_file = d.join(".zloop/runner/pid");
     assert!(pid_file.exists());
     let (_, out, _) = run(&d, &["status"], &[]);
-    assert!(out.contains("running in background (pid"), "{out}");
+    assert!(out.contains("后台") && out.contains("pid ") && out.contains(".zloop/runner/console.log"), "{out}");
     // starting twice is refused
     let (code, _, err) = run(&d, &["start", "--fast"], &[("PATH", &with_fake_path(&fake))]);
     assert_eq!(code, 2);
@@ -228,8 +228,9 @@ echo '{"session_id":"bg","is_error":false,"result":"ok"}'"#,
     assert_eq!(code, 0);
     assert!(out.contains("stopped runner (pid"), "{out}");
     assert!(!pid_file.exists());
+    // 停了以后就没有「后台」这一行了：status 只说需要你知道的事。
     let (_, out, _) = run(&d, &["status"], &[]);
-    assert!(out.contains("not running · 用"), "{out}");
+    assert!(!out.contains("后台"), "{out}");
     let st = state::load(&state::state_path(&d)).unwrap();
     assert!(st.ticks.iter().any(|t| t.outcome == "done"), "background runner made progress: {:?}", st.ticks);
     assert!(fs::read_to_string(d.join(".zloop/runner/console.log")).unwrap().contains("runner: round 1"));
@@ -258,7 +259,7 @@ echo '{"session_id":"c","is_error":false,"result":"ok","total_cost_usd":0.1234,"
     assert_eq!((t.outcome.as_str(), t.cost_usd, t.num_turns, t.duration_ms), ("done", Some(0.1234), Some(7), Some(4200)));
     assert!(fs::read_to_string(mark.join("env.log")).unwrap().contains("runner=1"));
     let (_, out, _) = run(&d, &["status"], &[]);
-    assert!(out.contains("spent: $0.12"), "{out}");
+    assert!(out.contains("$0.12"), "{out}");
     let logs = zloop::log::entries(&d, None, 5).unwrap();
     assert!(fs::read_to_string(&logs[0]).unwrap().contains("- cost: $0.1234   turns: 7   duration: 4s   (runner settlement)"));
 }
@@ -509,9 +510,11 @@ fn awake_reconcile_fixes_a_stale_setting() {
     let (_, out, _) = run(&d, &["awake", "reconcile"], &awake_vars(&e, &path));
     assert!(out.contains("restored to 0"), "{out}");
     assert_eq!(pm_state(&e), "0");
-    // status shows the sleep line
-    let (_, out, _) = run(&d, &["status"], &awake_vars(&e, &path));
+    // 完整措辞在 `zloop awake` 里；status 在一切正常时不再唠叨这一行。
+    let (_, out, _) = run(&d, &["awake"], &awake_vars(&e, &path));
     assert!(out.contains("default (lid-close protection ready"), "{out}");
+    let (_, out, _) = run(&d, &["status"], &awake_vars(&e, &path));
+    assert!(!out.contains("睡眠"), "{out}");
 }
 
 /// The user's scenario, spelled out: sleep stays disabled for as long as the runner lives

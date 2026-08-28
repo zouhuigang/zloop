@@ -100,7 +100,7 @@ zloop init "安装验证" && zloop plan --add "[P0] 打个招呼" && zloop next
 #      writeback: zloop done t1 --note '<一句话结果>'
 #      interval: 3 min · remaining 1
 #      phase: executing t1 · round 1 · since 07:20 (0s ago) · host cli · via next
-zloop done t1 --note "hi" && zloop status   # goal (done) … phase: stopped (done)
+zloop done t1 --note "hi" --no-doc && zloop status   # ✅ 完成  1/1 todo · 1 轮
 cd - && rm -rf /tmp/zl-check
 ```
 
@@ -289,34 +289,57 @@ zloop status
 
 ### 6. 看进度：`status` / `log` / `sessions` / `context`
 
-`zloop status` 第一眼就告诉你现在是什么状态——图标 + 彩色状态词 + 进度条 + 下一步该干嘛：
+`zloop status` 第一眼就告诉你现在是什么状态——图标 + 彩色状态词 + 进度条，然后才是细节和你能敲的下一条命令：
 
 ```
- ✅  完成    5/5  todo · 5 轮
-   把 demo 服务的启动时间降到 1 秒以内
-   ████████████████████████ 100%
+  ✅ 完成      ████████████████ 100%  6/6 todo · 6 轮 · $2.31
+  把 demo 服务的启动时间降到 1 秒以内
 
-   下一步 没有待办了 · 加活 zloop plan --add "[P0] …" · 换目标 zloop init --force "…"
+  会话    claude --resume 36346c2a-1f3d-4b8e-9a52-0c7e5d21b4aa
 
-   阶段    stopped (done)
-   后台    not running · 用 `zloop start` 开始
-   睡眠    default (lid-close protection ready; a running runner will enable it)
-   会话    claude · claude --resume 36346c2a-…
+  加活    zloop plan --add "[P0] 下一件事"
+  换目标  zloop init --force "新目标"
+  出文档  zloop doc --all
 ```
 
-状态词一共六种，颜色各不相同：
+跑起来之后长这样——`▶` 是下一条，`!` 是在等你回话，问题就印在下一行：
+
+```
+  🔄 执行中    ████░░░░░░░░░░░░ 25%  1/4 todo · 3 轮 · $0.84
+  把 demo 服务的启动时间降到 1 秒以内
+
+  ▶ t2 [P0] 给启动路径加 tracing 并出火焰图
+  ! t3 [P1] 把配置加载改成懒加载
+    ↳ 第 3 步要用付费 SDK，能换成开源的吗？
+  ○ t4 [P2] 写压测脚本
+  … 另有 1 条已完成/已延后
+
+  阶段    t2 · 第 3 轮 · 已跑 4m · claude
+  后台    pid 41287 · 日志 .zloop/runner/console.log
+  睡眠    合盖不休眠 · 1 个 runner 在跑，结束后自动恢复
+  会话    claude --resume 36346c2a-1f3d-4b8e-9a52-0c7e5d21b4aa
+
+  解锁    zloop edit t3 --status open
+  看日志  zloop log
+  停止    zloop stop
+```
+
+状态词一共八种，颜色各不相同：
 
 | 状态词 | 什么情况 | 颜色 |
 |---|---|---|
 | ✅ 完成 | 所有 todo 做完了 | 绿 |
 | 🔄 执行中 | 某条 todo 正被执行（`next` 交出去了，还没写回） | 青 |
-| 💤 轮次间休眠 | 后台 runner 在两轮之间睡觉 | 蓝 |
+| 💤 休眠中 | 后台 runner 在两轮之间睡觉 | 蓝 |
 | ▶ 就绪 | 有活可做，等你 `/zloop` 或 `zloop start` | 蓝 |
-| ⏳ 等你决定 | 有 todo 被 `--block` 了，问题就印在它下面 | 黄 |
+| ⏳ 等你决定 | 所有能干的活都被 `--block` 了，问题印在待办下面 | 黄 |
+| ⏱ 限流中 | 24 小时窗口内的次数用完了，在等窗口滑走 | 黄 |
 | ⛔ 已停 | 连续失败 / 原地踏步 / 超预算 | 红 |
 | ⏸ 已暂停 | 你 `zloop pause` 了 | 黄 |
 
-待办列表里 `▶` 是下一条（加粗）、`!` 是等你决定（黄，下一行 `↳` 显示问题）、`○` 是排队中、`⏳` 是等依赖。
+**只说需要你知道的事**：`阶段`/`后台`/`睡眠`/`文档` 这几行只在有话要说时才出现——停掉的后台、正常的休眠设置、标题已经讲清楚的阶段，都不占行。灰色标签是**情况**，青色标签是**可以照抄的命令**。
+
+**不会折行**：每行都按终端实际宽度（`TIOCGWINSZ`，也认 `COLUMNS`）裁剪，窄窗口先丢进度条。只有两类不裁：`会话` 的 resume 命令和青色的命令行——半条命令比折行更糟。
 
 **颜色什么时候开**：输出到终端时开；管道、重定向、`NO_COLOR=1`、`--no-color` 时自动关，纯文本可直接 `grep`。`CLICOLOR_FORCE=1` 可强制开（比如想 `less -R`）。
 
@@ -332,7 +355,7 @@ zloop sessions                # 出现过的宿主会话、各做了哪些 todo�
 zloop context                 # 交接包：换宿主 / 开新会话 / 想快速搞清现状时先看它
 ```
 
-`phase` 一行说清循环到哪了：
+`status` 里的 `阶段` 是压缩版；完整那句在 `zloop context` 和 `zloop next --json` 的 `phase` 字段里（脚本认这个，不认人类视图）：
 
 | `phase` | 含义 |
 |---|---|
@@ -392,14 +415,16 @@ zloop log                          # 只有结果记录、没有实现思路的�
 
 ### 7. 停下来了怎么办
 
+下表左列是 `zloop context` / `zloop next --json` 里的 `phase` 字段（`status` 显示的是它的压缩版）：
+
 | `phase` / runner 输出 | 发生了什么 | 你要做的 |
 |---|---|---|
 | `stopped (done)` | 全部 todo 完成 | `zloop plan --add …` 加活会自动回到 active；换目标 `zloop init --force "新目标"`（旧状态归档到 `.zloop/archive/`） |
-| `waiting (user_gate)` / runner 日志 `polling until a human unblocks` | 某条 todo 被 `--block` 等你决定；后台 runner **没有退出**，在 30 分钟一次慢速轮询 | `zloop status` 看 `[!]` 那条的问题 → 回答后 `zloop edit t3 --status open`（必要时 `--text` 改写），runner 下次轮询自动续 |
+| `waiting (user_gate)` / runner 日志 `polling until a human unblocks` | 某条 todo 被 `--block` 等你决定；后台 runner **没有退出**，在 30 分钟一次慢速轮询 | `zloop status` 看 `!` 那条下面 `↳` 的问题 → 回答后 `zloop edit t3 --status open`（必要时 `--text` 改写），runner 下次轮询自动续 |
 | `stopped (fail_streak)` | 连续 3 轮失败：宿主超时、没写回、或真的报错 | `zloop log --todo t3` 看原因 → 修环境 / 拆 todo / `zloop edit t3 --text …`（任意 `edit` 都会重置计数）→ `zloop start` |
 | `stopped (progress_streak)` | 同一 todo 连续 8 轮"有进展"却没完成 | 多半 todo 太大：`zloop edit t3 --text "更小的一步"` 或 `zloop done t3 --outcome progress --next "拆出的下一步"` |
 | `stopped (paused)` | 你 `zloop pause` 了 | `zloop resume` |
-| `stopped (budget)` | 累计花费达到 policy `max_total_usd` | 看 `zloop status` 的 `spent:`，确认值得就调大上限再 `start` |
+| `stopped (budget)` | 累计花费达到 policy `max_total_usd` | 看 `zloop status` 标题行的 `$花费/上限`，确认值得就调大上限再 `start` |
 | `waiting (throttled) · retry in N min` | 24 小时内已跑满 `max_runs`（默认 480） | 确实需要更快就调大 policy 的 `max_runs`，或设 `0` 不限 |
 | runner 日志 `host rate-limited · not counted · sleeping 30 min` | 宿主返回 429 / rate limit / overloaded | 不用管，30 分钟后自动重试，不计失败 |
 | runner 日志 `TIMED OUT (recorded fail)` | 某轮宿主超过 `--timeout-min` 被 kill | 偶发不用管；频繁出现就调大 `--timeout-min` 或把 todo 拆小 |
@@ -459,7 +484,7 @@ zloop plan --from-loopx .codex/goals/<goal>/ACTIVE_GOAL_STATE.md
 | `zloop done <id>` | **唯一写回**：记 tick、改 todo 状态、写技术文档、可插后继 | `--note`, `--outcome progress\|fail`, `--block Q`, `--next LINE`, `--evidence`, `--approach`, `--decision`（可重复）, `--pitfall`（可重复）, `--no-doc` |
 | `zloop doc [<id>]` | 把轮次日志合成一份技术文档 | `--all`, `--out FILE` |
 | `zloop edit <id>` | 改文本 / 状态 / 优先级 / 依赖 / 验收标准；任何 edit 都算"人介入"，重置 fail / noop 计数 | `--text`, `--status open\|blocked\|deferred\|done`, `--priority 0-4`, `--blocked-by t1,t2\|user\|''`, `--acceptance` |
-| `zloop status` | 一屏看清：状态词 + 进度条 + 下一步 + 待办 + runner / 睡眠 / 花费 / 会话 | `--json`（整份状态）, `--md`（Markdown 投影）, `--no-color` |
+| `zloop status` | 一屏看清：状态词 + 进度条 + 待办 + 情况明细 + 能照抄的下一条命令 | `--json`（整份状态）, `--md`（Markdown 投影）, `--no-color` |
 | `zloop pause` / `zloop resume` | 暂停 / 恢复目标（runner 下次检查即停 / 续） | — |
 | `zloop remember "<一句话>"` | 记一条以后用得上的经验到 `.zloop/NOTES.md`，最近 5 条出现在 `context` | — |
 | `zloop compact` | 把完成超过 N 天的 todo 和它们的 tick 归档到 `.zloop/archive/`，state.json 保持小 | `--keep-days 7` |
@@ -525,7 +550,7 @@ paused/done  >  all_done  >  user_gate / blocked  >  fail_streak  >  progress_st
 
 | 维度 | loopx 0.5.2 | zloop 0.2 |
 |---|---|---|
-| 源码文件 / 行数 | 819 / 317,699（Python） | 18 / ≈4,200（Rust） |
+| 源码文件 / 行数 | 819 / 317,699（Python） | 18 / ≈4,360（Rust） |
 | 顶层子命令 | 113（叶命令 307） | 21（+1 内部 `hook-stop`） |
 | 单命令最多 flag | 75（`todo`） | 10（`run`） |
 | `next` 一次调用 | 20–30 KB JSON，数百 ms | 10 个字段，12 ms |

@@ -61,12 +61,61 @@ impl Style {
     }
 }
 
+/// Terminal width in columns: `COLUMNS` → `TIOCGWINSZ` → 80.
+///
+/// Every line `zloop status` prints is truncated to fit this, because a wrapped line loses the
+/// left gutter and that is exactly what makes a dashboard look ragged.
+pub fn term_width() -> usize {
+    if let Some(n) = std::env::var("COLUMNS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        if n >= 20 {
+            return n;
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Some(n) = ioctl_cols() {
+            if n >= 20 {
+                return n;
+            }
+        }
+    }
+    80
+}
+
+#[cfg(unix)]
+fn ioctl_cols() -> Option<usize> {
+    use std::os::raw::{c_int, c_ulong};
+    #[repr(C)]
+    struct Winsize {
+        rows: u16,
+        cols: u16,
+        xpix: u16,
+        ypix: u16,
+    }
+    extern "C" {
+        fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios", target_vendor = "apple", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
+    const TIOCGWINSZ: c_ulong = 0x4008_7468;
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_vendor = "apple", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd")))]
+    const TIOCGWINSZ: c_ulong = 0x5413;
+    let mut ws = Winsize { rows: 0, cols: 0, xpix: 0, ypix: 0 };
+    // stdout, then stderr, then stdin: `zloop status | less` still knows how wide the screen is.
+    for fd in [1, 2, 0] {
+        if unsafe { ioctl(fd, TIOCGWINSZ, &mut ws as *mut Winsize) } == 0 && ws.cols > 0 {
+            return Some(ws.cols as usize);
+        }
+    }
+    None
+}
+
 /// Display width of a string, counting CJK/emoji as two columns.
 pub fn width(s: &str) -> usize {
     s.chars()
         .map(|c| {
             let c = c as u32;
             let wide = (0x1100..=0x115F).contains(&c)
+                || (0x231A..=0x23FA).contains(&c) // ⌚⌛⏩…⏳⏸⏹⏺ render two columns wide
                 || (0x2E80..=0xA4CF).contains(&c)
                 || (0xAC00..=0xD7A3).contains(&c)
                 || (0xF900..=0xFAFF).contains(&c)

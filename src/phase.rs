@@ -20,7 +20,11 @@ pub const JOURNAL_REL: &str = "runner/journal.jsonl";
 pub struct Phase {
     /// executing | sleeping | idle | waiting | stopped
     pub kind: &'static str,
+    /// The full sentence, for `zloop context` / `zloop next` — the machine-facing contract.
     pub summary: String,
+    /// The same thing minus the state word, for `zloop status`, whose headline already says
+    /// *what* state this is; empty when the headline says everything there is to say.
+    pub detail: String,
 }
 
 fn hhmm(ts: &str) -> String {
@@ -45,6 +49,21 @@ fn last_journal_event(root: &Path) -> Option<Value> {
     serde_json::from_str(line).ok()
 }
 
+/// Decision reasons read as jargon in a Chinese dashboard line; `zloop context` keeps the raw word.
+pub fn reason_zh(r: &str) -> String {
+    match r {
+        "user_gate" => "等你回答".into(),
+        "blocked" => "等依赖".into(),
+        "fail_streak" => "连续失败".into(),
+        "progress_streak" => "同一条 todo 只有进展没有完成".into(),
+        "budget" => "到花费上限".into(),
+        "throttled" => "本窗口次数用完".into(),
+        "all_done" | "done" => "全部完成".into(),
+        "paused" => "已暂停".into(),
+        other => other.into(),
+    }
+}
+
 pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase {
     if let Some(ip) = &state.in_progress {
         let host = ip.host.as_deref().unwrap_or("cli");
@@ -53,6 +72,11 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
             format!(" ⚠ stale (>{}m, the session that took it may be gone; next `zloop next` re-hands it out)", state.policy.stale_after_min)
         } else {
             String::new()
+        };
+        let stale_short = if stale.is_empty() {
+            String::new()
+        } else {
+            format!(" ⚠ 超过 {}m 没动静", state.policy.stale_after_min)
         };
         return Phase {
             kind: "executing",
@@ -65,6 +89,14 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
                 host,
                 ip.via,
                 stale
+            ),
+            detail: format!(
+                "{} · 第 {} 轮 · 已跑 {} · {}{}",
+                ip.todo,
+                ip.round,
+                elapsed(&ip.started_at, now),
+                host,
+                stale_short
             ),
         };
     }
@@ -84,6 +116,7 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
                                 left % 60,
                                 ev.get("reason").and_then(Value::as_str).unwrap_or("ready")
                             ),
+                            detail: format!("{} 醒来 · 还有 {}m{:02}s", hhmm(until), left / 60, left % 60),
                         };
                     }
                 }
@@ -92,25 +125,44 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
         if kind == "begin" {
             let todo = ev.get("todo").and_then(Value::as_str).unwrap_or("?");
             let at = ev.get("at").and_then(Value::as_str).unwrap_or("");
+            let round = ev.get("round").and_then(Value::as_u64).unwrap_or(0);
             return Phase {
                 kind: "executing",
                 summary: format!(
                     "runner round {} on {} since {} ({} ago) — no end recorded (process may have died)",
-                    ev.get("round").and_then(Value::as_u64).unwrap_or(0),
+                    round,
                     todo,
                     hhmm(at),
                     elapsed(at, now)
                 ),
+                detail: format!("{todo} · 第 {round} 轮 · 已跑 {} · ⚠ 没有结束记录", elapsed(at, now)),
             };
         }
     }
     let d = tick::decide(state, now);
     if d.should_run {
         let t = d.todo.as_ref().unwrap();
-        return Phase { kind: "idle", summary: format!("idle · next would run {} [P{}] {}", t.id, t.priority, t.text) };
+        // The status headline says "就绪" and marks the todo with ▶; nothing left to add.
+        return Phase {
+            kind: "idle",
+            summary: format!("idle · next would run {} [P{}] {}", t.id, t.priority, t.text),
+            detail: String::new(),
+        };
     }
     match d.interval_min {
-        None => Phase { kind: "stopped", summary: format!("stopped ({})", d.reason) },
-        Some(m) => Phase { kind: "waiting", summary: format!("waiting ({}) · retry in {} min", d.reason, m) },
+        None => Phase {
+            kind: "stopped",
+            summary: format!("stopped ({})", d.reason),
+            // "已完成 / 已暂停" is already the headline word; any other reason is news.
+            detail: match d.reason.as_str() {
+                "all_done" | "done" | "paused" => String::new(),
+                other => reason_zh(other),
+            },
+        },
+        Some(m) => Phase {
+            kind: "waiting",
+            summary: format!("waiting ({}) · retry in {} min", d.reason, m),
+            detail: format!("{} · {m} 分钟后重试", reason_zh(&d.reason)),
+        },
     }
 }

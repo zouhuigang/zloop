@@ -207,6 +207,22 @@ pub fn describe() -> String {
     }
 }
 
+/// One short line for `zloop status`, or `None` when the default behaviour needs no comment.
+/// `zloop awake` still prints the full sentence — the dashboard only speaks up when it matters.
+pub fn brief() -> Option<(String, bool)> {
+    if !supported() {
+        return None;
+    }
+    let holders = live_holders().len();
+    match (sleep_disabled(), holders) {
+        (Some(true), 0) => Some(("系统被设为不休眠，但没有 runner 在跑".into(), true)),
+        (Some(true), n) => Some((format!("合盖不休眠 · {n} 个 runner 在跑，结束后自动恢复"), false)),
+        (Some(false), 0) => (!sudo_ok()).then(|| ("合盖会休眠 · 跑一次 `zloop install --sudoers` 开启保护".into(), false)),
+        (Some(false), n) => Some((format!("记了 {n} 个 runner 却没生效"), true)),
+        (None, _) => None,
+    }
+}
+
 pub fn sudoers_rule(user: &str) -> String {
     format!(
         "# zloop: let the runner keep the Mac awake while a task runs, and restore the default afterwards\n\
