@@ -15,7 +15,7 @@
 
 **已验证的技术前提（2026-08-27 本机实测）**：
 
-- Claude Code 会话内执行的任何子进程都能读到环境变量 **`CLAUDE_CODE_SESSION_ID`**（本会话为 `01119e7e-…`），transcript 位于 `~/.claude/projects/<cwd 路径把 / 换成 ->/<session_id>.jsonl`；`claude --resume <id>` 交互续接，`claude -p --resume <id> "<prompt>"` 无头续接，`--fork-session` 可分叉。
+- Claude Code 会话内执行的任何子进程都能读到环境变量 **`CLAUDE_CODE_SESSION_ID`**（本会话为 `11111111-…`），transcript 位于 `~/.claude/projects/<cwd 路径把 / 换成 ->/<session_id>.jsonl`；`claude --resume <id>` 交互续接，`claude -p --resume <id> "<prompt>"` 无头续接，`--fork-session` 可分叉。
 - Codex 会话内有 `CODEX_THREAD_ID`（loopx `_host_thread.py:11-18` 用它做 thread binding）；`codex resume <SESSION_ID>` 交互续接，`codex exec resume <id> "<prompt>"` 无头续接，`codex exec --json --output-last-message <file>` 拿结构化结果；会话文件在 `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`。
 - 无头驱动 Claude 需要 `claude -p --output-format json`，工具权限用 `--allowedTools "Bash(zloop:*)" ...` 精确放行或 `--dangerously-skip-permissions`；Codex 用 `codex exec --sandbox workspace-write -C <dir> --skip-git-repo-check`。
 
@@ -40,7 +40,7 @@
                 "note": "…",
                 // ---- Rust 版新增（全部可选）----
                 "host": "claude|codex|cli",          // 谁在跑：由环境变量自动判定
-                "session": "01119e7e-…",             // 宿主会话 id → resume
+                "session": "11111111-…",             // 宿主会话 id → resume
                 "log": "log/20260827-054500-t1-done.md" } ],   // 本次执行留档（相对 .zloop/）
   "next_id": 2,
   "updated_at": "…"
@@ -89,7 +89,8 @@ Python 版 8 个不变，新增 4 个。仍然每个 ≤ 4 个 flag。
 | **`sessions`** [新] | 列出出现过的宿主会话与 resume 命令 | `--host`, `--json` |
 | **`context`** [新] | 有界交接包（给另一宿主/另一会话读） | `--budget <chars>`（默认 4000）, `--for claude\|codex` |
 | **`log`** [新] | 列出/查看执行留档 | `--todo <id>`, `--last <n>`, `--show <file>` |
-| **`run`** [新] | 无头 runner | `--host claude\|codex`, `--max-rounds`, `--fast`, `--allow-all` |
+| **`run`** [新] | 前台无头 runner | `--host`（默认 claude）, `--max-rounds`, `--fast`, `--allow-all`, `--resume`, `--timeout-min`, `--exit-on-wait`, `--max-budget-usd` |
+| **`start` / `stop`** [新，2026-08-27] | 后台 runner：`start` 以 setsid 分离重执行 `run`，stdio 到 `.zloop/runner/console.log`，pid 到 `.zloop/runner/pid`；`stop` SIGTERM→SIGKILL | 与 `run` 相同 |
 
 `hook-stop` 保留为内部命令。
 
@@ -105,6 +106,17 @@ Python 版 8 个不变，新增 4 个。仍然每个 ≤ 4 个 flag。
 | 3 | `decide()` | `idle · next would run t4 …` / `waiting (user_gate) · retry in 10 min` / `stopped (done)` |
 
 `in_progress` 是 `state.json` 新增的可选顶层键（`{todo, started_at, round, via, host, session}`），旧文件没有它照常读取。
+
+### 5.2 开源借鉴（2026-08-27，详见 `OPEN-SOURCE-REVIEW.md`）
+
+| 借自 | 加了什么 |
+|---|---|
+| Anthropic long-running harness | todo `acceptance`（`plan` 行 `文本 :: 验收`、`edit --acceptance`；heartbeat 要求自检；`done` 缺 evidence 提醒）、policy `preflight_cmd`（每轮前自检）、`run --git-commit`（每轮 checkpoint） |
+| OpenHands 三道闸 | tick `cost_usd / num_turns / duration_ms`（来自 `claude -p` JSON）、policy `max_total_usd` → `stopped (budget)` |
+| Beads | `zloop remember` + `.zloop/NOTES.md` + `context` 经验段；`zloop compact --keep-days` |
+| Codex `/goal pause\|resume` | `zloop pause` / `zloop resume` |
+| Ralph（Stop hook 反思） | 发现并修复：runner 拉起的 `claude -p` 会加载我们的 Stop hook——子进程设 `ZLOOP_RUNNER=1`，`hook-stop` 放行 |
+| 没人做好的一件事 | policy `notify_url` / `notify_cmd`；runner 等人、限流、停机时通知；`zloop notify` |
 
 ## 6. 会话追踪与 resume（G4）
 
@@ -130,7 +142,7 @@ pub fn transcript_path(host, session, project_root) -> Option<PathBuf>
 
 ```
 host    session                               ticks  first → last              todos      resume
-claude  01119e7e-ff5b-4a34-b1df-61fad1afe2ca  4      08-27 05:10 → 05:38       t1,t2      claude --resume 01119e7e-ff5b-4a34-b1df-61fad1afe2ca
+claude  11111111-2222-3333-4444-555555555555  4      08-27 05:10 → 05:38       t1,t2      claude --resume 11111111-2222-3333-4444-555555555555
 codex   019bd3f2-…                            1      08-27 05:41 → 05:41       t3         codex resume 019bd3f2-…
 ```
 
@@ -146,7 +158,7 @@ codex   019bd3f2-…                            1      08-27 05:41 → 05:41    
 - goal: 把 demo 服务的启动时间降到 1 秒以内
 - todo: [P0] 找出最慢的 3 个初始化步骤
 - outcome: progress   round: 2
-- host: claude   session: 01119e7e-…   resume: `claude --resume 01119e7e-…`
+- host: claude   session: 11111111-…   resume: `claude --resume 11111111-…`
 - note: 已定位 2 个，第 3 个待查
 
 ## Evidence
@@ -254,6 +266,7 @@ loop {
 ## 13. 已知取舍
 
 - 会话 id 靠环境变量：在非 Claude/Codex 的终端里手动跑 `zloop done`，host=cli、session 为空——这是事实，不伪造。
-- runner 驱动的 `claude -p` 每轮是一次独立请求，默认 `--resume` 上一轮的 session 以复用上下文；若用户希望每轮干净冷启动，`--no-resume`。上下文膨胀的控制交给 Claude Code 自身的 compaction。
+- runner 驱动的 `claude -p` 每轮是一次独立请求；会话续接策略 `--resume todo|all|none`，默认 **按 todo 谱系**（同一 todo 续接、换 todo 新会话，照搬 loopx 的 `(goal, agent, todo)` lineage），避免跨天单会话无限膨胀。
+- 长程加固（2026-08-27，见 `LONG-RUN-AUDIT.md`）：每轮宿主超时 `--timeout-min`、等人时持续轮询而非退出、限流不计失败、`max_progress_streak`、`max_runs` 默认 480 且可关、`init --force` 归档、in_progress stale 标注、`--max-budget-usd`；runner 每次退出记 `stop`，启动时最后一条非 `stop` 即记 `restart`。
 - 不做守护进程化（launchd / systemd）：`zloop run` 前台跑，需要后台就 `nohup` 或 tmux——loopx 的 launchd tick 那一套复杂度证明不值。
 - Python 原型（v0.1）在 Rust 版验证通过后已从仓库移除（2026-08-27）；`docs/DESIGN.md` 保留为它的设计记录。

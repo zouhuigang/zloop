@@ -58,7 +58,7 @@ fn end_to_end() {
     assert_eq!(payload["round"], 0);
     assert_eq!(payload["interval_min"], 3);
 
-    let o = zloop(d, &["done", "t1", "--note", "DESIGN.md written", "--next", "review design", "--evidence", "line1\nline2"], None, &[]);
+    let o = zloop(d, &["done", "t1", "--note", "DESIGN.md written", "--next", "review design", "--evidence", "line1\nline2", "--no-doc"], None, &[]);
     assert_eq!(o.code, 0, "{}", o.err);
     assert!(o.out.starts_with("t1 done: DESIGN.md written"));
     assert!(o.out.contains("next: t4 [P0] review design"));
@@ -100,7 +100,7 @@ fn end_to_end() {
     let files = zloop::log::entries(d, Some("t1"), 10).unwrap();
     assert_eq!(files.len(), 1);
     let body = fs::read_to_string(&files[0]).unwrap();
-    assert!(body.contains("## Evidence") && body.contains("line2"));
+    assert!(body.contains("## 验证证据") && body.contains("line2"));
     let o = zloop(d, &["log", "--show", files[0].file_name().unwrap().to_str().unwrap()], None, &[]);
     assert!(o.out.contains("- note: DESIGN.md written"));
 }
@@ -127,11 +127,11 @@ fn done_errors() {
     let d = dir.path();
     zloop(d, &["init", "g"], None, &[]);
     zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
-    let o = zloop(d, &["done", "t9"], None, &[]);
+    let o = zloop(d, &["done", "t9", "--no-doc"], None, &[]);
     assert_eq!(o.code, 2);
     assert!(o.err.contains("unknown todo id"));
-    zloop(d, &["done", "t1"], None, &[]);
-    let o = zloop(d, &["done", "t1"], None, &[]);
+    zloop(d, &["done", "t1", "--no-doc"], None, &[]);
+    let o = zloop(d, &["done", "t1", "--no-doc"], None, &[]);
     assert_eq!(o.code, 2);
     assert!(o.err.contains("already done"));
 }
@@ -162,7 +162,7 @@ fn session_is_captured_from_host_env() {
     let d = dir.path();
     zloop(d, &["init", "g"], None, &[]);
     zloop(d, &["plan", "--add", "[P0] a", "--add", "[P1] b"], None, &[]);
-    let o = zloop(d, &["done", "t1", "--note", "x"], None, &[("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555555555555")]);
+    let o = zloop(d, &["done", "t1", "--note", "x", "--no-doc"], None, &[("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555555555555")]);
     assert_eq!(o.code, 0, "{}", o.err);
     let o = zloop(d, &["done", "t2", "--outcome", "progress", "--note", "y"], None, &[("CODEX_THREAD_ID", "thread-abc")]);
     assert_eq!(o.code, 0, "{}", o.err);
@@ -187,7 +187,7 @@ fn context_respects_budget_and_names_next() {
     let d = dir.path();
     zloop(d, &["init", "Long goal text for the context packet"], None, &[]);
     zloop(d, &["plan", "--add", "[P0] first thing", "--add", "[P1] second thing"], None, &[]);
-    zloop(d, &["done", "t1", "--note", "done first"], None, &[("CLAUDE_CODE_SESSION_ID", "sess-1")]);
+    zloop(d, &["done", "t1", "--note", "done first", "--no-doc"], None, &[("CLAUDE_CODE_SESSION_ID", "sess-1")]);
     let o = zloop(d, &["context", "--for", "codex"], None, &[]);
     assert!(o.out.contains("## 下一条") && o.out.contains("t2 [P1] second thing"));
     assert!(o.out.contains("claude --resume sess-1"));
@@ -226,10 +226,48 @@ fn hook_stop_blocks_only_when_runnable() {
     assert_eq!(o.code, 0);
     let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
     assert_eq!(v["decision"], "block");
-    zloop(d, &["done", "t1"], None, &[]);
+    zloop(d, &["done", "t1", "--no-doc"], None, &[]);
     let o = zloop(d, &["hook-stop"], Some("{}"), &[]);
     assert_eq!(o.code, 0);
     assert_eq!(o.out, "");
+}
+
+#[test]
+fn init_force_archives_the_previous_goal() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "first goal"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "x", "--no-doc"], None, &[]);
+    let o = zloop(d, &["init", "--force", "second goal"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert!(o.out.contains("archived previous state → "), "{}", o.out);
+    let archive = d.join(".zloop").join("archive");
+    let files: Vec<_> = fs::read_dir(&archive).unwrap().flatten().collect();
+    assert_eq!(files.len(), 1);
+    let old: serde_json::Value = serde_json::from_str(&fs::read_to_string(files[0].path()).unwrap()).unwrap();
+    assert_eq!(old["goal"]["text"], "first goal");
+    assert_eq!(old["ticks"].as_array().unwrap().len(), 1);
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert_eq!(st.goal.text, "second goal");
+    assert!(st.todos.is_empty() && st.ticks.is_empty());
+    // logs from the first goal are untouched
+    assert!(!zloop::log::entries(d, None, 10).unwrap().is_empty());
+}
+
+#[test]
+fn stale_in_progress_is_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
+    zloop(d, &["next"], None, &[]);
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.in_progress.as_mut().unwrap().started_at = "2026-08-27T00:00:00+08:00".into();
+    state::save(&p, &mut st).unwrap();
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("⚠ stale (>120m"), "{}", o.out);
 }
 
 #[test]
@@ -264,7 +302,7 @@ fn phase_tracks_the_round() {
     let o = zloop(d, &["status"], None, &[]);
     assert!(o.out.contains("phase: executing t1") && o.out.contains("host claude · via next"), "{}", o.out);
     assert!(zloop(d, &["context"], None, &[]).out.contains("阶段：executing t1"));
-    zloop(d, &["done", "t1", "--note", "ok"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
     assert!(state::load(&state::state_path(d)).unwrap().in_progress.is_none());
     assert!(zloop(d, &["status"], None, &[]).out.contains("phase: idle · next would run t2"));
     zloop(d, &["done", "t2", "--block", "?"], None, &[]);
@@ -278,4 +316,242 @@ fn phase_tracks_the_round() {
     assert!(zloop(d, &["status"], None, &[]).out.contains("phase: runner sleeping until"));
     fs::write(j.join("journal.jsonl"), "{\"event\":\"begin\",\"round\":4,\"todo\":\"t2\",\"host\":\"claude\",\"at\":\"2026-08-27T00:00:00+08:00\"}\n").unwrap();
     assert!(zloop(d, &["status"], None, &[]).out.contains("runner round 4 on t2"));
+}
+
+#[test]
+fn hook_stop_passes_through_under_runner() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
+    let o = zloop(d, &["hook-stop"], Some("{}"), &[("ZLOOP_RUNNER", "1")]);
+    assert_eq!((o.code, o.out.as_str()), (0, ""));
+    let o = zloop(d, &["hook-stop"], Some("{}"), &[]);
+    assert!(o.out.contains("\"block\""));
+}
+
+#[test]
+fn acceptance_shows_up_and_done_without_evidence_hints() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    let o = zloop(d, &["plan", "--add", "[P0] ship :: tests green"], None, &[]);
+    assert_eq!(o.out.trim(), "t1 [P0] ship :: tests green");
+    let o = zloop(d, &["next", "--json"], None, &[]);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    assert_eq!(v["todo"]["acceptance"], "tests green");
+    assert!(zloop(d, &["status"], None, &[]).out.contains("验收：tests green"));
+    assert!(zloop(d, &["context"], None, &[]).out.contains("验收：tests green"));
+    let o = zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
+    assert!(o.out.contains("hint: t1 有验收标准"), "{}", o.out);
+    zloop(d, &["plan", "--add", "[P0] b"], None, &[]);
+    zloop(d, &["edit", "t2", "--acceptance", "lint passes"], None, &[]);
+    let o = zloop(d, &["done", "t2", "--note", "ok", "--evidence", "lint output clean", "--no-doc"], None, &[]);
+    assert!(!o.out.contains("有验收标准"), "evidence given → no acceptance hint: {}", o.out);
+    let logs = zloop::log::entries(d, Some("t2"), 5).unwrap();
+    assert!(fs::read_to_string(&logs[0]).unwrap().contains("- acceptance: lint passes"));
+}
+
+#[test]
+fn status_shows_spend_and_notify_cmd_receives_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
+    let o = zloop(d, &["notify"], None, &[]);
+    assert_eq!(o.code, 2, "nothing configured yet");
+    zloop(d, &["done", "t1", "--outcome", "progress", "--note", "x"], None, &[]);
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.ticks[0].cost_usd = Some(0.25);
+    st.policy.max_total_usd = 2.0;
+    st.policy.notify_cmd = Some(format!("cat >> {}", d.join("notify.log").display()));
+    state::save(&p, &mut st).unwrap();
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("spent: $0.25 / max $2.00"), "{}", o.out);
+    assert!(zloop(d, &["context"], None, &[]).out.contains("已花费：$0.25 / 上限 $2.00"));
+    let o = zloop(d, &["notify", "hello there"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    let log = fs::read_to_string(d.join("notify.log")).unwrap();
+    assert!(log.contains("hello there") && log.contains("\"event\":\"test\""), "{log}");
+}
+
+#[test]
+fn remember_pause_resume_and_compact() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a", "--add", "[P1] b"], None, &[]);
+    // remember → NOTES.md → context
+    let o = zloop(d, &["remember", "run cargo test before done; the fmt check is flaky"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert!(d.join(".zloop/NOTES.md").exists());
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(o.out.contains("## 经验") && o.out.contains("fmt check is flaky"), "{}", o.out);
+    // pause / resume
+    let o = zloop(d, &["pause"], None, &[]);
+    assert!(o.out.contains("paused"));
+    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: stopped (paused)"));
+    let o = zloop(d, &["resume"], None, &[]);
+    assert!(o.out.contains("active"));
+    assert!(zloop(d, &["status"], None, &[]).out.contains("phase: idle"));
+    // compact: nothing old yet
+    let o = zloop(d, &["compact"], None, &[]);
+    assert!(o.out.contains("nothing to compact"));
+    zloop(d, &["done", "t1", "--note", "old work", "--no-doc"], None, &[]);
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.todos[0].done_at = Some("2026-01-01T00:00:00+08:00".into());
+    st.ticks[0].at = "2026-01-01T00:00:00+08:00".into();
+    state::save(&p, &mut st).unwrap();
+    let o = zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert!(o.out.contains("compacted 1 todos and 1 ticks"), "{}", o.out);
+    let st = state::load(&p).unwrap();
+    assert_eq!(st.todos.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t2"]);
+    assert!(st.ticks.is_empty());
+    let archives: Vec<_> = fs::read_dir(d.join(".zloop/archive")).unwrap().flatten().collect();
+    assert_eq!(archives.len(), 1);
+    let a: serde_json::Value = serde_json::from_str(&fs::read_to_string(archives[0].path()).unwrap()).unwrap();
+    assert_eq!(a["todos"][0]["id"], "t1");
+    // t2 still runnable; the goal stays active
+    assert!(zloop(d, &["next", "--peek", "--json"], None, &[]).out.contains("\"id\": \"t2\""));
+}
+
+// ---------- 每轮技术文档 ----------
+
+#[test]
+fn done_refuses_to_finish_without_a_technical_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a", "--add", "[P1] b", "--add", "[P2] c"], None, &[]);
+
+    // finishing without --approach is rejected, and nothing is written
+    let o = zloop(d, &["done", "t1", "--note", "ok"], None, &[]);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(o.err.contains("需要留下技术文档"), "{}", o.err);
+    assert!(o.err.contains("--approach") && o.err.contains("--pitfall") && o.err.contains("--no-doc"), "{}", o.err);
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert_eq!(st.todos[0].status, "open", "rejected call must not change state");
+    assert!(st.ticks.is_empty());
+
+    // progress / fail / block are exempt — a round that did not finish cannot document a finished approach
+    let o = zloop(d, &["done", "t1", "--outcome", "progress", "--note", "half"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    let o = zloop(d, &["done", "t1", "--outcome", "fail", "--note", "boom"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    let o = zloop(d, &["done", "t3", "--block", "which db?"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+
+    // with the document it goes through and every section is rendered
+    let o = zloop(
+        d,
+        &["done", "t1", "--note", "done at last",
+          "--approach", "先量基线再改：bench.sh 跑 3 次取中位数，只对最慢的一步做懒加载",
+          "--decision", "不引入缓存层，成本高于收益",
+          "--decision", "懒加载放在入口而不是每个 use 处",
+          "--pitfall", "release 与 debug 差 3 倍，基线必须用 release",
+          "--evidence", "cargo test 64 passed"],
+        None,
+        &[],
+    );
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert!(!o.out.contains("hint: 这一轮没有实现思路"), "{}", o.out);
+    let st = state::load(&state::state_path(d)).unwrap();
+    let last = st.ticks.last().unwrap();
+    assert_eq!((last.outcome.as_str(), last.documented), ("done", Some(true)));
+    let body = fs::read_to_string(d.join(".zloop").join(last.log.as_deref().unwrap())).unwrap();
+    assert!(body.contains("## 实现思路") && body.contains("bench.sh 跑 3 次取中位数"), "{body}");
+    assert!(body.contains("## 关键决策") && body.contains("- 不引入缓存层") && body.contains("- 懒加载放在入口"), "{body}");
+    assert!(body.contains("## 遇到的坑") && body.contains("release 与 debug 差 3 倍"), "{body}");
+    assert!(body.contains("## 验证证据") && body.contains("cargo test 64 passed"), "{body}");
+    assert!(!body.contains("⚠ 这一轮没有留下实现思路"), "{body}");
+}
+
+#[test]
+fn no_doc_escape_hatch_is_marked_everywhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a", "--add", "[P1] b"], None, &[]);
+    let o = zloop(d, &["done", "t1", "--note", "trivial", "--no-doc"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert!(o.out.contains("hint: 这一轮没有实现思路"), "{}", o.out);
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert_eq!(st.ticks.last().unwrap().documented, Some(false));
+    let body = fs::read_to_string(d.join(".zloop").join(st.ticks.last().unwrap().log.as_deref().unwrap())).unwrap();
+    assert!(body.contains("⚠ 这一轮没有留下实现思路"), "{body}");
+    let o = zloop(d, &["log"], None, &[]);
+    assert!(o.out.contains("⚠ .zloop/log/"), "{}", o.out);
+    assert!(o.out.contains("只有结果记录"), "{}", o.out);
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("docs: 1 轮只有结果记录"), "{}", o.out);
+    // policy off → plain done works again
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.policy.require_doc = false;
+    state::save(&p, &mut st).unwrap();
+    assert_eq!(zloop(d, &["done", "t2", "--note", "no policy"], None, &[]).code, 0);
+}
+
+#[test]
+fn doc_assembles_rounds_into_one_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "把启动时间降到 1 秒"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 量基线 :: bench.sh 连跑 3 次", "--add", "[P1] 懒加载"], None, &[]);
+    zloop(d, &["done", "t1", "--outcome", "progress", "--note", "第一步", "--approach", "先写 bench.sh"], None, &[("CLAUDE_CODE_SESSION_ID", "sess-doc")]);
+    zloop(d, &["done", "t1", "--note", "基线 3.2s", "--approach", "取中位数避免抖动", "--pitfall", "debug 模式差 3 倍"], None, &[("CLAUDE_CODE_SESSION_ID", "sess-doc")]);
+    zloop(d, &["done", "t2", "--note", "懒加载完成", "--no-doc"], None, &[]);
+
+    let o = zloop(d, &["doc", "t1"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert!(o.out.starts_with("# 技术文档 · "), "{}", o.out);
+    assert!(o.out.contains("**目标**：把启动时间降到 1 秒"));
+    assert!(o.out.contains("## t1 [P0] 量基线"));
+    assert!(o.out.contains("- 验收标准：bench.sh 连跑 3 次"));
+    assert_eq!(o.out.matches("### 轮次").count(), 2, "both rounds of t1: {}", o.out);
+    assert!(o.out.contains("#### 实现思路"), "sections demoted under the round: {}", o.out);
+    assert!(o.out.contains("取中位数避免抖动") && o.out.contains("debug 模式差 3 倍"));
+    assert!(o.out.contains("claude --resume sess-doc"), "resume command carried over: {}", o.out);
+    assert!(!o.out.contains("## t2 "), "only the requested todo");
+
+    // --all covers every todo and flags the undocumented round
+    let out_file = d.join("docs").join("TECH.md");
+    let o = zloop(d, &["doc", "--all", "--out", out_file.to_str().unwrap()], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert!(o.out.contains("wrote ") && o.out.contains("2 条 todo"), "{}", o.out);
+    let text = fs::read_to_string(&out_file).unwrap();
+    assert!(text.contains("## t1 [P0]") && text.contains("## t2 [P1]"));
+    assert!(text.contains("（这一轮没有实现思路，只有结果记录）"), "{text}");
+
+    assert_eq!(zloop(d, &["doc", "t99"], None, &[]).code, 2);
+    assert_eq!(zloop(d, &["doc"], None, &[]).code, 2);
+}
+
+#[test]
+fn changed_files_are_captured_from_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let git = |args: &[&str]| Command::new("git").args(args).current_dir(d).output().unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    fs::write(d.join("keep.txt"), "one\n").unwrap();
+    fs::write(d.join(".gitignore"), ".zloop/\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "init"]);
+
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
+    fs::write(d.join("keep.txt"), "one\ntwo\n").unwrap(); // modified
+    fs::write(d.join("brand-new.rs"), "fn main() {}\n").unwrap(); // untracked
+    let o = zloop(d, &["done", "t1", "--note", "touched files", "--approach", "改了两个文件"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    let st = state::load(&state::state_path(d)).unwrap();
+    let body = fs::read_to_string(d.join(".zloop").join(st.ticks[0].log.as_deref().unwrap())).unwrap();
+    assert!(body.contains("## 改动文件"), "{body}");
+    assert!(body.contains("keep.txt"), "modified file listed: {body}");
+    assert!(body.contains("brand-new.rs (new)"), "untracked file listed: {body}");
+    assert!(!body.contains(".zloop/"), "zloop's own state must not be listed: {body}");
 }

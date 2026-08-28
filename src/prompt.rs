@@ -11,8 +11,9 @@ pub const HOSTS: [&str; 3] = ["claude", "codex-app", "codex-cli"];
 
 const PROTOCOL: &str = "你在为目标「{goal}」持续工作。项目目录：{root}（所有命令在这里执行）。每一轮：
 1. 先运行 `zloop context` 读交接包，再运行 `zloop next --json`。should_run=false 时，按 reason 简短告知用户后停止本轮，不要做别的。
-2. should_run=true 时，只做 todo 里这一条：做出可验证的产物，能跑的就跑一下验证。
-3. 完成 → `zloop done <id> --note \"<一句话结果>\" [--evidence \"<细节或 @文件>\"]`；有进展没做完 → 加 `--outcome progress`；失败 → 加 `--outcome fail`；需要用户决定 → 加 `--block \"<问题>\"`；发现新任务 → 加 `--next \"<任务>\"`。
+2. should_run=true 时，只做 todo 里这一条：做出可验证的产物，能跑的就跑一下验证；todo 带 acceptance（验收标准）的，逐条对照自检通过才算完成。
+3. 完成 → `zloop done <id> --note \"<一句话结果>\" --approach \"<怎么做的、为什么这么做>\" [--decision \"<关键取舍>\"] [--pitfall \"<踩过的坑与结论>\"] [--evidence \"<验证输出或 @文件>\"]`。`--approach` 是必填的：每条 todo 完成后要留下一份能让别人接手的技术文档，decision/pitfall 有就写，可重复。
+   有进展没做完 → 加 `--outcome progress`；失败 → 加 `--outcome fail`；需要用户决定 → 加 `--block \"<问题>\"`；发现新任务 → 加 `--next \"<任务>\"`；学到以后还用得上的经验 → `zloop remember \"<一句话>\"`。
 4. 不要改 .zloop/ 以外的调度状态；不碰凭证、不做破坏性 git、不做生产操作。
 5. 每轮结束用两三句话告诉用户：做了什么、验证了什么、下一条是什么。";
 
@@ -51,8 +52,8 @@ pub fn render_md(state: &State, root: &Path, max_ticks: usize) -> String {
     out.push_str(&format!("# zloop · {}\n\n", goal.id));
     out.push_str(&format!("**Goal** ({}): {}\n\n", goal.status, goal.text));
     out.push_str(&format!(
-        "policy: window {}h · max_runs {} · fail_streak {} · noop_streak {} · intervals {:?} min\n\n",
-        p.window_hours, p.max_runs, p.max_fail_streak, p.max_noop_streak, p.intervals_min
+        "policy: window {}h · max_runs {} · fail_streak {} · noop_streak {} · progress_streak {} · intervals {:?} min\n\n",
+        p.window_hours, p.max_runs, p.max_fail_streak, p.max_noop_streak, p.max_progress_streak, p.intervals_min
     ));
     out.push_str("## Todos\n\n");
     let mut order: Vec<&_> = state.todos.iter().collect();

@@ -23,11 +23,21 @@ fn resume_hint(host: Option<Host>) -> &'static str {
 pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, at: DateTime<FixedOffset>) -> String {
     let mut sections: Vec<String> = Vec::new();
 
+    let spent = tick::spent_usd(&state.ticks);
+    let spent_line = if spent > 0.0 || state.policy.max_total_usd > 0.0 {
+        format!(
+            "\n已花费：${spent:.2}{}",
+            if state.policy.max_total_usd > 0.0 { format!(" / 上限 ${:.2}", state.policy.max_total_usd) } else { String::new() }
+        )
+    } else {
+        String::new()
+    };
     sections.push(format!(
-        "## 目标\n{}\n项目目录：{}\n阶段：{}",
+        "## 目标\n{}\n项目目录：{}\n阶段：{}{}",
         state.goal.text,
         root.display(),
-        crate::phase::compute(state, root, at).summary
+        crate::phase::compute(state, root, at).summary,
+        spent_line
     ));
 
     let recent: Vec<String> = state
@@ -61,7 +71,8 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
             let t = &state.todos[i];
             let deps = if t.blocked_by.is_empty() { String::new() } else { format!(" ⏳{}", t.blocked_by.join(",")) };
             let note = if t.status == "blocked" && !t.note.is_empty() { format!(" — {}", t.note) } else { String::new() };
-            format!("- {} {} [P{}] {}{}{}", crate::prompt::checkbox(&t.status), t.id, t.priority, t.text, deps, note)
+            let acc = t.acceptance.as_deref().map(|a| format!(" ｜验收：{}", a.chars().take(80).collect::<String>())).unwrap_or_default();
+            format!("- {} {} [P{}] {}{}{}{}", crate::prompt::checkbox(&t.status), t.id, t.priority, t.text, deps, note, acc)
         })
         .collect();
     sections.push(format!(
@@ -83,6 +94,15 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
         if !lines.is_empty() {
             sections.push(format!("## 会话（可回看细节）\n{}", lines.join("\n")));
         }
+    }
+
+    let lessons = crate::notes::recent(root, 5);
+    if !lessons.is_empty() {
+        sections.push(format!(
+            "## 经验（zloop remember，最近 {} 条）\n{}",
+            lessons.len(),
+            lessons.iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n")
+        ));
     }
 
     sections.push(format!("## 怎么继续\n{}", resume_hint(for_host)));

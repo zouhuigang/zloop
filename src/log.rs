@@ -21,8 +21,70 @@ pub fn resolve_evidence(raw: Option<&str>) -> Result<Option<String>> {
     }
 }
 
+/// What a round is expected to leave behind: not just "it worked", but how and what bit us.
+#[derive(Debug, Default, Clone)]
+pub struct Doc {
+    /// 实现思路：why this approach, how it works.
+    pub approach: Option<String>,
+    /// 关键决策 / 取舍.
+    pub decisions: Vec<String>,
+    /// 遇到的坑 and what the conclusion was.
+    pub pitfalls: Vec<String>,
+    /// 验证证据: command output, test names, measurements.
+    pub evidence: Option<String>,
+    /// Filled in automatically from git.
+    pub changed_files: Option<String>,
+}
+
+impl Doc {
+    /// A round counts as documented once it explains *how* it was done.
+    pub fn is_complete(&self) -> bool {
+        self.approach.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.is_complete() && self.decisions.is_empty() && self.pitfalls.is_empty() && self.evidence.is_none()
+    }
+}
+
+/// Working-tree changes at write-back time: `git diff --stat` plus untracked files, `.zloop/` excluded.
+/// `None` outside a repo or when nothing changed. Capped so a huge round cannot bloat the doc.
+pub fn changed_files(root: &Path) -> Option<String> {
+    use std::process::Command;
+    let git = |args: &[&str]| Command::new("git").args(args).current_dir(root).output().ok();
+    if !git(&["rev-parse", "--is-inside-work-tree"])?.status.success() {
+        return None;
+    }
+    let mut out = String::new();
+    if let Some(o) = git(&["diff", "--stat", "HEAD", "--", "."]) {
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            if !line.trim_start().starts_with(".zloop") {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    if let Some(o) = git(&["ls-files", "--others", "--exclude-standard", "--", "."]) {
+        let new: Vec<String> = String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| !l.starts_with(".zloop"))
+            .map(|l| format!("  {l} (new)"))
+            .collect();
+        if !new.is_empty() {
+            out.push_str(&new.join("\n"));
+            out.push('\n');
+        }
+    }
+    let out = out.trim_end().to_string();
+    if out.is_empty() {
+        return None;
+    }
+    let capped: String = out.lines().take(40).collect::<Vec<_>>().join("\n");
+    Some(if out.lines().count() > 40 { format!("{capped}\n  … (truncated)") } else { capped })
+}
+
 /// Write the log file for a tick; returns the path relative to `.zloop/`.
-pub fn write(root: &Path, state: &State, tick: &Tick, todo: &Todo, evidence: Option<&str>) -> Result<String> {
+pub fn write(root: &Path, state: &State, tick: &Tick, todo: &Todo, doc: &Doc) -> Result<String> {
     let dir = root.join(STATE_DIR).join(LOG_DIR);
     fs::create_dir_all(&dir)?;
     let stamp = parse_iso(&tick.at)
@@ -47,21 +109,111 @@ pub fn write(root: &Path, state: &State, tick: &Tick, todo: &Todo, evidence: Opt
     body.push_str(&format!("# {} · {} · {}\n\n", todo.id, tick.outcome, tick.at));
     body.push_str(&format!("- goal: {}\n", state.goal.text));
     body.push_str(&format!("- todo: [P{}] {}\n", todo.priority, todo.text));
+    if let Some(acc) = &todo.acceptance {
+        body.push_str(&format!("- acceptance: {acc}\n"));
+    }
     body.push_str(&format!("- outcome: {}   round: {}\n", tick.outcome, tick.round));
     body.push_str(&format!("- host: {host}   session: {session}   resume: {resume}\n"));
+    if tick.cost_usd.is_some() || tick.duration_ms.is_some() {
+        body.push_str(&format!(
+            "- cost: {}   turns: {}   duration: {}\n",
+            tick.cost_usd.map(|c| format!("${c:.4}")).unwrap_or_else(|| "-".into()),
+            tick.num_turns.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+            tick.duration_ms.map(|d| format!("{}s", d / 1000)).unwrap_or_else(|| "-".into()),
+        ));
+    }
     if !tick.note.is_empty() {
         body.push_str(&format!("- note: {}\n", tick.note));
     }
-    if let Some(ev) = evidence {
-        let ev = ev.trim_end();
-        if !ev.is_empty() {
-            body.push_str("\n## Evidence\n\n");
-            body.push_str(ev);
-            body.push('\n');
+
+    let section = |body: &mut String, title: &str, text: &str| {
+        let text = text.trim_end();
+        if !text.is_empty() {
+            body.push_str(&format!("\n## {title}\n\n{text}\n"));
         }
+    };
+    if let Some(a) = &doc.approach {
+        section(&mut body, "实现思路", a);
+    }
+    if !doc.decisions.is_empty() {
+        let list = doc.decisions.iter().map(|d| format!("- {}", d.trim())).collect::<Vec<_>>().join("\n");
+        section(&mut body, "关键决策", &list);
+    }
+    if !doc.pitfalls.is_empty() {
+        let list = doc.pitfalls.iter().map(|p| format!("- {}", p.trim())).collect::<Vec<_>>().join("\n");
+        section(&mut body, "遇到的坑", &list);
+    }
+    if let Some(ev) = &doc.evidence {
+        section(&mut body, "验证证据", ev);
+    }
+    if let Some(files) = &doc.changed_files {
+        section(&mut body, "改动文件", &format!("```\n{}\n```", files.trim_end()));
+    }
+    if !doc.is_complete() {
+        body.push_str("\n> ⚠ 这一轮没有留下实现思路（`--approach`），只有结果记录。\n");
     }
     fs::write(dir.join(&name), body)?;
     Ok(format!("{LOG_DIR}/{name}"))
+}
+
+/// Does this log file carry an 实现思路 section?
+pub fn file_is_documented(path: &Path) -> bool {
+    fs::read_to_string(path).map(|s| s.contains("\n## 实现思路\n")).unwrap_or(false)
+}
+
+/// Assemble one document from a set of round logs: the file bodies, headings demoted one level.
+pub fn assemble(root: &Path, state: &State, todo_ids: &[String]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# 技术文档 · {}\n\n", state.goal.id));
+    out.push_str(&format!("**目标**：{}\n\n", state.goal.text));
+    out.push_str(&format!(
+        "生成于 {} · 目标状态 {} · 共 {} 条 todo\n",
+        crate::state::now_iso(),
+        state.goal.status,
+        state.todos.len()
+    ));
+
+    for id in todo_ids {
+        let Some(todo) = state.todos.iter().find(|t| &t.id == id) else { continue };
+        out.push_str(&format!("\n---\n\n## {} [P{}] {}\n\n", todo.id, todo.priority, todo.text));
+        out.push_str(&format!("- 状态：{}\n", todo.status));
+        if let Some(a) = &todo.acceptance {
+            out.push_str(&format!("- 验收标准：{a}\n"));
+        }
+        let rounds: Vec<&crate::state::Tick> =
+            state.ticks.iter().filter(|t| t.todo.as_deref() == Some(id.as_str()) && t.log.is_some()).collect();
+        if rounds.is_empty() {
+            out.push_str("\n_这条 todo 还没有留下任何轮次记录。_\n");
+            continue;
+        }
+        for tick in rounds {
+            let rel = tick.log.as_deref().unwrap_or_default();
+            let path = root.join(STATE_DIR).join(rel);
+            out.push_str(&format!("\n### 轮次 {} · {} · {}\n\n", tick.round, tick.outcome, tick.at));
+            match fs::read_to_string(&path) {
+                Ok(text) => {
+                    let documented = text.contains("\n## 实现思路\n");
+                    for line in text.lines() {
+                        // drop the file's own title, demote its sections under this round
+                        if line.starts_with("# ") {
+                            continue;
+                        }
+                        if let Some(rest) = line.strip_prefix("## ") {
+                            out.push_str(&format!("#### {rest}\n"));
+                        } else {
+                            out.push_str(line);
+                            out.push('\n');
+                        }
+                    }
+                    if !documented {
+                        out.push_str("\n_（这一轮没有实现思路，只有结果记录）_\n");
+                    }
+                }
+                Err(_) => out.push_str(&format!("_日志文件缺失：{rel}_\n")),
+            }
+        }
+    }
+    out
 }
 
 /// Log files, newest first, optionally filtered by todo id.
@@ -93,4 +245,16 @@ pub fn first_line(path: &Path) -> String {
         .ok()
         .and_then(|s| s.lines().next().map(|l| l.trim_start_matches('#').trim().to_string()))
         .unwrap_or_default()
+}
+
+/// Append lines to an existing log file (relative to `.zloop/`), e.g. host cost known only after settlement.
+pub fn append(root: &Path, rel: &str, lines: &str) -> Result<()> {
+    use std::io::Write;
+    let path = root.join(STATE_DIR).join(rel);
+    let mut f = fs::OpenOptions::new().append(true).open(&path).with_context(|| format!("appending to {}", path.display()))?;
+    f.write_all(lines.as_bytes())?;
+    if !lines.ends_with('\n') {
+        f.write_all(b"\n")?;
+    }
+    Ok(())
 }

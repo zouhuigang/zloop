@@ -80,10 +80,10 @@
 | 检查项 | 期望 | 实际 | 结果 |
 |---|---|---|---|
 | done 自动记录 host（claude/codex/cli） | `['claude', 'codex', 'cli']` | `['claude', 'codex', 'cli']` | ✅ |
-| session 来自 CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID，cli 为空 | `['01119e7e-ff5b-4a34-b1df-61fad1afe2ca', 'thread-test-1', None]` | `['01119e7e-ff5b-4a34-b1df-61fad1afe2ca', 'thread-test-1', None]` | ✅ |
+| session 来自 CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID，cli 为空 | `['11111111-2222-3333-4444-555555555555', 'thread-test-1', None]` | `['11111111-2222-3333-4444-555555555555', 'thread-test-1', None]` | ✅ |
 | noop tick 也带 host 字段 | `cli` | `cli` | ✅ |
 | sessions 去重出 2 个宿主会话（cli 无 session 不列） | `['claude', 'codex']` | `['claude', 'codex']` | ✅ |
-| sessions 给出可执行 resume 命令 | `['claude --resume 01119e7e-ff5b-4a34-b1df-61fad1afe2ca', 'codex resume thread-test-1']` | `['claude --resume 01119e7e-ff5b-4a34-b1df-61fad1afe2ca', 'codex resume thread-test-1']` | ✅ |
+| sessions 给出可执行 resume 命令 | `['claude --resume 11111111-2222-3333-4444-555555555555', 'codex resume thread-test-1']` | `['claude --resume 11111111-2222-3333-4444-555555555555', 'codex resume thread-test-1']` | ✅ |
 | 本会话 transcript 真实存在（~/.claude/projects/*/<id>.jsonl） | `True` | `True` | ✅ |
 | sessions 记录 todos 与 tick 数 | `(['t1'], 1)` | `(['t1'], 1)` | ✅ |
 | sessions --host codex 只列 codex | `True` | `True` | ✅ |

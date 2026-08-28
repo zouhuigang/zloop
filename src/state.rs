@@ -32,8 +32,9 @@ impl std::error::Error for StateError {}
 fn d_window() -> i64 {
     24
 }
+/// 480 = one round every 3 minutes for a whole day; `0` disables the brake.
 fn d_max_runs() -> usize {
-    60
+    480
 }
 fn d_fail() -> usize {
     3
@@ -41,8 +42,19 @@ fn d_fail() -> usize {
 fn d_noop() -> usize {
     3
 }
+/// Consecutive `progress` ticks on the same todo before the loop stops for a human.
+fn d_progress() -> usize {
+    8
+}
+/// Minutes after which an unfinished `in_progress` hand-out is flagged stale.
+fn d_stale() -> i64 {
+    120
+}
 fn d_intervals() -> Vec<u32> {
     vec![3, 10, 30]
+}
+fn d_require_doc() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,8 +77,29 @@ pub struct Policy {
     pub max_fail_streak: usize,
     #[serde(default = "d_noop")]
     pub max_noop_streak: usize,
+    #[serde(default = "d_progress")]
+    pub max_progress_streak: usize,
+    #[serde(default = "d_stale")]
+    pub stale_after_min: i64,
     #[serde(default = "d_intervals")]
     pub intervals_min: Vec<u32>,
+    /// Lifetime spend cap for this goal in USD (summed from host-reported `cost_usd`); `0` = unlimited.
+    #[serde(default)]
+    pub max_total_usd: f64,
+    /// Webhook to POST notifications to (Feishu/Lark custom-bot format is detected from the URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_url: Option<String>,
+    /// Shell command to run for notifications; the event JSON arrives on stdin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_cmd: Option<String>,
+    /// Shell command the runner executes before every round (e.g. `./init.sh && cargo test`);
+    /// a non-zero exit records a `fail` tick instead of calling the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_cmd: Option<String>,
+    /// Refuse `done` (outcome=done) unless it carries `--approach`, so every finished todo
+    /// leaves a real technical document. `--no-doc` overrides one call.
+    #[serde(default = "d_require_doc")]
+    pub require_doc: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -78,7 +111,14 @@ impl Default for Policy {
             max_runs: d_max_runs(),
             max_fail_streak: d_fail(),
             max_noop_streak: d_noop(),
+            max_progress_streak: d_progress(),
+            stale_after_min: d_stale(),
             intervals_min: d_intervals(),
+            max_total_usd: 0.0,
+            notify_url: None,
+            notify_cmd: None,
+            preflight_cmd: None,
+            require_doc: d_require_doc(),
             extra: Map::new(),
         }
     }
@@ -97,6 +137,9 @@ pub struct Todo {
     pub updated_at: String,
     #[serde(default)]
     pub done_at: Option<String>,
+    /// How to verify this todo is really done (`plan` line syntax: `text :: acceptance`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -115,6 +158,16 @@ pub struct Tick {
     pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
+    /// Host-reported spend for the round that produced this tick (claude -p `total_cost_usd`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_turns: Option<u64>,
+    /// Did this round leave an 实现思路 in its log? (None for rounds that write no log.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documented: Option<bool>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

@@ -140,6 +140,41 @@ fn to_json_has_at_most_ten_fields() {
 }
 
 #[test]
+fn progress_streak_on_one_todo_stops_the_loop() {
+    let mut st = fresh(&["[P0] a", "[P1] b"]);
+    st.policy.max_progress_streak = 3;
+    for _ in 0..2 {
+        outcome(&mut st, "t1", "progress", "still going");
+    }
+    tick_at(&mut st, "noop", None, None); // noop is transparent
+    assert!(tick::decide(&st, now_utc()).should_run);
+    outcome(&mut st, "t1", "progress", "still going");
+    let d = tick::decide(&st, now_utc());
+    assert_eq!((d.should_run, d.reason.as_str(), d.interval_min), (false, "progress_streak", None));
+    // progress on a different todo breaks the streak
+    outcome(&mut st, "t2", "progress", "other");
+    assert!(tick::decide(&st, now_utc()).should_run);
+    // disabled with 0
+    st.policy.max_progress_streak = 0;
+    for _ in 0..5 {
+        outcome(&mut st, "t1", "progress", "x");
+    }
+    assert!(tick::decide(&st, now_utc()).should_run);
+}
+
+#[test]
+fn max_runs_zero_disables_the_window_brake() {
+    let mut st = fresh(&["[P0] a"]);
+    st.policy.max_runs = 0;
+    for _ in 0..50 {
+        outcome(&mut st, "t1", "progress", "x");
+        st.policy.max_progress_streak = 0;
+    }
+    assert!(tick::decide(&st, now_utc()).should_run);
+    assert_eq!(zloop::state::Policy::default().max_runs, 480);
+}
+
+#[test]
 fn record_captures_host_and_session() {
     let mut st = fresh(&["[P0] a"]);
     let who = zloop::session::HostSession { host: zloop::session::Host::Claude, session: Some("abc".into()) };
@@ -147,4 +182,20 @@ fn record_captures_host_and_session() {
     assert_eq!(t.host.as_deref(), Some("claude"));
     assert_eq!(t.session.as_deref(), Some("abc"));
     assert_eq!(todo::remaining(&st), 1);
+}
+
+#[test]
+fn budget_cap_stops_when_spent_reaches_max_total_usd() {
+    let mut st = fresh(&["[P0] a", "[P1] b"]);
+    st.policy.max_total_usd = 1.0;
+    outcome(&mut st, "t1", "progress", "x");
+    st.ticks.last_mut().unwrap().cost_usd = Some(0.6);
+    assert!(tick::decide(&st, now_utc()).should_run);
+    outcome(&mut st, "t1", "progress", "y");
+    st.ticks.last_mut().unwrap().cost_usd = Some(0.45);
+    let d = tick::decide(&st, now_utc());
+    assert_eq!((d.should_run, d.reason.as_str(), d.interval_min), (false, "budget", None));
+    assert!((tick::spent_usd(&st.ticks) - 1.05).abs() < 1e-9);
+    st.policy.max_total_usd = 0.0;
+    assert!(tick::decide(&st, now_utc()).should_run);
 }

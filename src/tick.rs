@@ -47,8 +47,26 @@ pub fn noop_streak(ticks: &[Tick]) -> usize {
     ticks.iter().rev().take_while(|t| t.outcome == "noop").count()
 }
 
+/// Trailing consecutive `progress` ticks on `todo_id`; `noop` is transparent, anything else breaks it.
+pub fn progress_streak(ticks: &[Tick], todo_id: &str) -> usize {
+    let mut n = 0;
+    for t in ticks.iter().rev() {
+        match t.outcome.as_str() {
+            "noop" => continue,
+            "progress" if t.todo.as_deref() == Some(todo_id) => n += 1,
+            _ => break,
+        }
+    }
+    n
+}
+
 pub fn current_round(ticks: &[Tick]) -> u64 {
     ticks.iter().filter(|t| t.outcome == "done" || t.outcome == "progress").count() as u64
+}
+
+/// Total host-reported spend recorded on ticks (USD).
+pub fn spent_usd(ticks: &[Tick]) -> f64 {
+    ticks.iter().filter_map(|t| t.cost_usd).sum()
 }
 
 pub fn window_ticks<'a>(state: &'a State, at: DateTime<FixedOffset>) -> Vec<&'a Tick> {
@@ -102,8 +120,15 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
     if fail_streak(ticks) >= policy.max_fail_streak {
         return Decision::stop("fail_streak");
     }
+    if policy.max_total_usd > 0.0 && spent_usd(ticks) >= policy.max_total_usd {
+        return Decision::stop("budget");
+    }
+    let candidate = &state.todos[runnable[0]];
+    if policy.max_progress_streak > 0 && progress_streak(ticks, &candidate.id) >= policy.max_progress_streak {
+        return Decision::stop("progress_streak");
+    }
     let counted = window_ticks(state, at);
-    if counted.len() >= policy.max_runs {
+    if policy.max_runs > 0 && counted.len() >= policy.max_runs {
         let oldest = counted
             .iter()
             .filter_map(|t| parse_iso(&t.at).ok())
@@ -148,6 +173,10 @@ pub fn record(
         host: Some(who.host.as_str().to_string()),
         session: who.session.clone(),
         log: None,
+        cost_usd: None,
+        duration_ms: None,
+        num_turns: None,
+        documented: None,
         extra: Map::new(),
     };
     state.ticks.push(tick.clone());
@@ -228,7 +257,13 @@ pub fn to_json(decision: &Decision, state: &State) -> Value {
         "round": current_round(&state.ticks),
         "should_run": decision.should_run,
         "reason": decision.reason,
-        "todo": todo.map(|t| json!({"id": t.id, "text": t.text, "priority": t.priority})),
+        "todo": todo.map(|t| {
+            let mut o = json!({"id": t.id, "text": t.text, "priority": t.priority});
+            if let Some(a) = &t.acceptance {
+                o["acceptance"] = Value::String(a.clone());
+            }
+            o
+        }),
         "remaining": todo::remaining(state),
         "last": last_summary(state),
         "writeback": todo.map(|t| format!("zloop done {} --note '<一句话结果>'", t.id)),

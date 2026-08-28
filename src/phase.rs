@@ -48,16 +48,23 @@ fn last_journal_event(root: &Path) -> Option<Value> {
 pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase {
     if let Some(ip) = &state.in_progress {
         let host = ip.host.as_deref().unwrap_or("cli");
+        let age_min = parse_iso(&ip.started_at).map(|s| (now - s).num_minutes()).unwrap_or(0);
+        let stale = if state.policy.stale_after_min > 0 && age_min >= state.policy.stale_after_min {
+            format!(" ⚠ stale (>{}m, the session that took it may be gone; next `zloop next` re-hands it out)", state.policy.stale_after_min)
+        } else {
+            String::new()
+        };
         return Phase {
             kind: "executing",
             summary: format!(
-                "executing {} · round {} · since {} ({} ago) · host {} · via {}",
+                "executing {} · round {} · since {} ({} ago) · host {} · via {}{}",
                 ip.todo,
                 ip.round,
                 hhmm(&ip.started_at),
                 elapsed(&ip.started_at, now),
                 host,
-                ip.via
+                ip.via,
+                stale
             ),
         };
     }

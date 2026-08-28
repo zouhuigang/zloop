@@ -101,3 +101,16 @@ fn parse_loopx_state_keeps_only_open_items() {
         vec![(0, "研读 loopx 核心调度链路，产出 notes".to_string()), (2, "README + 迁移说明".to_string())]
     );
 }
+
+#[test]
+fn plan_line_acceptance_syntax() {
+    let mut st = state::default_state("g", "g");
+    let items = todo::parse_plan("[P0] build api :: all CRUD endpoints return 200 and tests pass\n[P1] no acceptance here\n[P2] weird :: \n", 1);
+    todo::add(&mut st, &items, false);
+    assert_eq!(st.todos[0].text, "build api");
+    assert_eq!(st.todos[0].acceptance.as_deref(), Some("all CRUD endpoints return 200 and tests pass"));
+    assert_eq!(st.todos[1].acceptance, None);
+    assert!(st.todos[2].acceptance.is_none());
+    assert_eq!(todo::split_acceptance("x :: y"), ("x".to_string(), Some("y".to_string())));
+    assert_eq!(todo::split_acceptance(" :: y"), (":: y".to_string(), None));
+}

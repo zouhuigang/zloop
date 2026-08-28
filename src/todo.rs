@@ -101,18 +101,30 @@ pub fn parse_loopx_state(text: &str) -> Vec<(u8, String)> {
     items
 }
 
+/// Split `text :: acceptance` into the todo text and its optional acceptance criteria.
+pub fn split_acceptance(raw: &str) -> (String, Option<String>) {
+    match raw.split_once(" :: ") {
+        Some((text, acc)) if !acc.trim().is_empty() && !text.trim().is_empty() => {
+            (text.trim().to_string(), Some(acc.trim().to_string()))
+        }
+        _ => (raw.trim().to_string(), None),
+    }
+}
+
 fn new_todo(state: &mut State, text: &str, priority: u8) -> Todo {
     let id = format!("t{}", state.next_id);
     state.next_id += 1;
+    let (text, acceptance) = split_acceptance(text);
     Todo {
         id,
-        text: text.to_string(),
+        text,
         priority,
         status: "open".into(),
         blocked_by: Vec::new(),
         note: String::new(),
         updated_at: now_iso(),
         done_at: None,
+        acceptance,
         extra: Map::new(),
     }
 }

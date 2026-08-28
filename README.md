@@ -1,41 +1,259 @@
 # zloop
 
 **让 Claude Code / Codex 围着一个目标持续干活的最小调度器。**
-一个 JSON 文件、12 个子命令、零运行时依赖、单个 1.2 MB 的 Rust 二进制。
+一个 JSON 状态文件、一个 1.2 MB 的 Rust 二进制、零运行时依赖。你给它一个目标和几条 todo，它一轮做一条、做完写回、该停就停、能接着跑就接着跑——跑多久都行。
 
-除了基本循环（init / plan / next / done / edit / status / heartbeat / install），它专门解决四件事（设计见 [docs/RUST-DESIGN.md](docs/RUST-DESIGN.md)）：
+它专门解决四件事（设计见 [docs/RUST-DESIGN.md](docs/RUST-DESIGN.md)，长程运行加固见 [docs/LONG-RUN-AUDIT.md](docs/LONG-RUN-AUDIT.md)）：
 
-| 目标 | 命令 | 怎么实现 |
+| 目标 | 怎么用 | 背后 |
 |---|---|---|
-| **任务长时间运行** | `zloop run --host claude\|codex` | 无头驱动 `claude -p` / `codex exec`，一轮一条 todo，按 `next` 的 interval 睡眠，所有停机条件来自 `next`；journal 记 begin/end，`kill -9` 后重启从当前状态续 |
-| **跨 Claude Code / Codex 切换的上下文** | `zloop context [--for codex]` | ≤4000 字符的交接包：目标 / 当前判断（最近 3 次执行）/ 下一条 / 待办 / 各宿主会话 / 怎么继续；两个宿主本来就读同一个状态文件 |
-| **执行留档** | `zloop done … --evidence "…\|@file"` → `zloop log` | 每次 `done` 生成 `.zloop/log/<ts>-<todo>-<outcome>.md`（目标、todo、结果、宿主、会话、resume 命令、证据） |
-| **进入对应的 resume 会话** | `zloop sessions` | 每个 tick 自动记录 `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID`；打印可直接执行的 `claude --resume <id>` / `codex resume <id>`，并检查 transcript 是否存在 |
+| **任务长时间运行** | `zloop start` / `zloop stop` | 后台 runner 驱动 `claude -p` 或 `codex exec`，一轮一条 todo；宿主挂死会超时 kill，限流会退避，等你决定时慢速轮询不退出，进程被杀再 `start` 一次就续 |
+| **在 Claude Code ↔ Codex 之间切换不丢上下文** | `zloop context` | 两个宿主读同一个 `.zloop/state.json`；`context` 输出 ≤4000 字符的交接包（目标 / 当前判断 / 下一条 / 待办 / 各宿主会话） |
+| **执行过程留档** | `zloop done --approach …` → `zloop log` / `zloop doc` | 每轮生成一份分节技术文档：实现思路、关键决策、遇到的坑、验证证据、自动抓取的改动文件 |
+| **回到当时的会话看细节** | `zloop sessions` | 每轮自动记下 `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID`，直接给你 `claude --resume <id>` / `codex resume <id>` |
+| **等你决定时叫你** | policy `notify_url` / `notify_cmd` | runner 进入等人、限流、停机时推一条飞书 / 任意命令通知；`zloop notify` 测试配置 |
+| **每条 todo 留一份技术文档** | `zloop done … --approach/--decision/--pitfall` → `zloop doc` | 完成一条 todo 必须写清实现思路（默认强制），加上关键决策、踩过的坑、验证证据和自动抓取的改动文件；`zloop doc --all` 导出整个目标的技术文档 |
 
-实测：`next` 一次调用 **12 ms**（同逻辑的 Python 原型 53 ms）；`cargo test` 38 个用例；runner 用 `claude -p` 无人值守跑 2 轮约 90 秒，第 2 轮自动 `--resume` 第 1 轮会话。
+zloop 是对 [loopx](https://github.com/huangruiteng/loopx) 里"Claude Code / Codex 核心调度"那 20% 的重写：保留"状态 → 该不该跑 → 跑一条 → 写回 → 决定下一 tick"这条主干，砍掉多 agent、能力插件、仪表盘、飞书、30 种交互模式和 32 万行代码。为什么这么做见 [docs/loopx-principles.md](docs/loopx-principles.md) 与 [docs/loopx-scheduling-notes.md](docs/loopx-scheduling-notes.md)。之后又对照了 Anthropic 的长时 agent harness 指南、Ralph Wiggum loop、Beads、OpenHands 以及 Claude Code / Codex 原生的 `/goal`，借鉴了验收标准、成本闸、通知、经验记忆、git checkpoint、环境自检等做法，见 [docs/OPEN-SOURCE-REVIEW.md](docs/OPEN-SOURCE-REVIEW.md)。
 
-zloop 是对 [loopx](https://github.com/huangruiteng/loopx) 里"Claude Code / Codex 核心调度"那 20% 的重写：保留"状态 → 该不该跑 → 跑一条 → 写回 → 决定下一 tick"这条主干，砍掉多 agent、能力插件、仪表盘、飞书、30 种交互模式和 32 万行代码。loopx 的设计思路（长时运行如何不中断、上下文怎么管、多 agent / 多宿主怎么协同）见 [docs/loopx-principles.md](docs/loopx-principles.md)；保留了什么、砍了什么见 [docs/loopx-scheduling-notes.md](docs/loopx-scheduling-notes.md)；zloop 架构见 [docs/DESIGN.md](docs/DESIGN.md)。
+与 Claude Code / Codex 自带的 `/goal`、`/loop until:` 的关系：那是**单个会话内**的"直到条件满足"循环；zloop 的价值在会话之外——状态在文件里、跨宿主、跨重启，每轮留档、能回看会话、runner 不依赖任一宿主 UI 存活、停机条件是确定性的而不是模型自判。两者可以叠着用。
 
-## 安装
+---
+
+## 目录
+
+- [一、安装](#一安装)
+  - [1. 前置条件](#1-前置条件)
+  - [2. 编译并安装二进制](#2-编译并安装二进制)
+  - [3. 接入 Claude Code / Codex](#3-接入-claude-code--codex)
+  - [4. 验证安装](#4-验证安装)
+  - [5. 升级与卸载](#5-升级与卸载)
+  - [6. 安装常见问题](#6-安装常见问题)
+- [二、使用](#二使用)
+  - [1. 五个概念](#1-五个概念)
+  - [2. 方式一：在 Claude Code 里用 `/zloop`](#2-方式一在-claude-code-里用-zloop)
+  - [3. 方式二：后台长跑 `start` / `status` / `stop`](#3-方式二后台长跑-start--status--stop)
+  - [4. 方式三：在 Codex 里用](#4-方式三在-codex-里用)
+  - [5. 方式四：手动或脚本驱动](#5-方式四手动或脚本驱动)
+  - [6. 看进度：`status` / `log` / `sessions` / `context`](#6-看进度status--log--sessions--context)
+  - [6.1 每条 todo 留一份技术文档](#61-每条-todo-留一份技术文档)
+  - [7. 停下来了怎么办](#7-停下来了怎么办)
+  - [8. 调参](#8-调参)
+  - [9. 从 loopx 迁移](#9-从-loopx-迁移)
+- [三、参考](#三参考)
+  - [命令一览](#命令一览)
+  - [`next` 怎么决定](#next-怎么决定)
+  - [`.zloop/` 目录与状态文件](#zloop-目录与状态文件)
+  - [与 loopx 的对比](#与-loopx-的对比)
+  - [明确不做](#明确不做)
+  - [开发](#开发)
+
+---
+
+## 一、安装
+
+### 1. 前置条件
+
+| 需要 | 说明 |
+|---|---|
+| macOS 或 Linux | 后台运行用到 `setsid` / `flock`；Windows 未测试 |
+| Rust ≥ 1.75 | 只在编译时需要。没有的话：`curl https://sh.rustup.rs -sSf \| sh`，或用 mise：`mise use -g rust@stable` |
+| Claude Code CLI 和/或 Codex CLI | zloop 自己不调模型，它驱动这两个宿主。至少装一个并登录：`claude` 能进交互界面、`codex login status` 显示已登录 |
+
+### 2. 编译并安装二进制
 
 ```bash
-git clone <this repo> zloop && cd zloop
-cargo build --release                # Rust ≥ 1.75；产物 target/release/zloop（约 1.2 MB）
-install -m755 target/release/zloop ~/.local/bin/zloop
-zloop install --claude               # 写 ~/.claude/skills/zloop/SKILL.md
-zloop install --codex                # 写 ~/.codex/skills/zloop/{SKILL.md,agents/openai.yaml}
+git clone https://github.com/zouhuigang/zloop.git && cd zloop
+cargo build --release                                   # 产物 target/release/zloop（约 1.2 MB，静态单文件）
+install -m755 target/release/zloop ~/.local/bin/zloop   # 放到 PATH 里任意目录都行
 ```
 
-可选：`zloop install --claude-stop-hook` 往 `~/.claude/settings.json` 加一个 Stop hook——有可执行 todo 时阻止 Claude 停下并把协议塞回去，不需要 `/loop`；所有 todo 做完、等人或连续失败 3 次时自动放行。要停用就删掉 settings.json 里 `hooks.Stop` 中 `zloop hook-stop` 那一条。
+`~/.local/bin` 不在 PATH 的话，在 shell 配置里加一行 `export PATH="$HOME/.local/bin:$PATH"`（fish：`fish_add_path ~/.local/bin`）。
 
-`install` 只写带 `<!-- zloop-managed:v1 -->` 标记的文件，重复执行幂等，遇到不是它写的同名文件会拒绝覆盖。默认**不**安装任何 hook。
+### 3. 接入 Claude Code / Codex
 
-## 60 秒上手
+```bash
+zloop install --claude      # 写 ~/.claude/skills/zloop/SKILL.md            → Claude Code 里多一个 /zloop
+zloop install --codex       # 写 ~/.codex/skills/zloop/SKILL.md + agents/openai.yaml → Codex 里多一个 $zloop
+```
+
+两条都可以装，互不影响。`install` 只写带 `<!-- zloop-managed:v1 -->` 标记的文件：重复执行是幂等的（输出 `kept`），遇到同名但不是它写的文件会拒绝覆盖。**新开的 Claude Code / Codex 会话**才会加载新 skill。
+
+可选——Claude Code Stop hook：
+
+```bash
+zloop install --claude-stop-hook   # 往 ~/.claude/settings.json 的 hooks.Stop 加一条 "zloop hook-stop"
+```
+
+装了它之后，在有 `.zloop/` 且还有可执行 todo 的项目里，Claude 每次要停下来时会被拦住并塞回下一轮协议，不用你敲 `/loop`；todo 全做完、等你决定、连续失败 3 次时自动放行；在没有 `.zloop/` 的目录里它什么也不做。停用：删掉 settings.json 里那条 hook。**默认不装**，因为它对所有目录生效，需要你知道自己在开什么。
+
+### 4. 验证安装
+
+```bash
+zloop --version                              # zloop 0.2.0
+ls ~/.claude/skills/zloop/SKILL.md           # Claude Code skill 在位
+ls ~/.codex/skills/zloop/agents/openai.yaml  # Codex skill 在位（如果装了）
+
+mkdir /tmp/zl-check && cd /tmp/zl-check
+zloop init "安装验证" && zloop plan --add "[P0] 打个招呼" && zloop next
+# RUN  t1 [P0] 打个招呼
+#      writeback: zloop done t1 --note '<一句话结果>'
+#      interval: 3 min · remaining 1
+#      phase: executing t1 · round 1 · since 07:20 (0s ago) · host cli · via next
+zloop done t1 --note "hi" && zloop status   # goal (done) … phase: stopped (done)
+cd - && rm -rf /tmp/zl-check
+```
+
+想验证宿主真的能被驱动（会调一次真实模型，约 1 分钟）：
+
+```bash
+mkdir /tmp/zl-real && cd /tmp/zl-real
+zloop init "验证 runner" && zloop plan --add "[P0] 在项目目录创建 hello.txt，内容一行：hello zloop"
+zloop run --host claude --max-rounds 1       # 看到 "runner: round 1 written back" 和 "session → claude --resume …"
+cat hello.txt && zloop sessions               # hello zloop / claude <id> … ✓ transcript
+```
+
+### 5. 升级与卸载
+
+```bash
+# 升级
+cd zloop && git pull && cargo build --release && install -m755 target/release/zloop ~/.local/bin/zloop
+zloop install --claude --codex               # skill 模板有变化时会输出 wrote，否则 kept
+
+# 卸载
+zloop stop                                   # 每个还在后台跑的项目里各执行一次
+rm ~/.local/bin/zloop
+rm -rf ~/.claude/skills/zloop ~/.codex/skills/zloop
+# 装过 Stop hook 的话，删掉 ~/.claude/settings.json 里 hooks.Stop 中 command 为 "zloop hook-stop" 的那条
+# 各项目里的 .zloop/ 是你的运行记录，留不留随你
+```
+
+### 6. 安装常见问题
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| `zloop: command not found` | `~/.local/bin` 不在 PATH，见第 2 步 |
+| `cargo: command not found` | 没装 Rust，见第 1 步；用 mise 装的话 cargo 在 `~/.local/share/mise/shims/` |
+| Claude Code 里没有 `/zloop` | skill 只在新会话加载；确认 `~/.claude/skills/zloop/SKILL.md` 存在 |
+| `zloop run --host codex` 报认证错误 | 先 `codex login` |
+| `install` 报 `exists and is not managed by zloop` | 你自己在那个位置放过同名文件，备份后删掉再装 |
+| Stop hook 装了没反应 | hook 配置只在新会话生效；且只在 cwd 向上能找到 `.zloop/` 时才起作用 |
+
+---
+
+## 二、使用
+
+### 1. 五个概念
+
+| 概念 | 是什么 | 在哪 |
+|---|---|---|
+| **goal** | 一个项目当前的目标，一句话 | `.zloop/state.json` → `goal.text`；换目标用 `zloop init --force`，旧的自动归档 |
+| **todo** | 目标拆成的有序步骤，带 `[P0]/[P1]/[P2]` 优先级；状态 open / blocked / deferred / done | `zloop plan` 写入，`zloop done` / `zloop edit` 改 |
+| **轮（round）** | 一次"取一条 todo → 做 → 写回"。每轮只做一条 | `zloop next` 取，`zloop done` 写回 |
+| **tick** | 每次写回留下的一条记录：时间、todo、结果（done / progress / fail / block / noop / edit）、宿主、会话 | `state.json` → `ticks[]`，同时生成一个 `.zloop/log/*.md` |
+| **phase** | 循环现在处于什么阶段：executing / sleeping / idle / waiting / stopped | `zloop status` 第 2 行，`zloop next --json` 的 `phase` 字段 |
+
+一个项目一个 `.zloop/` 目录，放在项目根；所有命令从当前目录向上找它，也可以用 `--dir <路径>` 指定。
+
+### 2. 方式一：在 Claude Code 里用 `/zloop`
+
+最省事的入口。打开项目，在 Claude Code 里：
+
+```
+/zloop 把 demo 服务的启动时间降到 1 秒以内
+```
+
+Claude 会：`zloop init` 建目标 → 把目标拆成 2–5 条可验证的 todo 交给 `zloop plan` → 立刻跑第一轮（`zloop context` → `zloop next --json` → 做那一条 → `zloop done t1 --note … --evidence …`）→ 用两三句话汇报。
+
+之后：
+
+```
+/zloop              ← 再跑一轮
+/zloop status       ← 看状态（也可以是 context / sessions / log / next）
+/loop /zloop        ← 让 Claude Code 自己按 interval_min 一轮轮续跑（Claude Code 内置的 /loop）
+```
+
+装了 Stop hook 的话连 `/loop` 都不用敲：只要还有可执行的 todo，Claude 想停下就会被拦回去继续。
+
+### 3. 方式二：后台长跑 `start` / `status` / `stop`
+
+不想守着终端、要跑几小时到几天的任务，用这个。
+
+```bash
+cd my-project
+zloop init "…"                                   # 已经用 /zloop 建过就跳过
+printf '[P0] …\n[P1] …\n[P2] …\n' | zloop plan   # 一行一条，可选 [Pn] 前缀，默认 P1
+
+zloop start          # 后台开跑：默认用 claude，每轮 30 分钟超时；关终端、合盖都不影响
+zloop status         # 第 2 行：循环到哪了；第 3 行：runner 在不在（pid）
+zloop stop           # 停
+```
+
+`start` 做的事：用独立会话（setsid）重新执行 `zloop run`，输出写到 `.zloop/runner/console.log`，pid 记在 `.zloop/runner/pid`。重复 `start` 会拒绝（"already running"）。想看实时输出：`tail -f .zloop/runner/console.log`。
+
+每一轮 runner 做什么：`next` 选一条 todo → 组装 prompt（每轮协议 + 当前 todo）→ 调 `claude -p`（或 `codex exec`）→ 等它执行完 → 检查它有没有 `zloop done` 写回 → 睡 `interval_min` → 下一轮。所有"该不该继续"的判断都来自 `next`，runner 自己不做决定。
+
+常用参数（`start` 和 `run` 一样）：
+
+```bash
+zloop start --host codex            # 换 Codex 跑；两个宿主共享同一状态，可以交替
+zloop start --max-budget-usd 2.00   # 每轮花费上限，透传给 claude -p（Codex 无此参数）
+zloop start --timeout-min 60        # 单轮宿主超时（默认 30）
+zloop start --resume all            # 会话续接：todo（默认，同一 todo 续接、换 todo 新会话）| all（一直续）| none（每轮全新）
+zloop run --fast --max-rounds 3     # 前台跑、间隔按秒算、只跑 3 轮——演示和调试用
+```
+
+权限：默认只放行 `Bash(zloop:*)` + 读写编辑工具（Claude）/ `--sandbox workspace-write`（Codex）；加 `--allow-all` 才跳过全部权限确认。
+
+**电脑重启、进程被杀之后，再 `zloop start` 一次就行**：journal 里会多一条 `restart`，从当前状态续跑，做完的 todo 不会重做。
+
+### 3.1 合上盖子任务不停（macOS）
+
+runner 活着的时候 Mac 不睡，runner 一停就恢复系统默认——这是 `zloop start` 的默认行为，不用配置：
+
+| 层 | 做什么 | 需要什么 |
+|---|---|---|
+| `caffeinate -i -s -w <runner pid>` | 防空闲休眠、接电源时防系统休眠；runner 退出它自动退出 | 无 |
+| `sudo pmset -a disablesleep 1` | **合上盖子也不睡**（`caffeinate` 和任何第三方断言都做不到这一点——Apple 从 10.13 起把对应的私有 API 锁给了自家进程） | 一次性配置免密：`zloop install --sudoers` |
+
+```bash
+zloop install --sudoers     # 写 /etc/sudoers.d/zloop-pmset，只放行 3 条精确的 pmset 命令，会要一次密码
+zloop start                 # 之后每次 start 自动开、stop 自动关
+zloop status                # 第 4 行 sleep: lid-close sleep disabled by zloop (1 runner) · restores when they stop
+zloop awake                 # 单看睡眠状态和哪些 runner 在"举着"它
+```
+
+**什么时候恢复默认息屏？** 只看 runner 还在不在，**跟开不开盖子无关**（代码里没有任何盖子/唤醒事件的钩子）：
+
+| 你做的事 | 结果 |
+|---|---|
+| 合盖 → 过一会儿开盖 | 任务继续跑，睡眠仍禁用。**不用敲任何命令** |
+| 任务自己跑完（或因连续失败 / 原地踏步 / 超预算停机） | runner 退出，**自动**恢复默认息屏 |
+| 你主动 `zloop stop` | 恢复默认息屏 |
+| runner 被 `kill -9`、崩溃、机器重启 | 兜底恢复（Drop guard 立即恢复；强杀由 watchdog 15 秒内恢复；重启这种极端情况由下一次 `zloop start/status/awake` 修正） |
+
+多个项目同时跑时按 runner 计数，停掉一个不会误关另一个。
+
+不想动睡眠设置：`zloop start --no-keep-awake`。没配 sudoers 也能跑，只是合盖会睡，`status` 会提示。
+
+**风险**：合盖不睡 = 放进包里也在跑，发热、掉电；`disablesleep` 跨重启持久，若 runner 运行中机器重启，开机后第一次 `zloop status` 会看到 ⚠ 并提示 `zloop awake reconcile`。长任务请插电。
+
+### 4. 方式三：在 Codex 里用
+
+- **Codex CLI / App 交互**：`$zloop`（Codex 不支持自定义顶层 slash），行为与 `/zloop` 相同。
+- **Codex App automation**：让模型用 `automation_update` 建一条 automation，body 就是 `zloop heartbeat --host codex-app` 的输出，初始间隔 3 分钟；`interval_min` 为 `null` 时暂停。
+- **Codex 原生 goal 循环**：`/goal <zloop heartbeat --host codex-cli 的输出>`。
+- **后台 runner**：`zloop start --host codex`。
+
+从 Claude Code 切到 Codex（或反过来）时，在新宿主里第一步 `zloop context`——它给你目标、最近三轮做了什么、下一条是什么、另一边的会话怎么回看。
+
+### 5. 方式四：手动或脚本驱动
+
+不经过任何 AI 宿主，把 zloop 当一个带节奏控制的 todo 队列用：
 
 ```bash
 cd my-project
 zloop init "把 demo 服务的启动时间降到 1 秒以内"
-
 printf '[P0] 测量当前启动耗时并记录基线
 [P0] 找出最慢的 3 个初始化步骤
 [P1] 对最慢步骤做懒加载
@@ -45,128 +263,146 @@ zloop next --json
 # {"goal": "...", "round": 0, "should_run": true, "reason": "ready",
 #  "todo": {"id": "t1", "text": "测量当前启动耗时并记录基线", "priority": 0},
 #  "remaining": 4, "last": null,
-#  "writeback": "zloop done t1 --note '<一句话结果>'", "interval_min": 3}
+#  "writeback": "zloop done t1 --note '<一句话结果>'", "interval_min": 3,
+#  "phase": "executing t1 · round 1 · since 07:20 (0s ago) · host cli · via next"}
 
-zloop done t1 --note "基线 3.2s，脚本 bench.sh"
-zloop done t2 --outcome progress --note "已定位 2 个，第 3 个待查"
-zloop done t2 --block "第 3 个步骤涉及付费 SDK，是否允许替换？"   # t2 等人，next 会自动去跑 t3
+zloop edit t3 --acceptance "冷启动 ≤1s，bench.sh 连跑 3 次都通过"   # 验收标准：模型 done 前要逐条自检；没带 --evidence 会被提醒
+zloop done t1 --note "基线 3.2s，脚本 bench.sh" --evidence @bench.log   # 完成；--evidence 可以是文本或 @文件
+zloop done t2 --outcome progress --note "已定位 2 个，第 3 个待查"        # 有进展但没完
+zloop done t2 --block "第 3 个步骤涉及付费 SDK，是否允许替换？"            # 需要人决定；next 会跳过它去做 t3
+zloop done t3 --note "懒加载完成" --next "[P1] 补一个启动耗时的回归测试"   # 完成并在其后插入一条新 todo
+zloop edit t2 --status open                                              # 人回答了问题，把 t2 放回队列
+zloop remember "bench.sh 要在 release 模式下跑，debug 数据差 3 倍"           # 经验进 .zloop/NOTES.md，下次 context 会带上
 zloop status
-zloop status --md > .zloop/STATE.md      # 只读投影，给人看的
 ```
 
-## 每轮协议（模型看的就是这 5 条）
+每轮协议——模型看到的就是这 5 条（`zloop heartbeat --host claude|codex-app|codex-cli` 打印，约 850 字符）：
 
 ```
-1. 运行 `zloop next --json`。should_run=false 时，按 reason 简短告知用户后停止本轮。
+1. 先运行 `zloop context` 读交接包，再运行 `zloop next --json`。should_run=false 时按 reason 简短告知用户后停止本轮。
 2. should_run=true 时，只做 todo 里这一条：做出可验证的产物，能跑的就跑一下验证。
-3. 完成 → `zloop done <id> --note "…"`；有进展没做完 → --outcome progress；失败 → --outcome fail；
+3. 完成 → `zloop done <id> --note "…" [--evidence "…"]`；有进展没做完 → --outcome progress；失败 → --outcome fail；
    需要用户决定 → --block "<问题>"；发现新任务 → --next "<任务>"。
 4. 不要改 .zloop/ 以外的调度状态；不碰凭证、不做破坏性 git、不做生产操作。
 5. 每轮结束用两三句话告诉用户：做了什么、验证了什么、下一条是什么。
 ```
 
-`zloop heartbeat --host claude|codex-app|codex-cli` 会把这 5 条连同目标和目录打印出来（约 1,100 字符），最后一句因宿主而异：怎么续跑。
-
-## 在 Claude Code 里用
-
-```
-/zloop 把 demo 服务的启动时间降到 1 秒以内     ← 初始化 + 规划 todo + 跑第一轮
-/zloop                                        ← 再跑一轮
-/loop /zloop                                  ← 让 Claude Code 自己按 interval_min 续跑
-```
-
-可选（实验性）：`zloop install --claude-stop-hook` 往 `~/.claude/settings.json` 加一个 Stop hook。有可执行 todo 时它会阻止 Claude 停下并把协议塞回去，不需要 `/loop`；所有 todo 做完、连续失败 3 次或等人时它自动放行。
-
-## 在 Codex 里用
-
-- **Codex App**：让模型用 `automation_update` 建一条 automation，body 就是 `zloop heartbeat --host codex-app` 的输出，初始间隔 3 分钟；每轮 `interval_min` 为 `null` 时暂停。
-- **Codex CLI**：`/goal <zloop heartbeat --host codex-cli 的输出>`，交给原生 goal 循环。
-
-两种宿主读的是同一个 `.zloop/state.json`、跑的是同一个 `zloop next`。
-
-## 命令
-
-| 命令 | 作用 | flags |
-|---|---|---|
-| `zloop init "<goal>"` | 建 `.zloop/state.json` | `--force` |
-| `zloop plan` | 写有序 todo：stdin / `--file` / `--add` / `--from-loopx` | `--add LINE`（可重复）, `--file`, `--replace`, `--from-loopx PATH` |
-| `zloop next` | 该不该跑、跑哪条；空闲时记一笔 noop | `--json`, `--peek` |
-| `zloop done <id>` | **唯一写回**：记 tick、改 todo 状态、可插后继 | `--note`, `--outcome progress\|fail`, `--block Q`, `--next LINE` |
-| `zloop edit <id>` | 改文本 / 状态 / 优先级 / 依赖 | `--text`, `--status`, `--priority`, `--blocked-by t1,t2\|user\|''` |
-| `zloop status` | 只读总览 | `--json`（整份状态）, `--md`（Markdown 投影） |
-| `zloop heartbeat` | 打印每轮协议 | `--host claude\|codex-app\|codex-cli` |
-| `zloop install` | 装 skill | `--claude`, `--codex`, `--claude-stop-hook` |
-| `zloop sessions` | 出现过的宿主会话 + resume 命令 | `--host`, `--json` |
-| `zloop context` | 有界交接包（换宿主 / 新会话先读它） | `--budget`, `--for claude\|codex\|cli` |
-| `zloop log` | 列出 / 查看执行留档 | `--todo`, `--last`, `--show` |
-| `zloop run` | 无头 runner | `--host claude\|codex`, `--max-rounds`, `--fast`, `--allow-all`, `--no-resume` |
-
-所有命令接受全局 `--dir`；默认从当前目录向上找最近的 `.zloop/`。
-
-### 无头长时运行
+### 6. 看进度：`status` / `log` / `sessions` / `context`
 
 ```bash
-zloop run --host claude                 # 前台循环：next → claude -p（自动 --resume 上一轮会话）→ 校验写回 → 睡 interval_min
-zloop run --host codex --max-rounds 5   # 换 Codex 跑 5 轮；两者共享同一状态，可以交替
-zloop run --host claude --fast          # interval 按秒算，演示用
+zloop status                  # 目标、phase、runner 是否在跑、未完成 todo、最近会话
+zloop status --md             # Markdown 投影（含每条 tick 的 resume 命令和 log 链接），可重定向到文件给人看
+zloop log                     # 最近 20 轮留档（时间倒序）
+zloop log --todo t2           # 某条 todo 的每一轮
+zloop log --show 20260827-071049-t3-done.md
+zloop sessions                # 出现过的宿主会话、各做了哪些 todo、transcript 是否还在、怎么 resume
+zloop context                 # 交接包：换宿主 / 开新会话 / 想快速搞清现状时先看它
 ```
 
-默认只放行 `Bash(zloop:*)` + 读写编辑工具（Claude）/ `--sandbox workspace-write`（Codex）；`--allow-all` 才跳过权限。模型一轮结束没有写回，runner 记一笔 `fail`，连续 3 次自动停。日志在 `.zloop/runner/journal.jsonl`。
+`phase` 一行说清循环到哪了：
 
-### 切宿主 / 回看会话
+| `phase` | 含义 |
+|---|---|
+| `executing t3 · round 4 · since 06:20 (3m ago) · host claude · via next` | 一条 todo 已被交出去（`next` 或 runner），还没 `done` |
+| `executing … ⚠ stale (>120m, …)` | 交出去两小时还没写回，那个会话多半没了 |
+| `runner sleeping until 06:41 (2m10s left) · reason ready` | runner 在两轮之间睡觉 |
+| `runner round 4 on t2 since … — no end recorded` | runner 开了一轮没收尾（进程可能死了），再 `start` 会续 |
+| `idle · next would run t4 [P1] …` | 没人在跑，下一轮会做 t4 |
+| `waiting (user_gate) · retry in 10 min` | 暂时没活可干，在退避 |
+| `stopped (done \| user_gate \| fail_streak \| progress_streak \| paused)` | 循环已停，原因在括号里 |
+
+### 6.1 每条 todo 留一份技术文档
+
+一条 todo 做完，光有"做完了"没用——三个月后（或者换个人接手）真正想知道的是**怎么做的、当时为什么这么选、踩过哪些坑**。所以 `zloop done` 完成一条 todo 时**默认要求**带上实现思路：
 
 ```bash
-zloop context --for codex     # 在 Codex 里第一步：读交接包
-zloop sessions                # claude 36346c2a-… ticks 2 … ✓ transcript
-                              #         claude --resume 36346c2a-…
-zloop log --todo t2           # 这条 todo 的每次执行留档
+zloop done t3 --note "基线 3.2s" \
+  --approach "先写 bench.sh 连跑 3 次取中位数避免抖动；只在 release 下测" \
+  --decision "不引入 criterion，多一个依赖不值当" \
+  --decision "基线脚本进仓库，后续回归直接复用" \
+  --pitfall  "第一次用 debug 跑出 9.8s，比 release 慢 3 倍，白排查半小时" \
+  --evidence "bench.sh: 3.19s / 3.22s / 3.20s（median 3.20s）"
 ```
 
-## 循环现在到哪了：`phase`
+`--decision` 和 `--pitfall` 可以重复；`--approach` / `--evidence` 支持 `@文件`。生成的 `.zloop/log/<时间>-t3-done.md` 是一份分节文档：
 
-`zloop status` 第二行、`zloop next --json` 的 `phase` 字段、`zloop context` 的目标段都带一句阶段说明（loopx 把这类信息散在 `lifecycle_phase` / `waiting_on` / `quota.state` / `scheduler_hint.execution_phase` / turn journal 里，这里合成一行）：
+```markdown
+# t3 · done · 2026-08-28T08:08:43+08:00
+- goal / todo / acceptance / outcome / round / host / session / resume / cost / note
+## 实现思路      ← --approach
+## 关键决策      ← --decision（可重复）
+## 遇到的坑      ← --pitfall（可重复）
+## 验证证据      ← --evidence
+## 改动文件      ← 自动：git diff --stat + 未跟踪文件，排除 .zloop/
+```
 
-| phase | 含义 | 来源 |
+忘了写会怎样：
+
+```
+$ zloop done t3 --note "做完了"
+done: t3 完成时需要留下技术文档（policy.require_doc）。带上实现思路再重试，例如：
+  zloop done t3 --note "<一句话结果>" \
+    --approach "<怎么做的、为什么这么做>" \
+    ...
+确实不需要文档：加 --no-doc；想永久关闭：把 .zloop/state.json 的 policy.require_doc 设为 false。
+```
+
+拒绝发生在写状态之前，所以这次调用什么都没改，补上参数重跑即可。`--outcome progress|fail` 和 `--block` 不强制——没做完的轮次写不出完整思路。
+
+导出：
+
+```bash
+zloop doc t3                       # 这条 todo 的所有轮次，合成一份文档
+zloop doc --all --out docs/TECH.md # 整个目标：概览 + 每条 todo 一章 + 每轮一节
+zloop log                          # 只有结果记录、没有实现思路的轮次会打 ⚠
+```
+
+### 7. 停下来了怎么办
+
+| `phase` / runner 输出 | 发生了什么 | 你要做的 |
 |---|---|---|
-| `executing t3 · round 4 · since 06:20 (3m ago) · host claude · via next` | 一条 todo 已被 `next` 交出去（或 runner 已开始一轮），还没 `done` | `state.in_progress`（`next` 写、`done` 清） |
-| `runner sleeping until 06:41 (2m10s left) · reason ready` | runner 在两轮之间睡觉 | `.zloop/runner/journal.jsonl` 的 `sleep` 事件 |
-| `runner round 4 on t2 since … — no end recorded` | runner 开了一轮没收尾（进程可能死了） | journal 悬空 `begin` |
-| `idle · next would run t4 [P1] …` | 没人在跑，下一轮会做 t4 | `decide()` |
-| `waiting (user_gate) · retry in 10 min` | 暂时没活可干，退避中 | `decide()` |
-| `stopped (done \| user_gate \| fail_streak)` | 循环已停，等人 | `decide()` |
+| `stopped (done)` | 全部 todo 完成 | `zloop plan --add …` 加活会自动回到 active；换目标 `zloop init --force "新目标"`（旧状态归档到 `.zloop/archive/`） |
+| `waiting (user_gate)` / runner 日志 `polling until a human unblocks` | 某条 todo 被 `--block` 等你决定；后台 runner **没有退出**，在 30 分钟一次慢速轮询 | `zloop status` 看 `[!]` 那条的问题 → 回答后 `zloop edit t3 --status open`（必要时 `--text` 改写），runner 下次轮询自动续 |
+| `stopped (fail_streak)` | 连续 3 轮失败：宿主超时、没写回、或真的报错 | `zloop log --todo t3` 看原因 → 修环境 / 拆 todo / `zloop edit t3 --text …`（任意 `edit` 都会重置计数）→ `zloop start` |
+| `stopped (progress_streak)` | 同一 todo 连续 8 轮"有进展"却没完成 | 多半 todo 太大：`zloop edit t3 --text "更小的一步"` 或 `zloop done t3 --outcome progress --next "拆出的下一步"` |
+| `stopped (paused)` | 你 `zloop pause` 了 | `zloop resume` |
+| `stopped (budget)` | 累计花费达到 policy `max_total_usd` | 看 `zloop status` 的 `spent:`，确认值得就调大上限再 `start` |
+| `waiting (throttled) · retry in N min` | 24 小时内已跑满 `max_runs`（默认 480） | 确实需要更快就调大 policy 的 `max_runs`，或设 `0` 不限 |
+| runner 日志 `host rate-limited · not counted · sleeping 30 min` | 宿主返回 429 / rate limit / overloaded | 不用管，30 分钟后自动重试，不计失败 |
+| runner 日志 `TIMED OUT (recorded fail)` | 某轮宿主超过 `--timeout-min` 被 kill | 偶发不用管；频繁出现就调大 `--timeout-min` 或把 todo 拆小 |
 
-`next --peek` 不会把 todo 交出去，因此不改变 phase。
+### 8. 调参
 
-## `next` 怎么决定
+**调度策略**在 `.zloop/state.json` 的 `policy`，直接编辑：
 
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `intervals_min` | `[3, 10, 30]` | 有活时每 3 分钟一轮；等人/无活时 10 → 30 分钟退避；30 也是 runner 等人时的轮询周期 |
+| `max_runs` | `480` | 24 小时窗口内最多记账多少轮（done / progress / fail），防空转刹车；`0` 不限 |
+| `window_hours` | `24` | 上面那个窗口的长度 |
+| `max_fail_streak` | `3` | 连续失败几轮停下等人 |
+| `max_noop_streak` | `3` | 交互式 `next` 连续几次"没活"后停止退避（runner 不受此影响） |
+| `max_progress_streak` | `8` | 同一 todo 连续几轮 progress 没 done 就停；`0` 关闭 |
+| `stale_after_min` | `120` | `in_progress` 多久没写回算悬挂 |
+| `max_total_usd` | `0`（不限） | 本目标累计花费上限（来自 `claude -p` 返回的 `total_cost_usd`），达到即 `stopped (budget)` |
+| `notify_url` | 无 | 通知 webhook。飞书自定义机器人地址会自动用飞书消息格式 |
+| `notify_cmd` | 无 | 通知命令（`sh -c`），事件 JSON 从 stdin 进，另有 `ZLOOP_EVENT` / `ZLOOP_TEXT` / `ZLOOP_ROOT` 环境变量 |
+| `preflight_cmd` | 无 | runner 每轮开始前先跑它（如 `./init.sh && cargo test`）；失败记一笔 `fail` 不调宿主，通过则把摘要放进 prompt |
+| `require_doc` | `true` | 完成一条 todo 必须带 `--approach`（见 [6.1](#61-每条-todo-留一份技术文档)）；设为 `false` 关闭强制 |
+
+**通知怎么配**（飞书群里加一个"自定义机器人"，拿到 webhook 地址）：
+
+```bash
+# 写进 .zloop/state.json 的 policy
+"notify_url": "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx"
+zloop notify           # 群里收到"zloop 通知测试"即配置正确
 ```
-paused/done  >  all_done  >  user_gate / blocked  >  fail_streak  >  throttled  >  ready
-```
 
-- 有可执行 todo（open 且 `blocked_by` 全部完成）→ `ready`，选 `(priority, 写入顺序)` 最靠前的一条，`interval_min = 3`。
-- 全部 blocked 且有人在等 → `user_gate`；纯依赖未满足 → `blocked`。退避 10 → 30 分钟，连续 3 次 noop 后 `interval_min = null`（停下等人）。
-- 最近连续 3 次 `fail` → `fail_streak`，停；`zloop edit` 一下（人介入）即可重置。
-- 24 小时窗口内已记账 60 次 → `throttled`，告诉你几分钟后窗口释放。
+之后 runner 在**等你决定**（某条 todo 被 `--block`）、**限流退避**、**停机**（除 `--max-rounds`）时各推一条，同一情形不重复。不用飞书的话 `notify_cmd` 随便接：`"notify_cmd": "osascript -e \"display notification \\\"$ZLOOP_TEXT\\\"\""`。
 
-策略在 `state.json` 的 `policy` 里，直接改：`window_hours / max_runs / max_fail_streak / max_noop_streak / intervals_min`。
+**runner 参数**（`start` / `run`）：`--host claude|codex`、`--timeout-min 30`、`--max-budget-usd`（仅 claude，单轮上限；总上限用 policy `max_total_usd`）、`--resume todo|all|none`、`--exit-on-wait`（等人时退出而不轮询，配合外部定时器用）、`--git-commit`（每轮写回后 `git commit`，排除 `.zloop/`）、`--max-rounds N`、`--fast`（间隔按秒，演示用）、`--allow-all`。
 
-## 状态文件
-
-```jsonc
-{
-  "version": 1,
-  "goal":   { "id": "my-project", "text": "…", "status": "active", "created_at": "…" },
-  "policy": { "window_hours": 24, "max_runs": 60, "max_fail_streak": 3, "max_noop_streak": 3, "intervals_min": [3, 10, 30] },
-  "todos":  [ { "id": "t1", "text": "…", "priority": 0, "status": "open", "blocked_by": [], "note": "", "updated_at": "…", "done_at": null } ],
-  "ticks":  [ { "at": "…", "round": 1, "todo": "t1", "outcome": "done", "note": "…" } ],
-  "next_id": 2,
-  "updated_at": "…"
-}
-```
-
-写入是 `tmp → fsync → os.replace` 原子替换，并发靠同目录 `state.json.lock`（`fcntl.flock`）。JSON 是唯一真源；`STATE.md` 只渲染、不回读。
-
-## 从 loopx 迁移
+### 9. 从 loopx 迁移
 
 ```bash
 cd my-project
@@ -176,35 +412,111 @@ zloop plan --from-loopx .codex/goals/<goal>/ACTIVE_GOAL_STATE.md
 
 只导入未勾选的 `- [ ] [Pn] …` 行（User Todo 与 Agent Todo 两节都算），剥掉 `<!-- loopx:todo … -->` 注释，`[P0]/[P1]/[P2]` 前缀原样保留；已完成 `[x]` 和延后 `[-]` 的不导入。loopx 的 `claimed_by`、`task_class`、`action_kind`、lease、successor 链等元数据没有对应物，直接丢弃。
 
-## 精简度对比
+---
+
+## 三、参考
+
+### 命令一览
+
+| 命令 | 作用 | 参数 |
+|---|---|---|
+| `zloop init "<goal>"` | 建 `.zloop/state.json`；`--force` 换目标并把旧状态归档到 `.zloop/archive/` | `--force` |
+| `zloop plan` | 写有序 todo：stdin / `--file` / `--add` / `--from-loopx`；一行 `[P0] 文本 :: 验收标准` | `--add LINE`（可重复）, `--file`, `--replace`, `--from-loopx PATH` |
+| `zloop next` | 该不该跑、跑哪条；交出 todo（phase 变 executing）；空闲时记一笔 noop | `--json`, `--peek`（只看不交出、不记 noop） |
+| `zloop done <id>` | **唯一写回**：记 tick、改 todo 状态、写技术文档、可插后继 | `--note`, `--outcome progress\|fail`, `--block Q`, `--next LINE`, `--evidence`, `--approach`, `--decision`（可重复）, `--pitfall`（可重复）, `--no-doc` |
+| `zloop doc [<id>]` | 把轮次日志合成一份技术文档 | `--all`, `--out FILE` |
+| `zloop edit <id>` | 改文本 / 状态 / 优先级 / 依赖 / 验收标准；任何 edit 都算"人介入"，重置 fail / noop 计数 | `--text`, `--status open\|blocked\|deferred\|done`, `--priority 0-4`, `--blocked-by t1,t2\|user\|''`, `--acceptance` |
+| `zloop status` | 目标、phase、runner、累计花费、待办、最近会话 | `--json`（整份状态）, `--md`（Markdown 投影） |
+| `zloop pause` / `zloop resume` | 暂停 / 恢复目标（runner 下次检查即停 / 续） | — |
+| `zloop remember "<一句话>"` | 记一条以后用得上的经验到 `.zloop/NOTES.md`，最近 5 条出现在 `context` | — |
+| `zloop compact` | 把完成超过 N 天的 todo 和它们的 tick 归档到 `.zloop/archive/`，state.json 保持小 | `--keep-days 7` |
+| `zloop notify [文本]` | 用 policy 里配置的通道发一条通知，用来测试 webhook | — |
+| `zloop awake [reconcile]` | macOS 睡眠保护状态；`reconcile` 修正"没 runner 却 SleepDisabled=1"的陈旧状态 | — |
+| `zloop context` | 有界交接包 | `--budget 4000`, `--for claude\|codex\|cli` |
+| `zloop sessions` | 宿主会话与 resume 命令 | `--host`, `--json` |
+| `zloop log` | 执行留档 | `--todo`, `--last 20`, `--show FILE` |
+| `zloop heartbeat` | 打印每轮协议 | `--host claude\|codex-app\|codex-cli` |
+| `zloop start` / `zloop stop` | 后台 runner 开 / 停（pid、日志在 `.zloop/runner/`） | `start` 接受 `run` 的全部参数 |
+| `zloop run` | 前台 runner | `--host`, `--max-rounds`, `--fast`, `--allow-all`, `--resume`, `--timeout-min`, `--exit-on-wait`, `--max-budget-usd`, `--git-commit`, `--no-keep-awake` |
+| `zloop install` | 装 skill / hook / sudoers 规则 | `--claude`, `--codex`, `--claude-stop-hook`, `--sudoers` |
+
+全局参数 `--dir <路径>`：指定项目目录；默认从当前目录向上找最近的 `.zloop/`。退出码：0 正常；1 找不到 / 读不了状态文件；2 参数或语义错误（未知 todo、重复 done 等）。
+
+### `next` 怎么决定
+
+```
+paused/done  >  all_done  >  user_gate / blocked  >  fail_streak  >  progress_streak  >  throttled  >  ready
+```
+
+- 有可执行 todo（`open` 且 `blocked_by` 全部 done）→ `ready`，选 `(priority, 写入顺序)` 最靠前的一条，`interval_min = 3`。
+- 全部 blocked 且有人在等 → `user_gate`；纯依赖未满足 → `blocked`。退避 10 → 30 分钟，交互式连续 3 次 noop 后 `interval_min = null`。
+- 最近连续 3 次 `fail` → `fail_streak`；同一 todo 连续 8 次 `progress` → `progress_streak`；两者都停下等人，`edit` 重置。
+- 24 小时窗口内记账满 `max_runs` → `throttled`，给出几分钟后释放。
+
+### `.zloop/` 目录与状态文件
+
+```
+.zloop/
+  state.json            唯一真源（下面的结构）
+  state.json.lock       并发锁（flock）
+  NOTES.md              zloop remember 写的经验
+  log/                  每轮一份技术文档 <时间>-<todo>-<结果>.md（思路/决策/坑/证据/改动文件）
+  runner/
+    journal.jsonl       runner 事件：begin / end / sleep / stop / restart / notify / commit / preflight_failed
+    console.log         zloop start 的输出
+    pid                 后台 runner 的 pid
+  archive/              init --force 归档的旧 state.json；compact 归档的旧 todo/tick
+```
+
+```jsonc
+{
+  "version": 1,
+  "goal":   { "id": "my-project", "text": "…", "status": "active", "created_at": "…" },
+  "policy": { "window_hours": 24, "max_runs": 480, "max_fail_streak": 3, "max_noop_streak": 3,
+              "max_progress_streak": 8, "stale_after_min": 120, "intervals_min": [3, 10, 30],
+              "max_total_usd": 0, "notify_url": "https://open.feishu.cn/…", "preflight_cmd": "cargo test -q" },
+  "todos":  [ { "id": "t1", "text": "…", "priority": 0, "status": "open", "blocked_by": [],
+                "note": "", "updated_at": "…", "done_at": null, "acceptance": "tests green" } ],
+  "ticks":  [ { "at": "…", "round": 1, "todo": "t1", "outcome": "done", "note": "…",
+                "host": "claude", "session": "36346c2a-…", "log": "log/20260827-055458-t1-done.md",
+                "cost_usd": 0.12, "num_turns": 7, "duration_ms": 42000 } ],
+  "in_progress": { "todo": "t2", "started_at": "…", "round": 2, "via": "runner", "host": "claude" },
+  "next_id": 3,
+  "updated_at": "…"
+}
+```
+
+写入是 `tmp → fsync → rename` 原子替换；JSON 是唯一真源，`status --md` 只渲染、不回读。建议把 `.zloop/` 加进项目的 `.gitignore`——它是这台机器上的运行记录。
+
+### 与 loopx 的对比
 
 | 维度 | loopx 0.5.2 | zloop 0.2 |
 |---|---|---|
-| 源码文件 / 行数 | 819 / 317,699（Python） | 10 / 2,190（Rust） |
-| 顶层子命令 | 113（叶命令 307） | 12（+1 内部 `hook-stop`） |
-| 单命令最多 flag | 75（`todo`） | 5（`done`，含 `--evidence`） |
-| `next` 一次调用 | 20–30 KB JSON，数百 ms | 10 个字段（含 `phase`），12 ms |
+| 源码文件 / 行数 | 819 / 317,699（Python） | 17 / ≈4,000（Rust） |
+| 顶层子命令 | 113（叶命令 307） | 21（+1 内部 `hook-stop`） |
+| 单命令最多 flag | 75（`todo`） | 10（`run`） |
+| `next` 一次调用 | 20–30 KB JSON，数百 ms | 10 个字段，12 ms |
 | 状态存放处 | ≥ 9 处（两级 registry、Markdown 状态、runs/、turns/、leases/…） | 1 个 JSON（+ 可读的 log/*.md） |
 | Todo 元数据字段 | ≈ 50（URL 编码塞进 Markdown 注释） | 8 |
-| 每轮写回 | `refresh-state` + `spend-slot` + `todo complete`，顺序错一步丢账 | `zloop done` 一条 |
+| 每轮写回 | `refresh-state` + `spend-slot` + `todo complete`，顺序错一步丢账 | `zloop done` 一条（且强制留下技术文档） |
 | 开始干活前 | 8–12 步事务、12 条 CLI 调用、必须注册 agent 身份 | `init` + `plan` |
-| 宿主 prompt | ≈ 1,900 字符 / 7 条规则 / 含 `LOOPX_TURN` 环境变量 | ≈ 1,200 字符 / 5 条规则 |
-| 无头运行 | `turn run-once`（仅 codex-cli，7 阶段结算） | `run --host claude\|codex`，journal 两行 |
+| 宿主 prompt | ≈ 1,900 字符 / 7 条规则 / 含 `LOOPX_TURN` 环境变量 | ≈ 850 字符 / 5 条规则 |
+| 无头运行 | `turn run-once`（仅 codex-cli，7 阶段结算） | `start` / `run`，任一宿主，journal 5 种事件 |
 | 会话回看 | `turn-sessions/<sha>.json`（仅 headless codex） | 每 tick 记 host+session，`sessions` 直接给 resume 命令 |
 | Claude Code 安装物 | 11 个 skill | 1 个 skill（+ 可选 Stop hook） |
 | 运行时依赖 | 0 | 0（静态单二进制） |
 
-## 明确不做
+### 明确不做
 
-多 agent 协作、能力路由、仪表盘、聊天、飞书、事件溯源、全局跨项目 registry、PreToolUse 强制拦截。两个 agent 同时跑同一个 `.zloop/` 不会写坏文件，但会互相覆盖进度——这是有意为之。
+多 agent 协作、能力路由、仪表盘、聊天、飞书、事件溯源、全局跨项目 registry、PreToolUse 强制拦截、开机自启。两个 agent 同时跑同一个 `.zloop/` 不会写坏文件，但会互相覆盖进度——这是有意为之。
 
-## 开发
+### 开发
 
 ```bash
-cargo test                       # 38 tests（tick / todo / state / cli）
+cargo test                       # 68 个用例（tick / todo / state / cli / runner，runner 用假宿主，约 2 分钟）
 cargo build --release && install -m755 target/release/zloop ~/.local/bin/zloop
 ```
 
-目录：`src/` 实现（10 个模块）· `tests/` 集成测试 · `docs/` 设计与 loopx 研究笔记。v0.1 曾有一个 921 行的 Python 原型，v0.2 用 Rust 重写后已移除（其设计见 `docs/DESIGN.md`，状态文件格式兼容）。
+目录：`src/` 实现 · `tests/` 集成测试 · `docs/`：`RUST-DESIGN.md` 当前设计、`LONG-RUN-AUDIT.md` 长程加固审计、`OPEN-SOURCE-REVIEW.md` 开源方案对照与借鉴、`TEST-REPORT.md` 自测报告、`loopx-principles.md` / `loopx-scheduling-notes.md` loopx 研究、`DESIGN.md` v0.1 Python 原型设计记录。
 
 MIT License.
