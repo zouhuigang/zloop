@@ -6,6 +6,7 @@ pub mod awake;
 pub mod cli;
 pub mod context;
 pub mod daemon;
+pub mod goals;
 pub mod hosts;
 pub mod log;
 pub mod notes;

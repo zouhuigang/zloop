@@ -22,13 +22,17 @@ const BODY: &str = r#"
 
 先在项目根目录运行 `zloop context`。报错 "no zloop state" 说明尚未初始化。
 
-## 参数是子命令名（`status` / `context` / `sessions` / `log` / `next`）
+## 参数是子命令名（`status` / `context` / `sessions` / `log` / `next` / `goal` / `goals`）
 
 直接运行 `zloop <参数>` 并把输出讲给用户，不要 init、不要规划。
 
 ## 参数是目标文本（其余非空参数）
 
-1. 未初始化：`zloop init "$ARGUMENTS"`。已初始化：告知用户当前目标，不要覆盖（只有用户明确要换目标才加 `--force`）。
+1. 定目标：
+   - 未初始化 → `zloop init "$ARGUMENTS"`
+   - 当前目标已完成，或新输入明显是**另一件事** → `zloop goal new "$ARGUMENTS"`：当前目标原地停放，`zloop goal switch <id>` 随时切回，什么都不丢。**别把新活挂到旧目标名下**，那会让目标文字和实际做的事对不上。
+   - 当前目标还有没做完的 todo，而新输入像是它的延伸 → 先告知当前目标 + 剩余步骤，问用户"接着做"还是"开新目标"；说开新的就 `zloop goal new`。
+   - 不要用 `zloop init --force`：它归档旧目标且切不回来。
 2. 把目标拆成 2–5 条**可验证**的 todo，每行 `[P0]`/`[P1]`/`[P2]` + 文本，按执行顺序通过 stdin 交给 `zloop plan`。
 3. 立刻执行一轮（见下）。
 4. 最后告诉用户：{resume_hint}

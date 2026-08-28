@@ -37,6 +37,7 @@ zloop 是对 [loopx](https://github.com/huangruiteng/loopx) 里"Claude Code / Co
   - [5. 方式四：手动或脚本驱动](#5-方式四手动或脚本驱动)
   - [6. 看进度：`status` / `log` / `sessions` / `context`](#6-看进度status--log--sessions--context)
   - [6.1 每条 todo 留一份技术文档](#61-每条-todo-留一份技术文档)
+  - [6.2 一个项目多个目标](#62-一个项目多个目标)
   - [7. 停下来了怎么办](#7-停下来了怎么办)
   - [8. 调参](#8-调参)
   - [9. 从 loopx 迁移](#9-从-loopx-迁移)
@@ -341,6 +342,7 @@ zloop status
 | ⏱ 限流中 | 24 小时窗口内的次数（`max_runs`）用完了，在等窗口滑走 | 黄 |
 | ⛔ 已停 | 连续失败 / 原地踏步 / 超预算 | 红 |
 | ⏸ 已暂停 | 你 `zloop pause` 了 | 黄 |
+| ◦ 待规划 | 目标刚开，还没有待办（`zloop goal new` 之后就是这个状态） | 蓝 |
 
 `阶段` 那一行**任何状态都在**，说的是循环此刻在干什么：`claude 正在做 t2 · 第 2 轮 · 已跑 4m`、`两轮之间的休息 · 睡到 14:19 醒`、`等你回答 · 10 分钟后重试`、`连续失败，已停下等你处理`、`11 条待办全部完成，目标结束`。
 
@@ -360,7 +362,7 @@ zloop status
 
 **③ 明细 + 页脚 = 我该敲什么。** 灰标签是情况，青标签是**可以直接抄走的命令**，一行一条：
 
-- `目标` / `步骤` / `阶段` / `后台` **永远在**；`睡眠` / `文档` / `会话` 只在有话要说时出现（睡眠设置正常、没有缺文档的轮次就不占行）；
+- `目标` / `步骤` / `阶段` / `后台` **永远在**；`其他`（还有几个目标停着）/ `睡眠` / `文档` / `会话` 只在有话要说时出现（睡眠设置正常、没有缺文档的轮次就不占行）；
 - 页脚随状态变：就绪 → `开跑`；执行中 → `写回 zloop done t2 --note … --approach …`；等你决定 → 命令已贴在那一步下面；限流中 → `放宽`；已停 → `看失败` + `重跑`；已暂停 → `继续`；完成 → `加活` / `换目标` / `出文档`。
 
 <details>
@@ -564,13 +566,42 @@ zloop doc --all --out docs/TECH.md # 整个目标：概览 + 每条 todo 一章 
 zloop log                          # 只有结果记录、没有实现思路的轮次会打 ⚠
 ```
 
+### 6.2 一个项目多个目标
+
+**当前**目标躺在 `.zloop/state.json`，其余的停在 `.zloop/goals/<id>.json`。切换就是把当前那份停走、把目标那份开进来（两步都是原子 rename），所以"同一时刻只有一个目标在跑"这条不变量不变——runner、Stop hook、文件锁都不受影响。
+
+```bash
+zloop goal new "另一件事"        # 当前目标原地停放，开一个新的（不丢任何东西）
+zloop goal list                  # 或 zloop goals：全部目标，▸ 是当前那个
+zloop goal switch keep-awake     # 按 id 切
+zloop goal switch 冷启动         # 也能按目标文字里的片段切（歧义时会让你说清）
+zloop goal rm keep-awake         # 归档：从 list 消失，文件搬到 .zloop/archive/
+```
+
+```
+  共 2 个目标 · ▸ 是当前那个
+  ▸ multi-goal  进行中    0/3  08-28 20:18  让 zloop 支持一个项目多个目标…
+    zloop       完成    12/12  08-28 15:02  看看安装好了吗?然后检查一下…
+
+  切换  zloop goal switch <id 或目标里的片段>
+  新建  zloop goal new "新目标"
+```
+
+- **id 怎么来**：从目标文字里的英文词拼（`让 keep-awake 支持外接显示器` → `keep-awake`），纯中文目标退到 `g1` / `g2`；也可以 `zloop goal new "…" --id my-slug` 自己指定。
+- **停放 ≠ 归档**：停放的还在 `goal list` 里、`goal switch` 可切回；归档的（`.zloop/archive/`）不在 list 里，只留给事后翻。`zloop init --force` 是归档式覆盖，**换目标别用它**。
+- **切换前会挡你**：runner 在跑（会让它中途换活），或有会话拿着 todo 还没写回（切走那一轮就悬空了）——两种情况都拒绝并告诉你出路，确实要硬来加 `--force`。
+- **跟着目标走的**：todo、tick、in_progress、policy、进度。**项目共享的**：`.zloop/log/` 里的技术文档（tick 记着自己那份的路径，所以不会串）、`.zloop/NOTES.md` 的经验、`.zloop/runner/` 的 pid 与日志。
+- 刚开的目标还没有待办时，`status` 是 `◦ 待规划`，不是"全部完成"。
+
+`/zloop 新目标` 也走这条路：skill 看到当前目标已完成、或新输入明显是另一件事，就 `zloop goal new`；如果当前目标还有没做完的 todo，它会先告诉你现状再问你要接着做还是开新目标。
+
 ### 7. 停下来了怎么办
 
 下表左列是 `zloop context` / `zloop next --json` 里的 `phase` 字段（`status` 显示的是它的压缩版）：
 
 | `phase` / runner 输出 | 发生了什么 | 你要做的 |
 |---|---|---|
-| `stopped (done)` | 全部 todo 完成 | `zloop plan --add …` 加活会自动回到 active；换目标 `zloop init --force "新目标"`（旧状态归档到 `.zloop/archive/`） |
+| `stopped (done)` | 全部 todo 完成 | 同一件事继续做：`zloop plan --add …` 加活会自动回到 active；**换一件事**：`zloop goal new "新目标"`（旧目标原地停放，[6.2](#62-一个项目多个目标)） |
 | `waiting (user_gate)` / runner 日志 `polling until a human unblocks` | 某条 todo 被 `--block` 等你决定；后台 runner **没有退出**，在 30 分钟一次慢速轮询 | `zloop status` 看 `!` 那条下面 `↳` 的问题 → 回答后 `zloop edit t3 --status open`（必要时 `--text` 改写），runner 下次轮询自动续 |
 | `stopped (fail_streak)` | 连续 3 轮失败：宿主超时、没写回、或真的报错 | `zloop log --todo t3` 看原因 → 修环境 / 拆 todo / `zloop edit t3 --text …`（任意 `edit` 都会重置计数）→ `zloop start` |
 | `stopped (progress_streak)` | 同一 todo 连续 8 轮"有进展"却没完成 | 多半 todo 太大：`zloop edit t3 --text "更小的一步"` 或 `zloop done t3 --outcome progress --next "拆出的下一步"` |
@@ -629,7 +660,8 @@ zloop plan --from-loopx .codex/goals/<goal>/ACTIVE_GOAL_STATE.md
 
 | 命令 | 作用 | 参数 |
 |---|---|---|
-| `zloop init "<goal>"` | 建 `.zloop/state.json`；`--force` 换目标并把旧状态归档到 `.zloop/archive/` | `--force` |
+| `zloop init "<goal>"` | 建 `.zloop/state.json`（第一个目标）。已有目标时拒绝；`--force` 会把旧目标**归档**（切不回来，换目标请用 `goal new`） | `--force` |
+| `zloop goal` / `zloop goals` | 多目标：`list`（默认）/ `new "<goal>"` / `switch <id\|片段>` / `rm <id>`（归档） | `new --id`, `new/switch --force`, `list --json` |
 | `zloop plan` | 写有序 todo：stdin / `--file` / `--add` / `--from-loopx`；一行 `[P0] 文本 :: 验收标准` | `--add LINE`（可重复）, `--file`, `--replace`, `--from-loopx PATH` |
 | `zloop next` | 该不该跑、跑哪条；交出 todo（phase 变 executing）；空闲时记一笔 noop | `--json`, `--peek`（只看不交出、不记 noop） |
 | `zloop done <id>` | **唯一写回**：记 tick、改 todo 状态、写技术文档、可插后继 | `--note`, `--outcome progress\|fail`, `--block Q`, `--next LINE`, `--evidence`, `--approach`, `--decision`（可重复）, `--pitfall`（可重复）, `--no-doc` |
@@ -666,15 +698,16 @@ paused/done  >  all_done  >  user_gate / blocked  >  fail_streak  >  progress_st
 
 ```
 .zloop/
-  state.json            唯一真源（下面的结构）
+  state.json            当前目标的唯一真源（下面的结构）
   state.json.lock       并发锁（flock）
-  NOTES.md              zloop remember 写的经验
+  goals/<id>.json       停放着的其他目标，结构和 state.json 一样（zloop goal switch 换车位）
+  NOTES.md              zloop remember 写的经验（项目共享，不跟着目标走）
   log/                  每轮一份技术文档 <时间>-<todo>-<结果>.md（思路/决策/坑/证据/改动文件）
   runner/
     journal.jsonl       runner 事件：begin / end / sleep / stop / restart / notify / commit / preflight_failed
     console.log         zloop start 的输出
     pid                 后台 runner 的 pid
-  archive/              init --force 归档的旧 state.json；compact 归档的旧 todo/tick
+  archive/              goal rm / init --force 归档的旧目标；compact 归档的旧 todo/tick
 ```
 
 ```jsonc
@@ -722,7 +755,7 @@ paused/done  >  all_done  >  user_gate / blocked  >  fail_streak  >  progress_st
 ### 开发
 
 ```bash
-cargo test                       # 69 个用例（tick / todo / state / cli / runner，runner 用假宿主，约 2 分钟）
+cargo test                       # 71 个用例（tick / todo / state / cli / runner，runner 用假宿主，约 2 分钟）
 cargo build --release && install -m755 target/release/zloop ~/.local/bin/zloop
 ```
 

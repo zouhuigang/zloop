@@ -633,7 +633,96 @@ fn status_headline_names_the_state_and_colour_is_opt_in() {
     // 做完的步骤要留在清单上打勾——「做过哪几步」是复盘时最想看的
     assert_eq!(o.out.matches('✅').count(), 3, "标题一个 ✅ + 两步各一个: {}", o.out);
     assert!(o.out.contains("1. a") && o.out.contains("2. b"), "完成后清单还在: {}", o.out);
-    assert!(o.out.contains("zloop plan --add") && o.out.contains("zloop init --force"), "what to do next: {}", o.out);
+    // 换目标走 goal new（停放旧的、可切回），不再是 init --force（归档、切不回来）
+    assert!(o.out.contains("zloop plan --add") && o.out.contains("zloop goal new"), "what to do next: {}", o.out);
+    assert!(!o.out.contains("init --force"), "别再教用户覆盖目标: {}", o.out);
     assert!(o.out.contains("zloop doc --all"), "and how to collect the documents: {}", o.out);
     assert!(!o.out.contains('░'), "a finished bar is entirely full: {}", o.out);
+}
+
+// ---------- 多目标 ----------
+
+#[test]
+fn goals_park_switch_and_archive_without_losing_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "把冷启动降到 1 秒"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 找最慢的三处", "--add", "[P1] 加 tracing"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "定位到 3 处", "--approach", "tracing 打点"], None, &[]);
+
+    // 新目标：旧的原地停放，不是覆盖
+    let o = zloop(d, &["goal", "new", "让 keep-awake 支持外接显示器"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("停放") && o.out.contains("zloop goal switch"), "{}", o.out);
+    assert!(o.out.contains("新目标"), "{}", o.out);
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert_eq!((st.goal.text.as_str(), st.todos.len()), ("让 keep-awake 支持外接显示器", 0), "新目标是干净的");
+    assert_eq!(st.goal.id, "keep-awake", "id 从目标文字里的英文词取: {}", st.goal.id);
+
+    // 两个都在，当前那个带 ▸
+    let o = zloop(d, &["goal", "list"], None, &[]);
+    assert!(o.out.contains("共 2 个目标"), "{}", o.out);
+    assert!(o.out.contains("▸ keep-awake") && o.out.contains("让 keep-awake 支持外接显示器"), "{}", o.out);
+    assert!(o.out.contains("把冷启动降到 1 秒"), "停放的也列出来: {}", o.out);
+    // status 里能看见还有别的目标
+    assert!(zloop(d, &["status"], None, &[]).out.contains("另有 1 个目标停着"), "{}", o.out);
+    // 空目标不说「全部完成」
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("待规划") && o.out.contains("还没有待办"), "{}", o.out);
+
+    // 用目标文字的片段切回去，进度一条不少
+    let o = zloop(d, &["goal", "switch", "冷启动"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert_eq!(st.goal.text, "把冷启动降到 1 秒");
+    assert_eq!(st.todos.len(), 2);
+    assert_eq!(st.todos[0].status, "done");
+    assert_eq!(st.ticks.len(), 1, "tick 账本跟着目标走");
+    assert!(zloop(d, &["status"], None, &[]).out.contains("1/2 完成"), "步骤进度还在");
+
+    // 归档：从 list 里消失，文件搬到 archive/
+    let o = zloop(d, &["goal", "rm", "keep-awake"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("已归档"), "{}", o.out);
+    assert!(!zloop(d, &["goal", "list"], None, &[]).out.contains("keep-awake"));
+    let archived: Vec<_> = fs::read_dir(d.join(".zloop/archive")).unwrap().flatten().collect();
+    assert_eq!(archived.len(), 1, "归档只是搬家，不是删除");
+    // 当前目标不能被归档
+    let o = zloop(d, &["goal", "rm", "冷启动"], None, &[]);
+    assert_eq!(o.code, 2);
+    assert!(o.err.contains("是当前目标"), "{}", o.err);
+}
+
+#[test]
+fn switching_goals_is_refused_while_work_is_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "目标一"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
+    zloop(d, &["goal", "new", "目标二"], None, &[]);
+    zloop(d, &["goal", "switch", "目标一"], None, &[]);
+
+    // 有会话拿着 todo 没写回
+    zloop(d, &["next"], None, &[]);
+    let o = zloop(d, &["goal", "switch", "目标二"], None, &[]);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(o.err.contains("还没写回"), "{}", o.err);
+    // --force 才放行
+    assert_eq!(zloop(d, &["goal", "switch", "目标二", "--force"], None, &[]).code, 0);
+    zloop(d, &["goal", "switch", "目标一", "--force"], None, &[]);
+
+    // runner 在跑（pid 文件指向一个活着的进程）
+    zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
+    fs::create_dir_all(d.join(".zloop/runner")).unwrap();
+    fs::write(d.join(".zloop/runner/pid"), format!("{}\n", std::process::id())).unwrap();
+    let o = zloop(d, &["goal", "switch", "目标二"], None, &[]);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(o.err.contains("runner 正在跑"), "{}", o.err);
+    fs::remove_file(d.join(".zloop/runner/pid")).unwrap();
+
+    // 片段对上多个目标时要求说清楚
+    zloop(d, &["goal", "new", "目标三"], None, &[]);
+    let o = zloop(d, &["goal", "switch", "目标"], None, &[]);
+    assert_eq!(o.code, 2);
+    assert!(o.err.contains("对上了 3 个目标"), "{}", o.err);
 }

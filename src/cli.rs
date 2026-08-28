@@ -189,6 +189,12 @@ pub enum Cmd {
         #[arg(long, value_name = "FILE")]
         show: Option<String>,
     },
+    /// 多目标：列出 / 新建 / 切换 / 归档（当前目标在 .zloop/state.json，其余停在 .zloop/goals/）
+    #[command(visible_alias = "goals")]
+    Goal {
+        #[command(subcommand)]
+        cmd: Option<GoalCmd>,
+    },
     /// Start the runner in the background (detached; log in .zloop/runner/console.log)
     Start(RunArgs),
     /// Stop the background runner
@@ -197,6 +203,34 @@ pub enum Cmd {
     Run(RunArgs),
     /// (internal) Claude Code Stop-hook entry; reads hook JSON on stdin
     HookStop,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GoalCmd {
+    /// 列出这个项目的全部目标（不带子命令时的默认动作）
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// 新目标：把当前目标停走，开一个新的（旧的还能切回来）
+    New {
+        text: String,
+        /// 自己指定 id（默认从目标文字里的英文词取，取不到就 g1/g2/…）
+        #[arg(long)]
+        id: Option<String>,
+        /// runner 在跑 / 有轮次没写回时也照做
+        #[arg(long)]
+        force: bool,
+    },
+    /// 切到另一个目标：id、id 前缀，或目标文字里的片段
+    Switch {
+        needle: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// 归档一个停着的目标：搬到 .zloop/archive/，不删文件
+    #[command(visible_alias = "archive")]
+    Rm { needle: String },
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -379,6 +413,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Log { todo, last, show } => cmd_log(&root, todo, last, show),
+        Cmd::Goal { cmd } => cmd_goal(&root, cmd.unwrap_or(GoalCmd::List { json: false }), style::Style::detect(cli.no_color)),
         Cmd::Run(args) => runner::run(&root, args.options()),
         Cmd::Start(args) => {
             state::load(&path)?; // fail early with the usual "no zloop state" message
@@ -433,7 +468,8 @@ fn cmd_init(dir: &Option<PathBuf>, goal: &str, force: bool) -> Result<i32> {
         std::fs::rename(&path, &target)?;
         archived = Some(target);
     }
-    let id = root.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "goal".into());
+    // id 从目标文字取（多目标下目录名会让每个目标的 id 都一样）
+    let id = crate::goals::fresh_id(&root, goal.trim());
     let mut st = state::default_state(goal.trim(), &id);
     state::locked(&path, std::time::Duration::from_secs(5), || state::save(&path, &mut st))?;
     if let Some(a) = archived {
@@ -702,6 +738,121 @@ fn cmd_edit(
     }
 }
 
+fn goal_status_zh(s: &str) -> &str {
+    match s {
+        "active" => "进行中",
+        "done" => "完成",
+        "paused" => "暂停",
+        other => other,
+    }
+}
+
+fn short_time(iso: &str) -> String {
+    state::parse_iso(iso).map(|dt| dt.format("%m-%d %H:%M").to_string()).unwrap_or_else(|_| iso.chars().take(11).collect())
+}
+
+fn cmd_goal(root: &Path, cmd: GoalCmd, c: style::Style) -> Result<i32> {
+    match cmd {
+        GoalCmd::List { json } => {
+            let rows = crate::goals::list(root);
+            if json {
+                let v: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "id": r.id, "text": r.text, "status": r.status, "done": r.done,
+                            "total": r.total, "last": r.last, "current": r.current,
+                        })
+                    })
+                    .collect();
+                print_json(&serde_json::Value::Array(v));
+                return Ok(0);
+            }
+            if rows.is_empty() {
+                println!("这个项目还没有目标：`zloop init \"目标\"`");
+                return Ok(0);
+            }
+            let w = style::term_width().clamp(46, 110);
+            let id_w = rows.iter().map(|r| style::width(&r.id)).max().unwrap_or(2).max(2);
+            let st_w = rows.iter().map(|r| style::width(goal_status_zh(&r.status))).max().unwrap_or(6);
+            let pg_w = rows.iter().map(|r| format!("{}/{}", r.done, r.total).len()).max().unwrap_or(3);
+            println!();
+            println!("  {}", c.dim(&format!("共 {} 个目标 · ▸ 是当前那个", rows.len())));
+            for r in &rows {
+                let progress = format!("{}/{}", r.done, r.total);
+                let head = format!(
+                    "{} {}{}  {}{}  {}{}  {}",
+                    if r.current { "▸" } else { " " },
+                    r.id,
+                    " ".repeat(id_w - style::width(&r.id)),
+                    goal_status_zh(&r.status),
+                    " ".repeat(st_w - style::width(goal_status_zh(&r.status))),
+                    " ".repeat(pg_w - progress.len()),
+                    progress,
+                    short_time(&r.last),
+                );
+                let text = style::truncate(&r.text, w.saturating_sub(style::width(&head) + 4));
+                if r.current {
+                    println!("  {}  {}", c.cyan(&head), c.bold(&text));
+                } else {
+                    println!("  {}  {}", c.dim(&head), c.dim(&text));
+                }
+            }
+            println!();
+            println!("  {}  {}", c.dim("切换"), c.bold("zloop goal switch <id 或目标里的片段>"));
+            println!("  {}  {}", c.dim("新建"), c.bold("zloop goal new \"新目标\""));
+            println!();
+            Ok(0)
+        }
+        GoalCmd::New { text, id, force } => {
+            crate::goals::ensure_idle(root, force)?;
+            let (parked, cur) = crate::goals::create(root, &text, id.as_deref())?;
+            if let Some(p) = parked {
+                println!(
+                    "停放「{}」[{}] {} {}/{} · 切回：{}",
+                    style::truncate(&p.text, 30),
+                    p.id,
+                    goal_status_zh(&p.status),
+                    p.done,
+                    p.total,
+                    c.bold(&format!("zloop goal switch {}", p.id))
+                );
+            }
+            println!("新目标 [{}] {}", cur.id, cur.text);
+            println!("下一步：{}", c.bold("zloop plan   # 每行一条 `[P0] 文本`，从 stdin 读"));
+            Ok(0)
+        }
+        GoalCmd::Switch { needle, force } => {
+            crate::goals::ensure_idle(root, force)?;
+            let sw = crate::goals::switch(root, &needle)?;
+            match sw.parked {
+                Some(p) => println!(
+                    "停放「{}」[{}] · 切回：{}",
+                    style::truncate(&p.text, 30),
+                    p.id,
+                    c.bold(&format!("zloop goal switch {}", p.id))
+                ),
+                None => println!("已经是当前目标"),
+            }
+            println!(
+                "当前目标 [{}] {} · {} {}/{}",
+                sw.current.id,
+                sw.current.text,
+                goal_status_zh(&sw.current.status),
+                sw.current.done,
+                sw.current.total
+            );
+            Ok(0)
+        }
+        GoalCmd::Rm { needle } => {
+            let (row, target) = crate::goals::archive(root, &needle)?;
+            println!("已归档 [{}] {} → {}", row.id, style::truncate(&row.text, 40), target.display());
+            println!("（文件还在，只是不再出现在 `zloop goal list` 里）");
+            Ok(0)
+        }
+    }
+}
+
 fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::Style) -> Result<i32> {
     let st = state::load(path)?;
     if json {
@@ -728,6 +879,8 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     let finished = st.todos.iter().filter(|t| t.status == "done").count();
     let total = st.todos.len();
     let (icon, word, code): (&str, &str, &str) = match () {
+        // 刚开的目标还没有待办：说"待规划"，别说"全部完成"（decide 对空清单返回 all_done）
+        _ if total == 0 => ("◦", "待规划", "34"),
         _ if st.goal.status == "done" => ("✅", "完成", "32"),
         _ if st.goal.status == "paused" => ("⏸", "已暂停", "33"),
         _ if matches!(d.reason.as_str(), "fail_streak" | "progress_streak" | "budget") => ("⛔", "已停", "31"),
@@ -890,7 +1043,9 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     let mut rows: Vec<(&str, String)> = Vec::new();
     // 「现在在哪一步」是用户最想要的一行，所以它常驻：phase 没有新消息时，
     // 就由状态本身兜底成一句人话，而不是让这一行消失。
-    let stage = if !ph.detail.is_empty() {
+    let stage = if total == 0 {
+        "还没有待办 · 先用 zloop plan 加几条".to_string()
+    } else if !ph.detail.is_empty() {
         ph.detail.clone()
     } else if st.goal.status == "done" || d.reason == "all_done" {
         format!("{total} 条待办全部完成，目标结束")
@@ -922,6 +1077,10 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     if undocumented > 0 {
         rows.push(("文档", c.yellow(&format!("{undocumented} 轮缺实现思路 · zloop log 里带 ⚠"))));
     }
+    let parked = crate::goals::parked(root).len();
+    if parked > 0 {
+        rows.push(("其他", c.dim(&format!("另有 {parked} 个目标停着 · zloop goal list"))));
+    }
     let sessions = session::summarize(&st, root);
     if let Some(cmd) = sessions.last().and_then(|s| s.resume.as_deref()) {
         // Never truncated: a half-copied resume command is worse than a line that wraps.
@@ -930,11 +1089,14 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
 
     // ---- and what you can type next ----
     let mut acts: Vec<(&str, String)> = Vec::new();
-    if st.goal.status == "paused" {
+    if total == 0 {
+        acts.push(("加待办", "zloop plan --add \"[P0] 第一步\" --add \"[P1] 第二步\"".into()));
+        acts.push(("换目标", "zloop goal new \"另一个目标\"".into()));
+    } else if st.goal.status == "paused" {
         acts.push(("继续", "zloop resume".into()));
     } else if st.goal.status == "done" || d.reason == "all_done" {
         acts.push(("加活", "zloop plan --add \"[P0] 下一件事\"".into()));
-        acts.push(("换目标", "zloop init --force \"新目标\"".into()));
+        acts.push(("换目标", "zloop goal new \"新目标\"".into()));
         if st.ticks.iter().any(|t| t.log.is_some()) {
             acts.push(("出文档", "zloop doc --all".into()));
         }
