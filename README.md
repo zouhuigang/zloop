@@ -340,7 +340,7 @@ zloop status
 
   阶段    claude 正在做 t2 · 第 2 轮 · 已跑 0s
   后台    没有 runner 在跑
-  会话    claude --resume 36346c2a-1f3d-4b8e-9a52-0c7e5d21b4aa
+  会话    claude --resume 11111111-2222-3333-4444-555555555555
 
   写回    zloop done t2 --note "<一句话结果>" --approach "<怎么做的>"
 ```
@@ -441,7 +441,7 @@ zloop status
 
   阶段    等你回答 · 10 分钟后重试
   后台    没有 runner 在跑
-  会话    claude --resume 36346c2a-1f3d-4b8e-9a52-0c7e5d21b4aa
+  会话    claude --resume 11111111-2222-3333-4444-555555555555
 ```
 
 **限流中**
@@ -486,7 +486,7 @@ zloop status
 
   阶段    连续失败，已停下等你处理
   后台    没有 runner 在跑
-  会话    claude --resume 36346c2a-1f3d-4b8e-9a52-0c7e5d21b4aa
+  会话    claude --resume 11111111-2222-3333-4444-555555555555
 
   看失败  zloop log
   重跑    zloop start
@@ -533,7 +533,7 @@ zloop status
 
   阶段    4 条待办全部完成，目标结束
   后台    没有 runner 在跑
-  会话    claude --resume 36346c2a-1f3d-4b8e-9a52-0c7e5d21b4aa
+  会话    claude --resume 11111111-2222-3333-4444-555555555555
 
   加活    zloop plan --add "[P0] 下一件事"
   换目标  zloop goal new "另一个目标"
@@ -1296,8 +1296,8 @@ $ zloop doc t2                     # 只看 t2 那几轮
 
 ```
 $ zloop sessions
-claude 36346c2a-1f3d-4b8e-9a52-0c7e5d21b4aa  ticks 7   2026-08-28T20:15:11+08:00 → 2026-08-28T20:41:07+08:00  todos t1,t2  ✓ transcript
-        claude --resume 36346c2a-1f3d-4b8e-9a52-0c7e5d21b4aa
+claude 11111111-2222-3333-4444-555555555555  ticks 7   2026-08-28T20:15:11+08:00 → 2026-08-28T20:41:07+08:00  todos t1,t2  ✓ transcript
+        claude --resume 11111111-2222-3333-4444-555555555555
 ```
 
 第二行就是可以直接抄走的 resume 命令。transcript 被清理掉的会话会标 `transcript missing`——`--resume` 还能试，但看不到当时的对话。
@@ -1486,7 +1486,7 @@ paused/done  >  all_done  >  user_gate / blocked  >  fail_streak  >  progress_st
   "todos":  [ { "id": "t1", "text": "…", "priority": 0, "status": "open", "blocked_by": [],
                 "note": "", "updated_at": "…", "done_at": null, "acceptance": "tests green" } ],
   "ticks":  [ { "at": "…", "round": 1, "todo": "t1", "outcome": "done", "note": "…",
-                "host": "claude", "session": "36346c2a-…", "log": "log/20260827-055458-t1-done.md",
+                "host": "claude", "session": "11111111-…", "log": "log/20260827-055458-t1-done.md",
                 "cost_usd": 0.12, "num_turns": 7, "duration_ms": 42000 } ],
   "in_progress": { "todo": "t2", "started_at": "…", "round": 2, "via": "runner", "host": "claude" },
   "next_id": 3,

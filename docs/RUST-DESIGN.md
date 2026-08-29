@@ -258,7 +258,7 @@ loop {
 | G1 长时运行 | `run --host claude --fast --max-rounds 2`：92 秒跑完 2 轮，均写回；伪造悬空 journal 后重启，打印 "previous run ended mid-round (round 3); continuing"，继续跑完 |
 | G2 跨宿主 | 同一 demo 目录：t1、t2 由 Claude（`claude -p`）完成，t3 由 Codex（`codex exec`）完成；`zloop context` 同时列出两宿主的 resume 命令 |
 | G3 留档 | 每轮生成 `.zloop/log/<ts>-<todo>-done.md`，含 host / session / resume / evidence |
-| G4 resume | `zloop sessions` 输出 `claude --resume 36346c2a-…` 与 `codex resume 01a04013-…`，两者 transcript 均 ✓ 存在；Claude 第 2 轮自动 `--resume` 了第 1 轮会话 |
+| G4 resume | `zloop sessions` 输出 `claude --resume 11111111-…` 与 `codex resume 22222222-…`，两者 transcript 均 ✓ 存在；Claude 第 2 轮自动 `--resume` 了第 1 轮会话 |
 | 安装 | 二进制装到 `~/.local/bin/zloop`，Python 控制台脚本已卸载（源码保留）；`/zloop` skill 已刷新为"先 `zloop context`" |
 
 与 §4 布局的差异：模块与文件一一对应，无增删；`hook-stop` 保留；`done` 多了第 5 个 flag `--evidence`（设计已预告）。
