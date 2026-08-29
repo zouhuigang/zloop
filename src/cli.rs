@@ -2029,6 +2029,15 @@ fn cmd_hook_stop(root: &Path, path: &Path) -> Result<i32> {
         Ok(s) => s,
         Err(_) => return Ok(0),
     };
+    // 另一个交互会话正拿着这一轮：同理闭嘴。`next` 早就走这道闸了（它会返回
+    // `held_by_other` 而不是派活），但 hook 一直没走，于是「`next` 说不给你」和
+    // 「hook 催你去做」同时成立——人照着 hook 的话敲下去就撞上了。
+    //
+    // 这道闸对 runner 无效（见上面那段），两条各挡各的一半。
+    let who = session::detect();
+    if tick::held_by_other(&st, &who, state::now()).is_some() {
+        return Ok(0);
+    }
     let d = tick::decide(&st, state::now());
     if d.should_run {
         let reason = format!(

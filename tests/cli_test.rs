@@ -506,6 +506,38 @@ fn spawned_zloop_never_inherits_the_ambient_session() {
 }
 
 #[test]
+fn the_stop_hook_defers_to_whoever_already_took_the_round() {
+    // `next` 早就挡了「别人正拿着这一轮」，但 hook 一直没走这道闸，于是
+    // 「next 说不给你」和「hook 催你去做」同时成立——人照着 hook 敲下去就撞了。
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
+    let a = [("CLAUDE_CODE_SESSION_ID", "会话A")];
+    let b = [("CLAUDE_CODE_SESSION_ID", "会话B")];
+
+    // A 领走这一轮
+    let o = zloop(d, &["next", "--json"], None, &a);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&o.out).unwrap()["should_run"], true, "{}", o.out);
+
+    // B 问 next：被挡（这是原有行为，先钉住）
+    let o = zloop(d, &["next", "--json"], None, &b);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&o.out).unwrap()["reason"], "held_by_other", "{}", o.out);
+
+    // B 的 hook：也该闭嘴，不能跟 next 说两套话
+    let o = zloop(d, &["hook-stop"], Some("{}"), &b);
+    assert_eq!((o.code, o.out.as_str()), (0, ""), "next 不给 B 派活，hook 就不能催 B 去做");
+
+    // A 自己的 hook：照常催——活本来就是它的
+    let o = zloop(d, &["hook-stop"], Some("{}"), &a);
+    assert!(o.out.contains("\"block\""), "拿着活的那个会话不该被自己挡住: {}", o.out);
+
+    // 裸 CLI（没有 session id）：不被误锁，行为不变
+    let o = zloop(d, &["hook-stop"], Some("{}"), &[]);
+    assert!(o.out.contains("\"block\""), "分不出是谁就不该拦，否则把人锁在门外: {}", o.out);
+}
+
+#[test]
 fn hook_stop_passes_through_under_runner() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
