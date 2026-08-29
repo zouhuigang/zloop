@@ -13,7 +13,8 @@ const PROTOCOL: &str = "你在为目标「{goal}」持续工作。项目目录�
 1. 先运行 `zloop context` 读交接包，再运行 `zloop next --json`。交接包里有「用户对上一轮的反馈」就先按它调整这一轮的做法，别当没看见。should_run=false 时，按 reason 简短告知用户后停止本轮，不要做别的。
 2. should_run=true 时，只做 todo 里这一条：做出可验证的产物，能跑的就跑一下验证；todo 带 acceptance（验收标准）的，逐条对照自检通过才算完成。
 3. 完成 → `zloop done <id> --note \"<一句话结果>\" --approach \"<怎么做的、为什么这么做>\" [--decision \"<关键取舍>\"] [--pitfall \"<踩过的坑与结论>\"] [--evidence \"<验证输出或 @文件>\"]`。`--approach` 是必填的：每条 todo 完成后要留下一份能让别人接手的技术文档，decision/pitfall 有就写，可重复。
-   有进展没做完 → 加 `--outcome progress`；失败 → 加 `--outcome fail`；需要用户决定 → 加 `--block \"<问题>\"`；发现新任务 → 加 `--next \"<任务>\"`；学到以后还用得上的经验 → `zloop remember \"<一句话>\"`。
+   有进展没做完 → 加 `--outcome progress`；失败 → 加 `--outcome fail`；需要用户决定 → 加 `--block \"<问题>\"`；发现新任务 → 加 `--next \"<任务>\"`；学到以后还用得上的经验 → `zloop remember \"<一句话>\"`。\n\
+   **这一轮的结论动摇了后续计划**（哪怕这一轮做成了）→ 加 `--rethink \"<哪条前提不成立了>\"`：它会触发一次重估。做成了不等于方向对。
    写回的输出里出现「计划可能要调整」时，跑一次 `zloop replan`，按它说的提最小改动并讲给用户听；**改 todo 要用户点头**，别自己动。
 4. 不要改 .zloop/ 以外的调度状态；不碰凭证、不做破坏性 git、不做生产操作。
 5. 每轮结束用两三句话告诉用户：做了什么、验证了什么、下一条是什么。";

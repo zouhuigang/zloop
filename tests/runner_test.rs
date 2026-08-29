@@ -896,6 +896,48 @@ esac"#,
 }
 
 #[test]
+fn a_plan_that_keeps_growing_stops_in_front_of_a_human() {
+    // 能改自己计划的循环最容易死在 replan → 新 todo → replan → …… 永不收敛上。
+    // 造一个每次重估都把清单改长的宿主，验证它**停下来等人**，而不是一直跑。
+    let d = project(&["[P0] a :: 验a", "[P0] b :: 验b"]);
+    let mark = tempfile::tempdir().unwrap().keep();
+    let fake = fake_host(
+        r#"case "$2" in
+  *"重估一次"*)
+     n=$(cat "$TMPDIR_MARK/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$TMPDIR_MARK/n"
+     # 每次都比现在多排两条 —— 典型的发散
+     : > "$TMPDIR_MARK/plan"
+     i=1; while [ $i -le $((n+3)) ]; do echo "[P0] 第${n}轮第${i}条 :: 验" >> "$TMPDIR_MARK/plan"; i=$((i+1)); done
+     zloop replan --apply --why "再拆细一点" < "$TMPDIR_MARK/plan" >> "$TMPDIR_MARK/apply.log" 2>&1
+     echo '{"session_id":"rp","is_error":false,"result":"又拆细了"}' ;;
+  *) id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+     zloop done "$id" --note ok --approach x --no-doc --rethink "还是走不通，再拆" >/dev/null 2>&1
+     echo '{"session_id":"s","is_error":false,"result":"ok"}' ;;
+esac"#,
+    );
+    let (code, out, err) = run(
+        &d,
+        &["run", "--host", "claude", "--fast", "--auto-replan", "--max-rounds", "30"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("停下来等人"), "跑飞了要停在人面前: {out}");
+    assert!(out.contains("在发散，不是在收敛"), "要说清为什么停: {out}");
+
+    let j = journal(&d);
+    let applied = j.iter().filter(|e| e["event"] == "replan_applied").count();
+    assert!(applied <= zloop::runner::MAX_AUTO_REPLANS as usize, "最多改 {} 次就该停，实际 {applied} 次", zloop::runner::MAX_AUTO_REPLANS);
+    assert_eq!(j.iter().filter(|e| e["event"] == "replan_giveup").count(), 1, "要留下放弃记录: {j:?}");
+    assert!(j.iter().any(|e| e["event"] == "stop" && e["reason"] == "replan_diverged"), "停机理由要写清: {j:?}");
+    // 关键：真的停了，不是跑满 30 轮
+    let rounds = j.iter().filter(|e| e["event"] == "begin").count();
+    assert!(rounds < 30, "该提前停，不该跑满 30 轮（实际 {rounds} 轮）");
+    // 停下来的时候计划还在，没被改成半截
+    let st = state::load(&state::state_path(&d)).unwrap();
+    assert!(st.todos.iter().filter(|t| !matches!(t.status.as_str(), "done" | "deferred")).count() > 0, "停机时清单还在: {:?}", st.todos);
+}
+
+#[test]
 fn without_the_flag_a_replan_round_still_never_touches_the_plan() {
     // 默认关：行为一字不变——哪怕宿主试图落地也不该有落地的入口被提到
     let d = project(&["[P0] a :: 验a", "[P0] b :: 验b", "[P0] c :: 验c"]);

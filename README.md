@@ -319,7 +319,8 @@ zloop status
    should_run=false 时按 reason 简短告知用户后停止本轮。
 2. should_run=true 时，只做 todo 里这一条：做出可验证的产物，能跑的就跑一下验证。
 3. 完成 → `zloop done <id> --note "…" [--evidence "…"]`；有进展没做完 → --outcome progress；失败 → --outcome fail；
-   需要用户决定 → --block "<问题>"；发现新任务 → --next "<任务>"。
+   需要用户决定 → --block "<问题>"；发现新任务 → --next "<任务>"；
+   **这一轮的结论动摇了后续计划** → --rethink "<哪条前提不成立了>"（哪怕这一轮是成功的）。
    写回的输出里出现「计划可能要调整」时，跑一次 `zloop replan` 并把建议讲给用户；改 todo 要用户点头。
 4. 不要改 .zloop/ 以外的调度状态；不碰凭证、不做破坏性 git、不做生产操作。
 5. 每轮结束用两三句话告诉用户：做了什么、验证了什么、下一条是什么。
@@ -847,7 +848,7 @@ zloop plan --from-loopx .codex/goals/<goal>/ACTIVE_GOAL_STATE.md
 | [`pause`](#zloop-pause--zloop-resume) / [`resume`](#zloop-pause--zloop-resume) | 暂停 / 恢复整个目标 | 你 |
 | [`stats`](#zloop-stats) | 这个目标跑得顺不顺：返工率、一次过、哪一步最费劲 | 你 / 模型 |
 | [`reflect`](#zloop-reflect) | 回看一次：把账本 + 经验 + 反馈摆齐，整理经验（人点头才落地） | 你 / 模型 |
-| [`replan`](#zloop-replan) | 重估一次：对着最终目标看剩下的任务还对不对（改不改你点头） | 你 / 模型 |
+| [`replan`](#zloop-replan) | 重估一次：对着最终目标看剩下的任务还对不对（默认只给建议；`--apply` 才落地） | 你 / 模型 |
 | [`feedback`](#zloop-feedback-todo-人说的) | 记下**你**对某一轮的回应，下一轮先处理它 | 你 |
 | [`remember`](#zloop-remember-一句话) | 记一条经验（`--rule` 钉成每轮必带的约定） | 你 / 模型 |
 | [`compact`](#zloop-compact) | 把老的完成项归档，state.json 保持小 | 你 |
@@ -1148,15 +1149,30 @@ goal is now active
   想清楚剩下的任务还对不对：zloop replan
 ```
 
-没命中就**一个字都不说**。五个信号全部读自账本：
+没命中就**一个字都不说**。六个信号全部读自账本：
 
-| 信号 | 什么时候亮 |
-|---|---|
-| `feedback` | 还没做完的 todo 上出现过你的反馈 |
-| `stalled` | 同一条连着 ≥2 轮没做完 |
-| `fail_streak` | 连续 ≥2 轮失败 |
-| `rework` | 返工率 ≥50%（且已跑 ≥3 轮） |
-| `blocked` | 有 todo 在等你回话 |
+| 信号 | 什么时候亮 | 它在问 |
+|---|---|---|
+| `feedback` | 还没做完的 todo 上出现过你的反馈 | 出岔子了吗 |
+| `stalled` | 同一条连着 ≥2 轮没做完 | 出岔子了吗 |
+| `fail_streak` | 连续 ≥2 轮失败 | 出岔子了吗 |
+| `rework` | 返工率 ≥50%（且已跑 ≥3 轮） | 出岔子了吗 |
+| `blocked` | 有 todo 在等你回话 | 出岔子了吗 |
+| **`rethink`** | 某一轮写回时带了 `--rethink` | **还到得了目标吗** |
+
+**`rethink` 是唯一不问"出岔子"的那个。** 最该重规划的场景恰恰不偏离：那一轮**顺利完成**，
+可它的结论把剩下几条的前提推翻了——没失败、没停滞、没返工、没被挡，前五个信号一个都不响。
+
+zloop 读不出"策略走不通"（不做关键词嗅探：既不可靠又只认一种语言），所以只认干活的人主动说的那一句：
+
+```bash
+zloop done t2 --note "加了缓存只省 30ms" --approach "LRU" \
+  --rethink "瓶颈根本不在读取，在反序列化——后面三条全建立在「缓存有效」这个前提上，前提没了"
+```
+
+和邻居的区别：`--pitfall` 是"这条路上有个石头"，`--rethink` 是"这条路本身不通往目标"，
+`--block` 是"我需要人来回话"。命中之后材料包会把这句原话完整摆给模型，并允许它**照新现状重排**——
+其余情况一律还是"别重开一张清单"。
 
 **为什么不是每轮都重估**：文献（[Bayesian partner modelling](https://arxiv.org/html/2608.18490)）明确说选择性触发能用
 **远少于**启发式/LLM 触发的重规划次数拿到相当收益；每轮调模型重估不但贵，还会**制造计划抖动**——
@@ -1168,6 +1184,58 @@ goal is now active
 
 **无头也有**：`zloop start` 默认开着这个——写回之后如果信号命中，runner 会插一轮重估，
 **只把建议记进账本**（`zloop log` 里看得到），**绝不自己动 todo**。`--no-replan` 关掉。
+
+---
+
+###### 让它自己改：`zloop replan --apply` 与 `--auto-replan`
+
+上面那套只提议不落地。想让循环**自己换路线**——做到第 2 步发现整条路线的前提没了，
+就重排剩下的路继续跑——两步：
+
+```bash
+# 1) 落地通道：从 stdin 收新清单（只列还没做的，做完的和等你回话的自动留着）
+printf '%s\n' '[P0] 量反序列化耗时 :: 有逐字段表' '[P0] 换零拷贝路径 :: 快 300ms' \
+  | zloop replan --apply --why "实测瓶颈在反序列化，加缓存整条路线作废"
+# → replan applied: 换掉 3 条、新排 2 条、保留 2 条（已完成和等你回话的没动）
+#   旧账本备份在 .zloop/state.json.bak-...
+
+# 2) 无头自主（默认关）
+zloop start --auto-replan
+```
+
+**六条护栏在代码里强制**，不是写在提示词里——违反就**整体拒绝**并指名是哪条
+（半途改一半的计划比不改更糟）：
+
+| 护栏 | 不加会怎样 |
+|---|---|
+| 清单不能空 | 重排成 0 条 = 悄悄放弃目标 |
+| 每条都要带 `:: 验收` | 说不出怎么验，就是没想清楚它凭什么算一步 |
+| `--why` 必填 | 事后没人看得出这次改动想解决什么 |
+| 规模 ≤ 3 倍 + 5，且总数 ≤ 30 | 一次炸出两百条 todo，跑到天荒地老 |
+| 有轮次在飞就不改 | 那个 agent 手上拿的 todo 可能正要被换掉 |
+| 不动「已完成」和「等你回话」的 | 前者动了等于抹历史；后者身上挂着一个**给你的问题** |
+
+新 id 从 `next_id` 往后发、**不复用**（复用会让老 tick 挂到新 todo 上，账本对不上）；
+改前 `state.json` 自动备份。
+
+**无头模式下默认不许改计划，这是代码闸不是提示词**：runner 只在 `--auto-replan`
+且正是重估那一轮时，才给子进程放行 `ZLOOP_AUTO_REPLAN`；`replan --apply` 见到
+`ZLOOP_RUNNER` 而没有它就拒绝。干活轮次、回看轮次、`preflight` 一律不放行。
+
+**跑飞了会停在你面前**，不是安静地接着跑。两条闸任一触顶就停机（`stop reason=replan_diverged`）：
+
+- 单次运行最多自主改 **3** 次
+- **连着两次都把清单改长** = 在发散不是在收敛
+
+```
+runner: 计划改了 · 1 条 → 4 条（第 1/3 次自主重排）
+runner: 计划改了 · 3 条 → 5 条（第 2/3 次自主重排）
+runner: 停下来等人 —— 连着 2 次重排都把清单改长了（这次 3 → 5）——在发散，不是在收敛
+```
+
+计划到底动没动**不听宿主自称**：改完重读账本比对 todo id，动了才计数、才记
+journal 的 `replan_applied`。完整设计见
+[`docs/ADAPTIVE-REPLAN.md`](docs/ADAPTIVE-REPLAN.md) §6–§10。
 
 ##### `zloop reflect`
 
@@ -1645,6 +1713,7 @@ macOS 上 runner 活着期间会**顶住合盖休眠**（`caffeinate` + 有 sudo
 | `--fast` | 关 | 把"分钟"当"秒"，只用来演示和测试 |
 | `--reflect-every <N>` | `0` | 每 N 个 todo 轮次插一轮回看（见 [`reflect`](#zloop-reflect)）；不占轮次、不改 NOTES |
 | `--no-replan` | 关 | 关掉「写回之后按信号重估计划」（默认开；见 [`replan`](#zloop-replan)。命中信号才跑，只产出建议、绝不改 todo） |
+| `--auto-replan` | 关 | 让重估那一轮**真的改计划**。护栏在代码里强制；自主改满 3 次、或连着两次把清单改长，就停机等人（`stop reason=replan_diverged`） |
 | `--no-keep-awake` | 关 | 不碰睡眠设置 |
 
 **它自己会处理的事**：宿主返回限流（429 / rate limit / overloaded）→ 不记失败，睡 30 分钟再试；宿主卡住 → 到 `--timeout-min` 杀掉并记 `fail`；等人 → 默认按最慢间隔慢速轮询而不是退出；被 `kill -9` → 下次启动时 journal 里记一笔 `restart`。
