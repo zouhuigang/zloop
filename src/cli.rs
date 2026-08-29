@@ -208,6 +208,15 @@ pub enum Cmd {
         /// Every todo in the goal
         #[arg(long)]
         all: bool,
+        /// Only the most recent N rounds
+        #[arg(long, value_name = "N")]
+        last: Option<usize>,
+        /// Only rounds at or after this time: 2h / 30m / 7d, 2026-08-29, or an ISO timestamp
+        #[arg(long, value_name = "TIME")]
+        since: Option<String>,
+        /// Only rounds at or before this time (same formats as --since)
+        #[arg(long, value_name = "TIME")]
+        until: Option<String>,
         /// Write to a file instead of stdout
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
@@ -368,7 +377,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Reflect { apply } => cmd_reflect(&root, &path, apply, style::Style::detect(cli.no_color)),
         Cmd::Stats { json } => cmd_stats(&path, json, style::Style::detect(cli.no_color)),
-        Cmd::Doc { todo, all, out } => cmd_doc(&root, &path, todo, all, out),
+        Cmd::Doc { todo, all, last, since, until, out } => cmd_doc(&root, &path, todo, all, last, since, until, out),
         Cmd::Edit { id, text, status, priority, blocked_by, acceptance } => {
             cmd_edit(&path, &id, text, status, priority, blocked_by, acceptance)
         }
@@ -1711,8 +1720,44 @@ fn cmd_stats(path: &Path, json: bool, c: style::Style) -> Result<i32> {
     Ok(0)
 }
 
-fn cmd_doc(root: &Path, path: &Path, todo: Option<String>, all: bool, out: Option<PathBuf>) -> Result<i32> {
+#[allow(clippy::too_many_arguments)]
+fn cmd_doc(
+    root: &Path,
+    path: &Path,
+    todo: Option<String>,
+    all: bool,
+    last: Option<usize>,
+    since: Option<String>,
+    until: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<i32> {
     let st = state::load(path)?;
+    let when = |raw: Option<String>| -> Result<Option<chrono::DateTime<chrono::FixedOffset>>> {
+        raw.map(|s| state::parse_when(&s)).transpose()
+    };
+    let range = log::Range {
+        last,
+        since: match when(since) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("doc: --since {e}");
+                return Ok(2);
+            }
+        },
+        until: match when(until) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("doc: --until {e}");
+                return Ok(2);
+            }
+        },
+    };
+    if let (Some(s), Some(u)) = (range.since, range.until) {
+        if s > u {
+            eprintln!("doc: --since 比 --until 还晚，这个区间是空的");
+            return Ok(2);
+        }
+    }
     let ids: Vec<String> = if all {
         st.todos.iter().map(|t| t.id.clone()).collect()
     } else {
@@ -1730,14 +1775,16 @@ fn cmd_doc(root: &Path, path: &Path, todo: Option<String>, all: bool, out: Optio
             }
         }
     };
-    let text = log::assemble(root, &st, &ids);
+    let text = log::assemble(root, &st, &ids, &range);
     match out {
         Some(p) => {
             if let Some(parent) = p.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&p, &text)?;
-            println!("wrote {} ({} 行, {} 条 todo)", p.display(), text.lines().count(), ids.len());
+            // 限了范围时没有轮次的 todo 整章不出，所以数正文里的章标题，别数 `ids`。
+            let chapters = text.matches("\n## ").count();
+            println!("wrote {} ({} 行, {} 条 todo)", p.display(), text.lines().count(), chapters);
         }
         None => print!("{text}"),
     }

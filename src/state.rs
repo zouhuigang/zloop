@@ -4,7 +4,7 @@
 //! round-trip so the Python implementation and this one can share a file.
 
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, FixedOffset, Local, NaiveDateTime, SecondsFormat, TimeZone};
+use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fmt;
@@ -242,6 +242,31 @@ pub fn parse_iso(value: &str) -> Result<DateTime<FixedOffset>> {
         .single()
         .map(|dt| dt.fixed_offset())
         .ok_or_else(|| anyhow!("ambiguous local timestamp {value:?}"))
+}
+
+/// Parse a point in time the way a person types one on the command line:
+/// `2h` / `30m` / `7d` (that long ago), `2026-08-29` (local midnight), or a full ISO timestamp.
+/// The relative form is the one people actually reach for（`--since 2h`），所以它排在最前面。
+pub fn parse_when(value: &str) -> Result<DateTime<FixedOffset>> {
+    let v = value.trim();
+    if let Some(digits) = v.strip_suffix(['m', 'h', 'd']) {
+        if let Ok(n) = digits.parse::<i64>() {
+            let span = match v.chars().last() {
+                Some('m') => chrono::Duration::minutes(n),
+                Some('h') => chrono::Duration::hours(n),
+                _ => chrono::Duration::days(n),
+            };
+            return Ok(now() - span);
+        }
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(v, "%Y-%m-%d") {
+        return Local
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("midnight is a valid time"))
+            .single()
+            .map(|dt| dt.fixed_offset())
+            .ok_or_else(|| anyhow!("ambiguous local date {value:?}"));
+    }
+    parse_iso(v).map_err(|_| anyhow!("看不懂的时间 {value:?}：用 2h / 30m / 7d、2026-08-29，或完整的 ISO 时间戳"))
 }
 
 /// Walk up from `start` (default: cwd) to the directory holding `.zloop/state.json`.

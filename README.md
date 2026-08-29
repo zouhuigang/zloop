@@ -641,6 +641,7 @@ done: t3 这一轮失败了，得留下踩到的坑（policy.require_pitfall）�
 ```bash
 zloop doc t3                       # 这条 todo 的所有轮次，合成一份文档
 zloop doc --all --out docs/TECH.md # 整个目标：概览 + 每条 todo 一章 + 每轮一节
+zloop doc --all --last 20          # 跑长了就限个范围：最近 20 轮（或 --since 3d）
 zloop log                          # 只有结果记录、没有实现思路的轮次会打 ⚠
 ```
 
@@ -1355,12 +1356,33 @@ $ zloop log --show 20260828-204107-t2-done.md     # 只给文件名也行
 |---|---|
 | `<TODO>` | 只出这一条 todo 的全部轮次 |
 | `--all` | 整个目标的每条 todo |
+| `--last <N>` | 只要最近 N 轮（跨 todo 一起数） |
+| `--since <TIME>` / `--until <TIME>` | 只要这段时间里的轮次；`2h` / `30m` / `7d`、`2026-08-29`、或完整 ISO 时间戳 |
 | `--out <FILE>` | 写到文件，不打屏幕 |
 
 ```bash
 $ zloop doc --all --out docs/CI-优化过程.md
 $ zloop doc t2                     # 只看 t2 那几轮
+$ zloop doc --all --last 20        # 跑了几十轮之后：只要最近 20 轮
+$ zloop doc --all --since 3d       # 或者：这三天干了什么
 ```
+
+不带范围参数就是全文，和以前一样。**一限范围，抬头就说清楚它省了什么**——一份只覆盖部分轮次的
+文档长得和完整文档一模一样，不写明白就是在骗读它的人：
+
+```
+$ zloop doc --all --last 2
+# 技术文档 · g1
+
+**目标**：测试范围选择
+
+生成于 2026-08-29T10:07:01+08:00 · 目标状态 done · 共 3 条 todo
+
+> **范围**：最近 2 轮 —— 收录 2 轮，省略 1 轮（`zloop doc` 不带范围参数出全文）
+```
+
+范围外一轮都不剩的 todo 整章不出（否则 `--all --last 3` 还是会摊开几十章空标题）；只指名一条
+todo 时那一章照出，抬头写着「收录 0 轮」，好让你知道是筛没了，不是这条 todo 没干过活。
 
 ##### `zloop sessions`
 

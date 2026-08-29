@@ -3,6 +3,7 @@
 use crate::session::{self, Host};
 use crate::state::{parse_iso, State, Tick, Todo, STATE_DIR};
 use anyhow::{Context, Result};
+use chrono::{DateTime, FixedOffset};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -187,8 +188,64 @@ pub fn file_is_documented(path: &Path) -> bool {
     fs::read_to_string(path).map(|s| s.contains("\n## 实现思路\n")).unwrap_or(false)
 }
 
+/// 文档范围。全空 = 全部轮次，也就是 `zloop doc` 一直以来的行为。
+#[derive(Debug, Default, Clone)]
+pub struct Range {
+    /// 只要最近 N 轮：跨所选 todo 一起按时间排，取最新的 N 轮。
+    pub last: Option<usize>,
+    /// 这个时刻（含）之后的轮次。
+    pub since: Option<DateTime<FixedOffset>>,
+    /// 这个时刻（含）之前的轮次。
+    pub until: Option<DateTime<FixedOffset>>,
+}
+
+impl Range {
+    pub fn is_full(&self) -> bool {
+        self.last.is_none() && self.since.is_none() && self.until.is_none()
+    }
+
+    fn covers(&self, tick: &Tick) -> bool {
+        let Ok(at) = parse_iso(&tick.at) else { return true };
+        self.since.map(|s| at >= s).unwrap_or(true) && self.until.map(|u| at <= u).unwrap_or(true)
+    }
+
+    /// 人能看懂的一行范围说明。
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(n) = self.last {
+            parts.push(format!("最近 {n} 轮"));
+        }
+        match (&self.since, &self.until) {
+            (Some(s), Some(u)) => parts.push(format!("{} 到 {}", crate::state::format_iso(s), crate::state::format_iso(u))),
+            (Some(s), None) => parts.push(format!("{} 之后", crate::state::format_iso(s))),
+            (None, Some(u)) => parts.push(format!("{} 之前", crate::state::format_iso(u))),
+            (None, None) => {}
+        }
+        parts.join(" · ")
+    }
+}
+
 /// Assemble one document from a set of round logs: the file bodies, headings demoted one level.
-pub fn assemble(root: &Path, state: &State, todo_ids: &[String]) -> String {
+pub fn assemble(root: &Path, state: &State, todo_ids: &[String], range: &Range) -> String {
+    // 先把范围算出来：一份只覆盖部分轮次的文档必须在开头说清楚它省了什么，
+    // 否则它看上去和一份完整文档一模一样——那就是在骗读它的人。
+    let mine: Vec<usize> = state
+        .ticks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| todo_ids.iter().any(|id| t.todo.as_deref() == Some(id.as_str())))
+        .filter(|(_, t)| t.log.is_some() || t.outcome == crate::tick::FEEDBACK)
+        .map(|(i, _)| i)
+        .collect();
+    let mut keep: Vec<usize> = mine.iter().copied().filter(|&i| range.covers(&state.ticks[i])).collect();
+    if let Some(n) = range.last {
+        // ticks 本来就按时间追加，取尾部 N 条就是"最近 N 轮"。
+        let drop = keep.len().saturating_sub(n);
+        keep.drain(..drop);
+    }
+    let (n_kept, dropped) = (keep.len(), mine.len() - keep.len());
+    let keep: HashSet<usize> = keep.into_iter().collect();
+
     let mut out = String::new();
     out.push_str(&format!("# 技术文档 · {}\n\n", state.goal.id));
     out.push_str(&format!("**目标**：{}\n\n", state.goal.text));
@@ -198,22 +255,35 @@ pub fn assemble(root: &Path, state: &State, todo_ids: &[String]) -> String {
         state.goal.status,
         state.todos.len()
     ));
+    if !range.is_full() {
+        out.push_str(&format!(
+            "\n> **范围**：{} —— 收录 {} 轮，省略 {} 轮（`zloop doc` 不带范围参数出全文）\n",
+            range.describe(),
+            n_kept,
+            dropped
+        ));
+    }
 
     for id in todo_ids {
         let Some(todo) = state.todos.iter().find(|t| &t.id == id) else { continue };
-        out.push_str(&format!("\n---\n\n## {} [P{}] {}\n\n", todo.id, todo.priority, todo.text));
-        out.push_str(&format!("- 状态：{}\n", todo.status));
-        if let Some(a) = &todo.acceptance {
-            out.push_str(&format!("- 验收标准：{a}\n"));
-        }
         // 反馈没有日志文件（就一句话），但它必须和 agent 自述并排出现在时间线上——
         // 只有把"我当时怎么想"和"人当时怎么说"放在一起，这份文档才说得清事情为什么变。
         let rounds: Vec<&crate::state::Tick> = state
             .ticks
             .iter()
-            .filter(|t| t.todo.as_deref() == Some(id.as_str()))
-            .filter(|t| t.log.is_some() || t.outcome == crate::tick::FEEDBACK)
+            .enumerate()
+            .filter(|(i, t)| t.todo.as_deref() == Some(id.as_str()) && keep.contains(i))
+            .map(|(_, t)| t)
             .collect();
+        // 限了范围就只出范围内有轮次的 todo：否则 `--all --last 3` 还是会摊开几十章空标题。
+        if rounds.is_empty() && !range.is_full() {
+            continue;
+        }
+        out.push_str(&format!("\n---\n\n## {} [P{}] {}\n\n", todo.id, todo.priority, todo.text));
+        out.push_str(&format!("- 状态：{}\n", todo.status));
+        if let Some(a) = &todo.acceptance {
+            out.push_str(&format!("- 验收标准：{a}\n"));
+        }
         if rounds.is_empty() {
             out.push_str("\n_这条 todo 还没有留下任何轮次记录。_\n");
             continue;

@@ -659,6 +659,75 @@ fn doc_assembles_rounds_into_one_document() {
 }
 
 #[test]
+fn doc_range_takes_recent_rounds_or_a_time_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "把启动时间降到 1 秒"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 量基线", "--add", "[P1] 懒加载", "--add", "[P2] 收尾"], None, &[]);
+    for id in ["t1", "t2", "t3"] {
+        let o = zloop(d, &["done", id, "--note", "ok", "--approach", &format!("{id} 的思路")], None, &[]);
+        assert_eq!(o.code, 0, "{}", o.err);
+    }
+    // 三轮全落在同一秒里，时间窗口就没得测：把它们摊到三天上。
+    // tick.log 记的是文件路径，改 at 不影响 assemble 取正文。
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    assert_eq!(st.ticks.len(), 3, "一条 done 一轮，多出来的 tick 会让下面的时间对不上号");
+    let days = ["2026-08-01T10:00:00+08:00", "2026-08-15T10:00:00+08:00", "2026-08-29T10:00:00+08:00"];
+    for (tick, at) in st.ticks.iter_mut().zip(days) {
+        tick.at = at.into();
+    }
+    state::save(&p, &mut st).unwrap();
+
+    // 默认行为不变：三章都在，一个字的范围提示都不该出现
+    let o = zloop(d, &["doc", "--all"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert_eq!(o.out.matches("\n## t").count(), 3, "{}", o.out);
+    assert!(!o.out.contains("**范围**"), "不带范围参数就出全文，不加抬头: {}", o.out);
+
+    // --last N：只留最近 N 轮；范围外的 todo 整章不出，并如实交代省了几轮
+    let o = zloop(d, &["doc", "--all", "--last", "1"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert!(o.out.contains("**范围**：最近 1 轮 —— 收录 1 轮，省略 2 轮"), "{}", o.out);
+    assert_eq!(o.out.matches("\n## t").count(), 1, "空章不占版面: {}", o.out);
+    assert!(o.out.contains("## t3 ") && !o.out.contains("## t1 "), "留下的是最近那轮: {}", o.out);
+
+    // --since / --until：两头都认，合起来是个闭区间
+    let o = zloop(d, &["doc", "--all", "--since", "2026-08-10"], None, &[]);
+    assert!(o.out.contains("## t2 ") && o.out.contains("## t3 ") && !o.out.contains("## t1 "), "{}", o.out);
+    let o = zloop(d, &["doc", "--all", "--until", "2026-08-10"], None, &[]);
+    assert!(o.out.contains("## t1 ") && !o.out.contains("## t2 "), "{}", o.out);
+    let o = zloop(d, &["doc", "--all", "--since", "2026-08-10", "--until", "2026-08-20"], None, &[]);
+    assert_eq!(o.out.matches("\n## t").count(), 1, "{}", o.out);
+    assert!(o.out.contains("## t2 "), "{}", o.out);
+
+    // 单条 todo 一样能限范围；窗口里一轮都没有时说清楚，而不是装作没这条 todo
+    let o = zloop(d, &["doc", "t1", "--since", "2026-08-10"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert!(o.out.contains("收录 0 轮，省略 1 轮"), "{}", o.out);
+
+    // --out 报的是真写进去的章数，不是 --all 的总数
+    let out_file = d.join("TECH.md");
+    let o = zloop(d, &["doc", "--all", "--last", "2", "--out", out_file.to_str().unwrap()], None, &[]);
+    assert!(o.out.contains("2 条 todo"), "{}", o.out);
+    assert_eq!(fs::read_to_string(&out_file).unwrap().matches("\n## t").count(), 2);
+
+    // 看不懂的时间、以及空区间，都要拦在出文档之前
+    let o = zloop(d, &["doc", "--all", "--since", "上周二"], None, &[]);
+    assert_eq!(o.code, 2, "{}", o.out);
+    assert!(o.err.contains("看不懂的时间"), "{}", o.err);
+    let o = zloop(d, &["doc", "--all", "--since", "2026-08-29", "--until", "2026-08-01"], None, &[]);
+    assert_eq!(o.code, 2, "{}", o.out);
+    assert!(o.err.contains("空的"), "{}", o.err);
+
+    // 相对写法（`--since 1d`）要被解成一个具体时刻再去筛，抬头上写的是解出来的时间戳。
+    // 收录几轮取决于今天是哪天，所以这里只断言它解开了，不断言条数。
+    let o = zloop(d, &["doc", "--all", "--since", "1d"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert!(o.out.contains("之后 —— 收录") && !o.out.contains("1d 之后"), "{}", o.out);
+}
+
+#[test]
 fn changed_files_are_captured_from_git() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
