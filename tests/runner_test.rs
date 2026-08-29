@@ -5,6 +5,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use zloop::state;
@@ -198,6 +200,35 @@ echo '{"session_id":"b","is_error":false,"result":"ok"}'"#,
     let argv = fs::read_to_string(mark.join("argv.log")).unwrap();
     assert!(argv.contains("--max-budget-usd 0.50"), "{argv}");
     assert!(argv.contains("--allowedTools Bash(zloop:*),Read,Edit,Write,MultiEdit,Glob,Grep"), "{argv}");
+}
+
+/// `start` 先按子进程 pid 写一次 pid 文件，runner 起来后又用自己的 pid 覆写同一个文件——
+/// 两次写的是同一个数，但覆写不是原子的：`status` 正好读在截断之后、写入之前，就读到空文件，
+/// 解析失败当成「没有 runner 在跑」。这是 start 之后立刻 status 偶发看不到 runner 的原因。
+#[test]
+fn pid_file_is_never_seen_empty_while_being_rewritten() {
+    let d = tempfile::tempdir().unwrap().keep();
+    let me = std::process::id();
+    zloop::daemon::write_pid(&d, me).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (d, stop) = (d.clone(), stop.clone());
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                zloop::daemon::write_pid(&d, me).unwrap();
+            }
+        })
+    };
+    // 自己这个进程一直活着，所以每一次探测都必须看得见它
+    let mut misses = 0;
+    for _ in 0..20_000 {
+        if zloop::daemon::running(&d).is_none() {
+            misses += 1;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+    assert_eq!(misses, 0, "20000 次探测里有 {misses} 次报「没有 runner」，可 pid {me} 一直活着");
 }
 
 #[test]

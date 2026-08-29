@@ -82,12 +82,21 @@ pub fn running(root: &Path) -> Option<i32> {
     }
 }
 
+/// 写 pid 文件。必须是原子替换：`start` 先按子进程 pid 写一次，runner 起来后又用自己的 pid
+/// 覆写同一个文件，而 `fs::write` 是「先截断再写」——`zloop status` 正好读在这两步中间就读到空
+/// 文件，把活着的 runner 误报成「没有 runner 在跑」。同目录写临时文件再 rename，读者就只看得见
+/// 旧值或新值，看不见中间态。
 pub fn write_pid(root: &Path, pid: u32) -> Result<()> {
     let p = pid_path(root);
     if let Some(parent) = p.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(p, format!("{pid}\n"))?;
+    let tmp = p.with_extension(format!("tmp.{}", std::process::id()));
+    fs::write(&tmp, format!("{pid}\n"))?;
+    if let Err(e) = fs::rename(&tmp, &p) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e).context("replacing the runner pid file");
+    }
     Ok(())
 }
 
