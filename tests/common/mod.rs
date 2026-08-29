@@ -1,10 +1,20 @@
 #![allow(dead_code)]
 
 use chrono::{DateTime, FixedOffset};
+use std::process::Command;
 use zloop::session::{Host, HostSession};
 use zloop::state::{self, State, Tick};
 use zloop::tick;
 use zloop::todo;
+
+/// Tests must not inherit the ambient session: a `cargo test` run started *inside* a host
+/// session (or inside `zloop run`, which sets `ZLOOP_RUNNER=1` on its children) would leak
+/// that identity into every spawned `zloop` and quietly change what it does — e.g.
+/// `hook-stop` takes its pass-through branch and prints nothing. Each test decides its own
+/// environment; anything meaningful is set explicitly by the test itself.
+pub fn scrub_ambient_env(cmd: &mut Command) -> &mut Command {
+    cmd.env_remove("CLAUDE_CODE_SESSION_ID").env_remove("CLAUDECODE").env_remove("CODEX_THREAD_ID").env_remove("ZLOOP_RUNNER")
+}
 
 pub fn now_utc() -> DateTime<FixedOffset> {
     DateTime::parse_from_rfc3339("2026-08-26T12:00:00+00:00").unwrap()

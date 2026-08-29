@@ -1448,6 +1448,8 @@ $ zloop notify "试一下"
 
 **你不用手敲**。runner 拉起的宿主进程带着 `ZLOOP_RUNNER=1`，这个 hook 见到就直接放行——否则 runner 的每一轮都会被自己的 hook 再套一层循环。
 
+这个标记会继承给宿主进程的所有子进程，`cargo test` 也不例外。所以测试里 spawn `zloop` 一律走 `common::scrub_ambient_env()`，把 `ZLOOP_RUNNER` / `CLAUDECODE` / `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID` 全清掉，需要哪个由测试自己显式设——否则「zloop 在自己的 runner 里跑自己的测试」永远是红的。
+
 ### `next` 怎么决定
 
 ```

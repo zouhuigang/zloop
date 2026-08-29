@@ -42,7 +42,8 @@ fn project(lines: &[&str]) -> PathBuf {
 
 fn run(d: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = Command::new(zloop_bin());
-    cmd.current_dir(d).args(args).env_remove("CLAUDE_CODE_SESSION_ID").env_remove("CODEX_THREAD_ID");
+    cmd.current_dir(d).args(args);
+    common::scrub_ambient_env(&mut cmd);
     for (k, v) in env {
         cmd.env(k, v);
     }

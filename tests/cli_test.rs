@@ -16,7 +16,7 @@ struct Out {
 fn zloop(dir: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> Out {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_zloop"));
     cmd.current_dir(dir).args(args);
-    cmd.env_remove("CLAUDE_CODE_SESSION_ID").env_remove("CODEX_THREAD_ID");
+    common::scrub_ambient_env(&mut cmd);
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -428,6 +428,19 @@ fn phase_tracks_the_round() {
     fs::write(j.join("journal.jsonl"), "{\"event\":\"begin\",\"round\":4,\"todo\":\"t2\",\"host\":\"claude\",\"at\":\"2026-08-27T00:00:00+08:00\"}\n").unwrap();
     assert!(zloop(d, &["context"], None, &[]).out.contains("runner round 4 on t2"));
     assert!(zloop(d, &["status"], None, &[]).out.contains("第 4 轮做 t2"), "{}", zloop(d, &["status"], None, &[]).out);
+}
+
+#[test]
+fn spawned_zloop_never_inherits_the_ambient_session() {
+    // Guards `cargo test` run from inside a host session or from `zloop run` itself: if any of
+    // these leak through, tests silently exercise a different code path (`hook-stop` goes quiet,
+    // ticks get stamped with the outer session id) and the suite is red for no real reason.
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", r#"printf '%s' "${ZLOOP_RUNNER-_}${CLAUDECODE-_}${CLAUDE_CODE_SESSION_ID-_}${CODEX_THREAD_ID-_}""#]);
+    cmd.env("ZLOOP_RUNNER", "1").env("CLAUDECODE", "1").env("CLAUDE_CODE_SESSION_ID", "sess").env("CODEX_THREAD_ID", "thread");
+    common::scrub_ambient_env(&mut cmd);
+    let o = cmd.output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "____", "scrub_ambient_env 漏掉了一个变量");
 }
 
 #[test]
