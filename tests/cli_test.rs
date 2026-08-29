@@ -1824,6 +1824,71 @@ fn done_only_nudges_a_replan_when_the_ledger_says_something_is_off() {
 }
 
 #[test]
+fn a_successful_round_can_still_say_the_rest_of_the_plan_is_dead() {
+    // 最该重规划的那种场景**不偏离**：那一轮顺利完成，可它的结论把剩下几条的前提推翻了。
+    // 五个偏离信号（feedback/stalled/fail_streak/rework/blocked）一个都不会响。
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "把冷启动降到 1 秒"], None, &[]);
+    zloop(
+        d,
+        &["plan", "--add", "[P0] 量出最慢的三处", "--add", "[P0] 给最慢那处加缓存",
+          "--add", "[P0] 复测", "--add", "[P1] 补基准", "--add", "[P1] 写文档"],
+        None,
+        &[],
+    );
+    zloop(d, &["done", "t1", "--note", "慢在同步读 3 个大配置", "--approach", "打点", "--no-doc"], None, &[]);
+
+    // 顺利做完第二条，把结论写进 note 里——zloop 读不出来，照旧沉默
+    let o = zloop(d, &["done", "t2", "--note", "加了缓存只省 30ms，瓶颈在反序列化", "--approach", "LRU", "--no-doc"], None, &[]);
+    assert!(!o.out.contains("计划可能要调整"), "光写在 note 里 zloop 认不出来，不该假装认得出: {}", o.out);
+    assert!(!zloop(d, &["replan"], None, &[]).out.contains("[rethink]"), "没说出口就没有信号");
+
+    // 说出口：一句 --rethink 就够
+    let o = zloop(
+        d,
+        &["done", "t3", "--note", "复测确认", "--approach", "基准", "--no-doc",
+          "--rethink", "瓶颈在反序列化，t4/t5 全建立在「缓存有效」这个前提上，前提没了"],
+        None,
+        &[],
+    );
+    assert!(o.out.contains("计划可能要调整") && o.out.contains("后续走不通"), "{}", o.out);
+    let packet = zloop(d, &["replan"], None, &[]).out;
+    assert!(packet.contains("[rethink] t3 那一轮说后续走不通"), "{packet}");
+    assert!(packet.contains("干活的人说后续走不通（原话）"), "光说「有人说走不通」没用，要给原话: {packet}");
+    assert!(packet.contains("前提没了"), "原话要完整给出: {packet}");
+    assert!(packet.contains("可能全都成功了"), "要点明「走不通的不是那一轮」: {packet}");
+    assert!(packet.contains("别重开一张清单"), "默认仍然是 plan repair: {packet}");
+    assert!(packet.contains("那就照新的现状重排"), "但前提被推翻时要允许重排，不能硬凑最小改动: {packet}");
+
+    // 账本里留得住：不是只在提示里一闪而过
+    let st = state::load(&state::state_path(d)).unwrap();
+    let t = st.ticks.iter().find(|t| t.todo.as_deref() == Some("t3")).unwrap();
+    assert!(t.rethink.as_deref().is_some_and(|r| r.contains("前提没了")), "{:?}", t.rethink);
+
+    // 边沿不是锁存：真的重估过之后，同一句话不该再触发（`blocked` 当年就是栽在这——
+    // 一条挂着的 todo 让 4 小时长跑里 5 次重估全由同一个信号触发）。
+    // `zloop replan` 是只读的、不记 tick，所以这里手工塞一条 replan tick 模拟「重估过了」。
+    let o = zloop(d, &["done", "t4", "--note", "补了基准", "--approach", "x", "--no-doc"], None, &[]);
+    assert!(o.out.contains("后续走不通"), "还没重估过，信号该一直在: {}", o.out);
+
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    let mut replan_tick = st.ticks.last().unwrap().clone();
+    replan_tick.outcome = "replan".into();
+    replan_tick.todo = None;
+    replan_tick.rethink = None;
+    st.ticks.push(replan_tick);
+    state::save(&p, &mut st).unwrap();
+
+    let o = zloop(d, &["done", "t5", "--note", "写完了", "--approach", "x", "--no-doc"], None, &[]);
+    assert!(!o.out.contains("后续走不通"), "重估过一次就该消停，别变成锁存: {}", o.out);
+    assert!(!zloop(d, &["replan"], None, &[]).out.contains("[rethink]"), "材料包里同理");
+    let st = state::load(&p).unwrap();
+    assert!(st.ticks.iter().any(|t| t.rethink.is_some()), "但账本里那句话要留着，是历史不是状态");
+}
+
+#[test]
 fn a_finished_todo_no_longer_counts_as_waiting_on_you() {
     // `blocked_by` 是履历不是现状：todo 做完之后这一栏原样留着，用来记「这条当初卡过人」。
     // 信号要是不排除终态，一条早就 done 的 todo 会让「在等你回话」永远响下去。

@@ -100,6 +100,24 @@ pub fn signals(state: &State) -> Vec<Signal> {
         });
     }
 
+    // 计划被自己推翻了：某一轮写回时说了「后续走不通」（`zloop done --rethink`）。
+    //
+    // 这是唯一一路**不问"有没有出岔子"、而问"还到得了目标吗"**的信号。其余五个全是偏离
+    // 信号，而最该重规划的那种场景恰恰不偏离：那一轮**顺利完成**，可它的结论把剩下几条的
+    // 前提推翻了（`docs/ADAPTIVE-REPLAN.md` §6 缺口二有实测——两轮全绿，零信号）。
+    //
+    // zloop 判断不了「策略走不通」，所以不猜：只认刚干完活的那个 agent 主动说出口的那一句。
+    //
+    // **边沿不是锁存**：只认最近一次重估之后新说的。踩过——`blocked` 当年就是个锁存，
+    // 一条挂着的 todo 让一次 4 小时长跑里 5 次重估全由同一个信号触发，占掉两成多的花费。
+    let since = state.ticks.iter().rposition(|t| t.outcome == tick::REPLAN).map_or(0, |i| i + 1);
+    for t in &state.ticks[since..] {
+        if let Some(r) = t.rethink.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+            let who = t.todo.as_deref().unwrap_or("-");
+            out.push(Signal { kind: "rethink", detail: format!("{who} 那一轮说后续走不通：{}", crate::style::truncate(r, 80)) });
+        }
+    }
+
     // 被挡：计划里有需要人决定却没拆出来的分叉。
     //
     // **只看还没了结的**：`blocked_by` 是履历不是现状——todo 做完之后这一栏原样留着，
@@ -178,10 +196,25 @@ pub fn packet(state: &State) -> String {
         }
     }
 
+    // 只说"有人说走不通"没用，得把原话给出来——这句话就是重规划的全部依据
+    let since = state.ticks.iter().rposition(|t| t.outcome == tick::REPLAN).map_or(0, |i| i + 1);
+    let doubts: Vec<&crate::state::Tick> =
+        state.ticks[since..].iter().filter(|t| t.rethink.as_deref().is_some_and(|r| !r.trim().is_empty())).collect();
+    if !doubts.is_empty() {
+        out.push_str("\n## 干活的人说后续走不通（原话）\n\n");
+        out.push_str("_这几轮**可能全都成功了**——走不通的不是那一轮，是它推翻的那个前提。_\n");
+        for t in &doubts {
+            out.push_str(&format!("- {}：{}\n", t.todo.as_deref().unwrap_or("-"), t.rethink.as_deref().unwrap_or("").replace('\n', " ")));
+        }
+    }
+
     out.push_str("\n## 你要做的\n\n");
     out.push_str("1. 对着**最终目标**看剩下这些任务：还能把目标做成吗？漏了什么？哪条已经没意义了？\n");
-    out.push_str("2. 只提**最小改动**——改哪条的文本 / 加哪条 / 删（延后）哪条 / 把哪条拆开。\
-                  **别重开一张清单**：原计划里还成立的部分要留着（plan repair 优于 full replan）。\n");
+    out.push_str("2. 默认只提**最小改动**——改哪条的文本 / 加哪条 / 删（延后）哪条 / 把哪条拆开。\
+                  **别重开一张清单**：原计划里还成立的部分要留着（plan repair 优于 full replan）。\n\
+                  \x20  **唯一的例外**：上面「后续走不通」那一节里，被推翻的如果是整条路线的前提，\
+                  那就照新的现状重排——给一条死路打补丁不叫最小改动。\
+                  是打补丁还是重排，说清你按哪种判断的。\n");
     out.push_str("3. 逐条说清为什么改，讲给用户听。\n");
     out.push_str("4. **人点头之后**才动，用现成的命令：\n");
     out.push_str("   - 加：`zloop plan --add \"[P1] 新任务 :: 验收标准\"`\n");

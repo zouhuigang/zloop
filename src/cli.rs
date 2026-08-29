@@ -81,6 +81,9 @@ pub enum Cmd {
         /// 遇到的坑与结论，可重复
         #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
         pitfall: Vec<String>,
+        /// 这一轮的结论**动摇了后续计划**：写清哪条前提不成立了（会触发一次重估）
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        rethink: Option<String>,
         /// 这一轮不写技术文档（绕过 policy.require_doc）
         #[arg(long = "no-doc")]
         no_doc: bool,
@@ -422,8 +425,8 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Init { goal, force } => cmd_init(&cli.dir, &goal, force),
         Cmd::Plan { add, file, replace, from_loopx } => cmd_plan(&path, add, file, replace, from_loopx),
         Cmd::Next { json, peek } => cmd_next(&root, &path, json, peek),
-        Cmd::Done { id, note, outcome, block, next, evidence, approach, decision, pitfall, no_doc, force } => {
-            cmd_done(&root, &path, &id, note, &outcome, block, next, DoneDoc { evidence, approach, decision, pitfall, no_doc }, force, style::Style::detect(cli.no_color))
+        Cmd::Done { id, note, outcome, block, next, evidence, approach, decision, pitfall, rethink, no_doc, force } => {
+            cmd_done(&root, &path, &id, note, &outcome, block, next, DoneDoc { evidence, approach, decision, pitfall, rethink, no_doc }, force, style::Style::detect(cli.no_color))
         }
         Cmd::Replan => {
             print!("{}", crate::replan::packet(&state::load(&path)?));
@@ -786,6 +789,7 @@ pub struct DoneDoc {
     pub approach: Option<String>,
     pub decision: Vec<String>,
     pub pitfall: Vec<String>,
+    pub rethink: Option<String>,
     pub no_doc: bool,
 }
 
@@ -875,14 +879,17 @@ fn cmd_done(
         // Only a finished todo owes a technical document; progress / fail / block rounds are exempt,
         // so they carry no verdict at all rather than showing up as "undocumented".
         let documented = (tick_rec.outcome == "done").then(|| doc.is_complete());
+        let rethink = input.rethink.as_deref().map(str::trim).filter(|r| !r.is_empty()).map(str::to_string);
         if let Some(last) = st.ticks.last_mut() {
             last.log = Some(rel.clone());
             last.documented = documented;
             last.pitfalls = doc.pitfalls.clone();
+            last.rethink = rethink.clone();
         }
         tick_rec.log = Some(rel);
         tick_rec.documented = documented;
         tick_rec.pitfalls = doc.pitfalls.clone();
+        tick_rec.rethink = rethink;
         st.in_progress = None; // the round is written back; phase goes back to idle/stopped
         let d = tick::decide(st, state::now());
         Ok(Ok((tick_rec, d, todo::remaining(st), todo_snapshot.acceptance.clone())))

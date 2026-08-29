@@ -294,6 +294,7 @@ pub fn record(
         num_turns: None,
         documented: None,
         pitfalls: Vec::new(),
+        rethink: None,
         extra: Map::new(),
     };
     state.ticks.push(tick.clone());

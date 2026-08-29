@@ -181,6 +181,17 @@ pub struct Tick {
     /// 日志目录是项目级的——这一点在多目标下已经吃过亏（见 GOALS-REVIEW.md 的 F5）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pitfalls: Vec<String>,
+    /// 这一轮学到的东西**动摇了后续计划**——写清哪条前提不成立了。
+    ///
+    /// 和 `pitfalls` 的区别：坑是"这条路上有个石头"，rethink 是"这条路本身不通往目标"。
+    /// 和 `block` 的区别：block 要人来回话，rethink 不需要——它只是给重估一个理由。
+    ///
+    /// 为什么必须由写回的人主动说：zloop 读不出"策略走不通"。那一轮可能**完全成功**——
+    /// 没失败、没停滞、没返工、没被挡，五个偏离信号一个都不响，可它的结论已经把剩下几条
+    /// 的前提推翻了（见 `docs/ADAPTIVE-REPLAN.md` §6 缺口二的实测）。知道这件事的只有
+    /// 刚干完活的那个 agent，所以给它一个说出口的地方。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rethink: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
