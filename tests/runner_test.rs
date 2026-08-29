@@ -53,6 +53,21 @@ fn run(d: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
     (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
 }
 
+/// `hook-stop` 读 stdin（内容不用，但会读），测试里必须把它接成空管道，
+/// 否则在终端下跑 `cargo test` 会卡在等输入。
+fn hook_stop(d: &Path, env: &[(&str, &str)]) -> (i32, String) {
+    let mut cmd = Command::new(zloop_bin());
+    cmd.current_dir(d).arg("hook-stop").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped());
+    common::scrub_ambient_env(&mut cmd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut ch = cmd.spawn().unwrap();
+    drop(ch.stdin.take());
+    let o = ch.wait_with_output().unwrap();
+    (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
 fn with_fake_path(fake: &Path) -> String {
     // fake host first, then the freshly built zloop (so `zloop done` inside the fake host uses
     // this build, not an older installed one), then the ambient PATH
@@ -721,6 +736,59 @@ esac"#,
 
 /// 无头模式下按信号插一轮重估：**只产出建议，绝不自己改 todo**。
 /// 计划是人和 agent 共同定稿的东西——没人点头的时候，runner 最多只能提议。
+#[test]
+fn the_stop_hook_goes_quiet_while_a_runner_owns_the_queue() {
+    // #14：runner 在跑的时候，任何开着的交互会话每结束一轮对话都会被 Stop hook
+    // 推去做**同一条** todo。源码文件没有锁，两个 agent 同时改就是互相覆盖。
+    // 2026-08-29 那次 4 小时长跑里每一轮都在发生。
+    let d = project(&["[P0] a", "[P0] b"]);
+    let slow = fake_host(r#"sleep 60; echo '{"session_id":"s","is_error":false,"result":"late"}'"#);
+    let tools = fake_power_tools(true);
+    let path = format!("{}:{}", tools.display(), with_fake_path(&slow));
+    let e = awake_env();
+    let vars = awake_vars(&e, &path);
+
+    // runner 不在：行为一字不变，照常催
+    let (code, out) = hook_stop(&d, &[("CLAUDE_CODE_SESSION_ID", "另一个会话")]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("\"block\""), "runner 不在时该照常催: {out}");
+
+    // runner 在跑：闭嘴
+    let (code, out, err) = run(&d, &["start", "--fast", "--timeout-min", "120"], &vars);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(d.join(".zloop/runner/pid").exists(), "runner 该起来了: {out}{err}");
+    let (code, out) = hook_stop(&d, &[("CLAUDE_CODE_SESSION_ID", "另一个会话")]);
+    assert_eq!((code, out.as_str()), (0, ""), "runner 在跑时不能再催别的会话");
+
+    // 换一个会话 id 问同样问题：一样闭嘴（挡的是「有 runner」，不是「是谁」）
+    let (code, out) = hook_stop(&d, &[("CLAUDE_CODE_SESSION_ID", "第三个会话")]);
+    assert_eq!((code, out.as_str()), (0, ""));
+
+    // runner 自己的子进程走的是另一道闸（ZLOOP_RUNNER），行为不变
+    let (code, out) = hook_stop(&d, &[("ZLOOP_RUNNER", "1"), ("CLAUDE_CODE_SESSION_ID", "runner 的孩子")]);
+    assert_eq!((code, out.as_str()), (0, ""));
+
+    // 轮次之间休息时也要闭嘴：判据是「有没有 runner」不是「它此刻忙不忙」。
+    // 上面那几次撞上的是「正在某一轮」，这里造一个确定性的「活着但手上没活」——
+    // runner 醒来就会接着领活，这会儿放交互会话进去只是换个时刻撞车。
+    run(&d, &["stop"], &vars);
+    let mut st = state::load(&state::state_path(&d)).unwrap();
+    st.in_progress = None;
+    state::save(&state::state_path(&d), &mut st).unwrap();
+    zloop::daemon::write_pid(&d, std::process::id()).unwrap(); // 测试进程自己就是个活着的 pid
+    assert!(zloop::daemon::running(&d).is_some());
+    let (code, out) = hook_stop(&d, &[("CLAUDE_CODE_SESSION_ID", "另一个会话")]);
+    assert_eq!((code, out.as_str()), (0, ""), "runner 在轮次之间睡觉时同样不能催");
+    fs::remove_file(d.join(".zloop/runner/pid")).unwrap();
+
+    // runner 停了：立刻恢复催活，别把人永远锁在门外
+    run(&d, &["stop"], &vars);
+    assert!(!d.join(".zloop/runner/pid").exists(), "stop 之后 pid 文件该没了");
+    let (code, out) = hook_stop(&d, &[("CLAUDE_CODE_SESSION_ID", "另一个会话")]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("\"block\""), "runner 停了就该恢复原样: {out}");
+}
+
 #[test]
 fn a_standing_block_only_triggers_one_replan_until_someone_else_gets_stuck() {
     // `blocked` 是这几个信号里唯一的**锁存**：其余四个从近期活动推出来、会自然衰减，

@@ -2011,6 +2011,20 @@ fn cmd_hook_stop(root: &Path, path: &Path) -> Result<i32> {
     if std::env::var_os("ZLOOP_RUNNER").is_some() {
         return Ok(0);
     }
+    // 无头 runner 在跑的时候，别催**别的**会话去抢它手上的活：源码文件没有锁，
+    // 两个 agent 同时改一批文件就是互相覆盖（#14，2026-08-29 那次 4 小时长跑里
+    // 每一轮都在发生）。
+    //
+    // 这里不能用 `tick::held_by_other`：那个函数对 runner 是放行的，而且**必须**放行，
+    // 否则 runner 会把自家的 `claude -p` 子进程挡在门外（原因见 `tick::held_by_other`
+    // 的注释）。所以换个判据——进程还在不在。
+    //
+    // 两道闸不会打架：runner 自己的子进程带着 `ZLOOP_RUNNER`，上面那一步就返回了，
+    // 走不到这里。也不只挡「正在跑某一轮」的那几分钟——runner 在轮次之间睡觉时同样闭嘴，
+    // 它醒来就会接着领活，这会儿放交互会话进去只是换个时刻撞车。
+    if crate::daemon::running(root).is_some() {
+        return Ok(0);
+    }
     let st = match state::load(path) {
         Ok(s) => s,
         Err(_) => return Ok(0),
