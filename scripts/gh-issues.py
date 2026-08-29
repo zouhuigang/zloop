@@ -13,7 +13,13 @@ todo 的文本本来就是自由的，把 `#12` 写进去就够当链接用了�
 """
 import argparse, json, re, subprocess, sys
 
-ISSUE_RE = re.compile(r"#(\d+)")
+# 只认 `pull` 写出来的那种**结尾标注** `(#N)`，不认正文里随便一个 `#N`。
+#
+# 踩过：一条 todo 的正文写着「把 13 个 issue（#2–#14）的修复推上去」，旧正则 `#(\d+)`
+# 取第一个匹配，把它绑到了 #2；范围写法里的 #14 同样会被别处读成一个独立 issue。
+# 那条 todo 一旦标成 done，`close` 就会去关一个**没人修过**的 issue——
+# 「解决了才关」这条保证就是从这里破的。
+ISSUE_RE = re.compile(r"\(#(\d+)\)")
 
 def gh(*args, check=True):
     r = subprocess.run(["gh", *args], capture_output=True, text=True)
@@ -33,9 +39,18 @@ def state():
         sys.exit(2)
     return json.loads(out)
 
-def issue_no(text):
-    m = ISSUE_RE.search(text)
-    return int(m.group(1)) if m else None
+def issue_no(text, warn=False):
+    """todo 正文 → issue 号；认不准就返回 None。
+
+    多个 `(#N)` 时**宁可不认**：关 issue 是不可逆的对外动作，猜错的代价
+    （关掉一个没修的 issue）远大于漏认的代价（人自己去关一下）。
+    """
+    hits = ISSUE_RE.findall(text)
+    if len(hits) == 1:
+        return int(hits[0])
+    if len(hits) > 1 and warn:
+        print(f"  跳过（正文里有 {len(hits)} 个 issue 号，认不准）：{text[:60]}", file=sys.stderr)
+    return None
 
 def cmd_pull(a):
     raw = gh("issue", "list", "--repo", a.repo, "--state", "open", "--limit", str(a.limit),
@@ -76,7 +91,7 @@ def cmd_pull(a):
 
 def cmd_close(a):
     st = state()
-    todos = [t for t in st["todos"] if issue_no(t["text"])]
+    todos = [t for t in st["todos"] if issue_no(t["text"], warn=True)]
     acted = 0
     for t in todos:
         n = issue_no(t["text"])
@@ -120,6 +135,36 @@ def cmd_status(a):
         print(f"  {tid:<4} {tag:<6} {s:<9} {text[:60]}")
     return 0
 
+def cmd_selftest(_a):
+    """issue 号识别的回归测试：不碰网络、不碰 zloop，纯函数对一张表。"""
+    cases = [
+        # (todo 正文, 期望的 issue 号)
+        ("锁超时不告诉你是谁持锁 (#3)", 3),                          # pull 写出来的样子
+        ("goal rm 靠目标文字片段匹配却不需要确认 (#2)", 2),
+        ("目标清单没有健康检查 (#14)", 14),                           # 两位数
+        ("把 13 个 issue（#2–#14）的修复推上去并关闭 issue", None),    # 全角括号里的范围：不认
+        ("把 13 个 issue (#2–#14) 的修复推上去", None),               # 半角括号里的范围：也不认
+        ("见 #7 的讨论，另见 #8", None),                              # 裸 #N：不认
+        ("修 (#7)，顺带碰到 (#8)", None),                             # 两个都合法 → 认不准，宁可不认
+        ("完全没有 issue 号的一条", None),
+        ("issue 号在中间 (#5) 后面还有话", 5),                        # 只有一个就认
+        # 下面两条是**区分新旧正则**的：旧的 `#(\d+)` 认裸号，新的只认括号标注
+        ("参考 #14 的做法重写这一段", None),                          # 提一嘴 ≠ 绑定：不该因此关掉 #14
+        ("修 (#7)：见 #8 的讨论", 7),                                 # 旧正则会因为看见两个号而放弃，新的认得准
+    ]
+    bad = 0
+    for text, want in cases:
+        got = issue_no(text)
+        if got != want:
+            bad += 1
+            print(f"  ❌ {text!r}\n     期望 {want}，实际 {got}")
+    if bad:
+        print(f"\n{bad}/{len(cases)} 条不符")
+        return 1
+    print(f"  ✅ issue 号识别 {len(cases)} 条全对（只认结尾标注 (#N)，多个就不认）")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default="zouhuigang/zloop")
@@ -129,6 +174,7 @@ def main():
     p.set_defaults(fn=cmd_pull)
     p = sub.add_parser("close"); p.add_argument("--yes", action="store_true"); p.set_defaults(fn=cmd_close)
     p = sub.add_parser("status"); p.set_defaults(fn=cmd_status)
+    p = sub.add_parser("selftest"); p.set_defaults(fn=cmd_selftest)
     a = ap.parse_args()
     return a.fn(a)
 
