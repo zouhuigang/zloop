@@ -1140,6 +1140,67 @@ EOF
 那一轮**不做 todo、不推进轮次编号、对三条 streak 透明**（插一轮反思不代表失败被解决了），
 而且**不会自己改 NOTES.md**——无头模式没人点头，所以它只把建议记进账本（`zloop log` 里看得到），等你回来看。
 
+**跑起来长什么样**：下面这段是在一个玩具项目（3 条 todo：写 `hello.py`、加 `--name`、写 README）上真跑的一次，
+原样贴过来。`--fast` 把轮间隔从分钟压成秒，所以 `--timeout-min 240` 在这里是 240 秒：
+
+```console
+$ zloop run --host claude --fast --timeout-min 240 --reflect-every 2 --max-rounds 3 --no-keep-awake --no-color
+runner: round 1 → t1 [claude]
+runner: round 1 written back · 本轮完成 t1：新建 `hello.py`，打印逻辑放在 `main()` 里、用标准 `__main__` 入口，为 t2 接 argparse 留好位置。
+runner: session → claude --resume 89092f46-b484-43cf-9603-34ccc0a333c2
+runner: round 2 → t2 [claude]
+runner: round 2 written back · 写回成功，输出里没有「计划可能要调整」，不需要 replan。
+runner: session → claude --resume 70d51423-f3d1-48d0-b13f-31a48efc9e8d
+runner: 第 2 轮之后插一轮回看（不占轮次）                    ← 回看那一轮，就这两行
+runner: 回看写进账本 · log/20260829-093023-reflect.md        ←
+runner: round 3 → t3 [claude]
+runner: round 3 written back · 这轮做完了 t3：写了 `README.md`（一句话说明 + 两条用法示例 + 参数表），示例是先跑真实命令抓 stdout 再照抄的，不是凭记忆写的。
+runner: session → claude --resume 11f0f15c-b33d-4677-b2c9-1f1b45077f5f
+runner: max rounds reached
+runner: stop (max_rounds)
+```
+
+**要看的就是那两行前后**：回看没有 `round N → tN` 那一行（它不领 todo），而 round 3 直接接着 round 2 往下数
+——轮次编号没被它推进。`.zloop/runner/journal.jsonl` 里也只多一条不带轮次的事件：
+
+```json
+{"event":"reflect","after_round":2,"at":"2026-08-29T09:28:46+08:00"}
+```
+
+账本里它是一条**不挂在任何 todo 上**的 `reflect` tick，`stats` 单独给它一个计数，三条 todo 该做完的照样做完：
+
+```console
+$ zloop stats
+  轮次    3 轮 · 返工 0（0%）· 失败 0
+  质量    一次过 3/3 条 · 无文档 0 轮 · 被挡 0 次 · 用户反馈 0 条 · 回看 1 次
+  花费    $1.78 · 宿主累计 3m
+```
+
+建议本身落在 `zloop log` 列出的那份 `-reflect.md` 里，等你回来看：
+
+```console
+$ zloop log
+  .zloop/log/20260829-093111-t3-done.md  t3 · done · 2026-08-29T09:31:11+08:00
+  .zloop/log/20260829-093023-reflect.md  回看 · 第 2 轮之后
+  .zloop/log/20260829-092834-t2-done.md  t2 · done · 2026-08-29T09:28:34+08:00
+  .zloop/log/20260829-092733-t1-done.md  t1 · done · 2026-08-29T09:27:33+08:00
+
+$ zloop log --show 20260829-093023-reflect.md
+# 回看 · 第 2 轮之后
+
+看完了 `.zloop/NOTES.md`、`state.json`（2 轮 tick，t1/t2 done，t3 README 还开着）和 `hello.py` 现状。下面是逐条判断，**这一轮没有执行 `zloop reflect --apply`，也没碰代码和 todo**。
+
+## 逐条判断
+
+| # | 经验 | 结论 | 理由 |
+|---|---|---|---|
+| 1 | hello.py 用 argparse，别自己解析 sys.argv | **删** | 已经落地了——`hello.py:4,8` 就是 argparse。这条现在只是在复述代码能看出来的事，谁改这个文件
+```
+
+最后那句是断的，不是贴漏了：**这份文件现在只存宿主输出的前 300 字**，回看的全文到此为止（干活轮次不受影响，
+它们的技术文档是 agent 自己用 `zloop done --approach` 写的，不走这条路）。所以现在这个回看更像是"提醒你该整理了"，
+真要整理还是回来敲一次 `zloop reflect`。
+
 这套形状是照 Warp 抄的：他们的 improver 是**按计划跑的观察者**，数据模型只有 cron + prompt + enabled +
 last_spawn_error 六个字段——反思不需要新子系统，它就是"隔一阵子换一段 prompt 跑一轮"
 （见 [`docs/SELF-IMPROVEMENT.md`](docs/SELF-IMPROVEMENT.md)）。
