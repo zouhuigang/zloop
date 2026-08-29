@@ -3,6 +3,7 @@
 use crate::session::{self, Host};
 use crate::state::{parse_iso, State, Tick, Todo, STATE_DIR};
 use anyhow::{Context, Result};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -156,6 +157,31 @@ pub fn write(root: &Path, state: &State, tick: &Tick, todo: &Todo, doc: &Doc) ->
     Ok(format!("{LOG_DIR}/{name}"))
 }
 
+/// 从一份日志里读回某个小节的正文（`## <title>` 到下一个 `##` 之间）。
+///
+/// `--approach` 这些只落在日志文件里，不在账本上；`reflect` 要把"我当时怎么说"和
+/// "人怎么回的"配对起来展示，就得回头取一次。只在有反馈的那几轮上调用，量很小。
+pub fn read_section(root: &Path, rel: &str, title: &str) -> Option<String> {
+    let text = fs::read_to_string(root.join(STATE_DIR).join(rel)).ok()?;
+    let mut body = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if let Some(h) = line.strip_prefix("## ") {
+            if inside {
+                break;
+            }
+            inside = h.trim() == title;
+            continue;
+        }
+        if inside {
+            body.push_str(line.trim());
+            body.push(' ');
+        }
+    }
+    let body = body.trim().to_string();
+    (!body.is_empty()).then_some(body)
+}
+
 /// Does this log file carry an 实现思路 section?
 pub fn file_is_documented(path: &Path) -> bool {
     fs::read_to_string(path).map(|s| s.contains("\n## 实现思路\n")).unwrap_or(false)
@@ -180,13 +206,23 @@ pub fn assemble(root: &Path, state: &State, todo_ids: &[String]) -> String {
         if let Some(a) = &todo.acceptance {
             out.push_str(&format!("- 验收标准：{a}\n"));
         }
-        let rounds: Vec<&crate::state::Tick> =
-            state.ticks.iter().filter(|t| t.todo.as_deref() == Some(id.as_str()) && t.log.is_some()).collect();
+        // 反馈没有日志文件（就一句话），但它必须和 agent 自述并排出现在时间线上——
+        // 只有把"我当时怎么想"和"人当时怎么说"放在一起，这份文档才说得清事情为什么变。
+        let rounds: Vec<&crate::state::Tick> = state
+            .ticks
+            .iter()
+            .filter(|t| t.todo.as_deref() == Some(id.as_str()))
+            .filter(|t| t.log.is_some() || t.outcome == crate::tick::FEEDBACK)
+            .collect();
         if rounds.is_empty() {
             out.push_str("\n_这条 todo 还没有留下任何轮次记录。_\n");
             continue;
         }
         for tick in rounds {
+            if tick.outcome == crate::tick::FEEDBACK {
+                out.push_str(&format!("\n### 用户反馈 · {}\n\n> {}\n", tick.at, tick.note));
+                continue;
+            }
             let rel = tick.log.as_deref().unwrap_or_default();
             let path = root.join(STATE_DIR).join(rel);
             out.push_str(&format!("\n### 轮次 {} · {} · {}\n\n", tick.round, tick.outcome, tick.at));
@@ -216,28 +252,86 @@ pub fn assemble(root: &Path, state: &State, todo_ids: &[String]) -> String {
     out
 }
 
-/// Log files, newest first, optionally filtered by todo id.
-pub fn entries(root: &Path, todo: Option<&str>, last: usize) -> Result<Vec<PathBuf>> {
+/// `.zloop/log/` 是项目级的，而每个目标的 todo id 都从 `t1` 重新开始——所以光看文件名
+/// 分不出一份日志属于哪个目标。归属的权威来源是 tick 上记的路径（`tick.log`），它跟着
+/// 目标的 state 文件走，`zloop doc` 一直用的就是它。
+///
+/// 规则：当前目标 tick 里出现过的 → 列；**别的目标**（停放中的，或已归档的）tick 里出现过的 → 不列；
+/// 两边都没提到的 → 列（宁可多列，不要把自己的历史藏起来）。
+///
+/// 最后那一档主要是 `zloop compact` 造出来的：它把老 tick 搬进 `.zloop/archive/compact-*.json`，
+/// 那些轮次的日志就此无主。这些几乎总是当前目标自己的过去，所以按"列"处理。
+/// `compact-*.json` 不是一份完整 state，`state::load` 会解析失败，正好被下面的 `.ok()` 跳过。
+fn logs_of_other_goals(root: &Path) -> HashSet<String> {
+    let dirs = [crate::goals::goals_dir(root), root.join(STATE_DIR).join(crate::goals::ARCHIVE_DIR)];
+    dirs.iter()
+        .filter_map(|d| fs::read_dir(d).ok())
+        .flat_map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        .filter(|p| p.extension().map(|e| e == "json").unwrap_or(false))
+        .filter_map(|p| crate::state::load(&p).ok())
+        .flat_map(|st| st.ticks.into_iter().filter_map(|t| t.log))
+        .collect()
+}
+
+/// 一条清单行：文件 + 写它的那一轮（无主文件是 `None`，只能靠文件名猜）。
+pub type Entry = (PathBuf, Option<Tick>);
+
+/// 当前目标的日志文件，最新在前；`hidden` 是因为属于别的目标而没列出来的数量。
+pub fn entries(root: &Path, state: &State, todo: Option<&str>, last: usize) -> Result<(Vec<Entry>, usize)> {
     let dir = root.join(STATE_DIR).join(LOG_DIR);
     if !dir.is_dir() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
-    let mut files: Vec<PathBuf> = fs::read_dir(&dir)?
+    let mine: HashMap<String, Tick> = state
+        .ticks
+        .iter()
+        .filter_map(|t| t.log.clone().map(|rel| (rel, t.clone())))
+        .collect();
+    let theirs = logs_of_other_goals(root);
+
+    let mut hidden = 0;
+    let mut rows: Vec<Entry> = Vec::new();
+    let mut paths: Vec<PathBuf> = fs::read_dir(&dir)?
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().map(|e| e == "md").unwrap_or(false))
-        .filter(|p| match todo {
-            Some(id) => p
-                .file_name()
-                .map(|n| n.to_string_lossy().contains(&format!("-{id}-")))
-                .unwrap_or(false),
-            None => true,
-        })
         .collect();
-    files.sort();
-    files.reverse();
-    files.truncate(last);
-    Ok(files)
+    paths.sort();
+    paths.reverse();
+    for path in paths {
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+        let rel = format!("{LOG_DIR}/{name}");
+        let tick = mine.get(&rel);
+        if tick.is_none() && theirs.contains(&rel) {
+            hidden += 1;
+            continue;
+        }
+        let keep = match (todo, tick) {
+            // 认账本：这一轮记在哪条 todo 上是 tick 说的，不是文件名说的
+            (Some(id), Some(t)) => t.todo.as_deref() == Some(id),
+            (Some(id), None) => name.contains(&format!("-{id}-")),
+            (None, _) => true,
+        };
+        if keep {
+            rows.push((path, tick.cloned()));
+            if rows.len() >= last {
+                break;
+            }
+        }
+    }
+    Ok((rows, hidden))
+}
+
+/// 无主文件只能靠文件名判断这一轮是不是"完成"：`<stamp>-<todo>-<outcome>[-n].md`。
+pub fn name_is_done(path: &Path) -> bool {
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else { return false };
+    let stem = name.strip_suffix(".md").unwrap_or(&name);
+    // 去掉重名时加的 `-2` / `-3`：它们让 `ends_with("-done.md")` 这种判断全部失效
+    let stem = match stem.rsplit_once('-') {
+        Some((head, tail)) if tail.chars().all(|c| c.is_ascii_digit()) && !tail.is_empty() => head,
+        _ => stem,
+    };
+    stem.ends_with("-done")
 }
 
 pub fn first_line(path: &Path) -> String {
@@ -245,6 +339,24 @@ pub fn first_line(path: &Path) -> String {
         .ok()
         .and_then(|s| s.lines().next().map(|l| l.trim_start_matches('#').trim().to_string()))
         .unwrap_or_default()
+}
+
+/// 写一份不属于任何 todo 的日志（回看那一轮），返回相对 `.zloop/` 的路径。
+///
+/// 和 `write` 分开：那个是"某条 todo 的某一轮"，要 Todo 和 Doc；这个只是一段正文。
+pub fn write_raw(root: &Path, stem: &str, body: &str) -> Result<String> {
+    let dir = root.join(STATE_DIR).join(LOG_DIR);
+    fs::create_dir_all(&dir)?;
+    let stamp = crate::state::now().format("%Y%m%d-%H%M%S").to_string();
+    let base = format!("{stamp}-{stem}");
+    let mut name = format!("{base}.md");
+    let mut n = 1;
+    while dir.join(&name).exists() {
+        n += 1;
+        name = format!("{base}-{n}.md");
+    }
+    fs::write(dir.join(&name), body)?;
+    Ok(format!("{LOG_DIR}/{name}"))
 }
 
 /// Append lines to an existing log file (relative to `.zloop/`), e.g. host cost known only after settlement.

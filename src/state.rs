@@ -56,6 +56,9 @@ fn d_intervals() -> Vec<u32> {
 fn d_require_doc() -> bool {
     true
 }
+fn d_require_pitfall() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Goal {
@@ -100,6 +103,10 @@ pub struct Policy {
     /// leaves a real technical document. `--no-doc` overrides one call.
     #[serde(default = "d_require_doc")]
     pub require_doc: bool,
+    /// 同理，`--outcome fail` 必须带 `--pitfall`：失败最该留下的是"为什么不行"，
+    /// 否则同一个坑下一轮还会再踩一次。`--no-doc` 同样能绕过一次。
+    #[serde(default = "d_require_pitfall")]
+    pub require_pitfall: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -119,6 +126,7 @@ impl Default for Policy {
             notify_cmd: None,
             preflight_cmd: None,
             require_doc: d_require_doc(),
+            require_pitfall: d_require_pitfall(),
             extra: Map::new(),
         }
     }
@@ -168,6 +176,11 @@ pub struct Tick {
     /// Did this round leave an 实现思路 in its log? (None for rounds that write no log.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub documented: Option<bool>,
+    /// 这一轮记下的坑。**账本里也存一份**（日志文件里有渲染版）：`zloop context` 要能
+    /// 直接读出"这个目标失败过的地方"，而不必回头解析一堆 Markdown；账本跟着目标走，
+    /// 日志目录是项目级的——这一点在多目标下已经吃过亏（见 GOALS-REVIEW.md 的 F5）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pitfalls: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -239,11 +252,26 @@ pub fn find_root(start: Option<&Path>) -> PathBuf {
     };
     let base = base.canonicalize().unwrap_or(base);
     for candidate in base.ancestors() {
-        if candidate.join(STATE_DIR).join(STATE_FILE).is_file() {
+        let dir = candidate.join(STATE_DIR);
+        // `.zloop/goals/` 也算认领：目标全停着（没有当前目标）时项目仍然要找得到，
+        // 否则从子目录连 `zloop goal list` 都看不见自己的目标。
+        if dir.join(STATE_FILE).is_file() || dir.join(crate::goals::GOALS_DIR).is_dir() {
             return candidate.to_path_buf();
         }
     }
     base
+}
+
+/// 停在 `.zloop/goals/` 的目标数量；用于在"没有当前目标"时给出能用的下一步。
+fn parked_count(state_file: &Path) -> usize {
+    let Some(dir) = state_file.parent().map(|p| p.join(crate::goals::GOALS_DIR)) else { return 0 };
+    fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 pub fn state_path(root: &Path) -> PathBuf {
@@ -273,6 +301,13 @@ pub fn default_state(goal_text: &str, goal_id: &str) -> State {
 
 pub fn load(path: &Path) -> Result<State> {
     if !path.is_file() {
+        let parked = parked_count(path);
+        if parked > 0 {
+            return Err(StateError(format!(
+                "当前没有目标（{parked} 个停在 .zloop/goals/）：`zloop goal list` 看有哪些，\n                 `zloop goal switch <id>` 挑一个开进来"
+            ))
+            .into());
+        }
         return Err(StateError(format!(
             "no zloop state at {} (run `zloop init \"<goal>\"` first)",
             path.display()

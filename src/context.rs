@@ -40,11 +40,21 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
         spent_line
     ));
 
+    // 约定紧跟目标：它是"每一轮都该照做"的那一层，既不轮换也不该被篇幅挤掉
+    let notes = crate::notes::read(root);
+    if !notes.rules.is_empty() {
+        sections.push(format!(
+            "## 本项目的约定（每轮都要遵守）\n{}",
+            notes.rules.iter().map(|r| format!("- {r}")).collect::<Vec<_>>().join("\n")
+        ));
+    }
+
     let recent: Vec<String> = state
         .ticks
         .iter()
         .rev()
-        .filter(|t| t.outcome != "noop")
+        // feedback 有自己那一节，不在这里重复
+        .filter(|t| t.outcome != "noop" && t.outcome != crate::tick::FEEDBACK)
         .take(3)
         .map(|t| {
             let who = t.todo.as_deref().unwrap_or("-");
@@ -57,12 +67,55 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
         if recent.is_empty() { "- 尚未开始".to_string() } else { recent.join("\n") }
     ));
 
+    // 人说的话排在"下一条"之前：下一轮先看到要处理什么，再看到该做哪条
+    let pending = tick::pending_feedback(state);
+    let has_feedback = !pending.is_empty();
+    if has_feedback {
+        let lines: Vec<String> = pending
+            .iter()
+            .rev()
+            .take(3)
+            .map(|t| format!("- {} {}：{}", t.at, t.todo.as_deref().unwrap_or("-"), t.note))
+            .collect();
+        let earlier = tick::feedback_count(state) - pending.len();
+        let tail = if earlier > 0 {
+            format!("\n（另有 {earlier} 条更早的反馈已被后续轮次处理过，在 `zloop doc` 里能翻到）")
+        } else {
+            String::new()
+        };
+        sections.push(format!("## 用户对上一轮的反馈（先处理这些）\n{}{}", lines.join("\n"), tail));
+    }
+
+    // 失败过的地方排在"下一条"之前：先知道哪儿踩过坑，再看要做什么
+    let failures = tick::failures(state);
+    let has_failures = !failures.is_empty();
+    if has_failures {
+        let mut lines = Vec::new();
+        for t in failures.iter().take(3) {
+            let who = t.todo.as_deref().unwrap_or("-");
+            let word = if t.outcome == "block" { "卡住" } else { "失败" };
+            let note = if t.note.is_empty() { String::new() } else { format!("：{}", t.note) };
+            // 不印轮次：fail 不推进轮次计数（`record` 只给 done/progress 加一），
+            // 印出来会是"第 0 轮失败"这种读不通的话。时间戳更有用。
+            lines.push(format!("- {} {who} {word}{note}", t.at));
+            for p in t.pitfalls.iter().take(2) {
+                lines.push(format!("  ↳ 坑：{}", p.replace('\n', " ")));
+            }
+        }
+        let more = failures.len().saturating_sub(3);
+        let tail = if more > 0 { format!("\n（更早还有 {more} 次，`zloop log` 里有全部记录）") } else { String::new() };
+        sections.push(format!("## 本目标失败过的地方（别重复踩）\n{}{}", lines.join("\n"), tail));
+    }
+
     let decision = tick::decide(state, at);
     let next = match &decision.todo {
         Some(t) => format!("{} [P{}] {}", t.id, t.priority, t.text),
         None => format!("（{}）", decision.reason),
     };
     sections.push(format!("## 下一条\n{next}"));
+    // 到这里为止的都不裁：目标 / 约定 / 当前判断 / 用户反馈 / 失败过的地方 / 下一条。
+    // 用"位置"而不是数字，以后再插一节也不用回头改这里（之前就是靠数字算的，加一节就得改一次）。
+    let protected = sections.len();
 
     let open: Vec<String> = todo::open_ordered(state)
         .into_iter()
@@ -85,7 +138,7 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
     if !sessions.is_empty() {
         let mut lines = Vec::new();
         for host in ["claude", "codex", "cli"] {
-            if let Some(s) = sessions.iter().rev().find(|s| s.host == host) {
+            if let Some(s) = session::latest(&sessions, Some(host)) {
                 if let Some(cmd) = &s.resume {
                     lines.push(format!("- {}（最近 {}，{} ticks）：`{}`", host, s.last, s.ticks, cmd));
                 }
@@ -96,10 +149,13 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
         }
     }
 
-    let lessons = crate::notes::recent(root, 5);
+    let mut lessons: Vec<String> = notes.lessons.iter().map(|(_, t)| t.clone()).collect();
+    let dropped = lessons.len().saturating_sub(crate::notes::WINDOW);
+    lessons.drain(..dropped);
     if !lessons.is_empty() {
+        let more = if dropped > 0 { format!("，另有 {dropped} 条更早的没带上") } else { String::new() };
         sections.push(format!(
-            "## 经验（zloop remember，最近 {} 条）\n{}",
+            "## 经验（zloop remember，最近 {} 条{more}）\n{}",
             lessons.len(),
             lessons.iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n")
         ));
@@ -110,7 +166,7 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
     // Trim from the tail (keep 目标 / 当前判断 / 下一条 as long as possible).
     let render = |secs: &[String]| secs.join("\n\n");
     let mut kept = sections.clone();
-    while kept.len() > 3 && render(&kept).chars().count() > budget {
+    while kept.len() > protected && render(&kept).chars().count() > budget {
         let drop_idx = kept.len() - 2; // keep the last "怎么继续" line, drop the one before it
         kept.remove(drop_idx);
     }

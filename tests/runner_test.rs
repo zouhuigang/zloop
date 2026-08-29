@@ -127,7 +127,8 @@ echo "{\"session_id\":\"sess-$id\",\"is_error\":false,\"result\":\"ok\"}""#,
     // default: same todo resumes, new todo starts fresh
     let d = project(&["[P0] a", "[P0] b"]);
     let mark = tempfile::tempdir().unwrap().keep();
-    let (code, out, _) = run(&d, &["run", "--host", "claude", "--fast"], &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())]);
+    // --no-replan：这条测的是会话谱系，别让信号触发的重估轮次混进 argv.log
+    let (code, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--no-replan"], &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())]);
     assert_eq!(code, 0, "{out}");
     let argv = fs::read_to_string(mark.join("argv.log")).unwrap();
     let calls: Vec<&str> = argv.lines().collect();
@@ -137,7 +138,7 @@ echo "{\"session_id\":\"sess-$id\",\"is_error\":false,\"result\":\"ok\"}""#,
     // --resume all: keeps one session across todos
     let d2 = project(&["[P0] a", "[P0] b"]);
     let mark2 = tempfile::tempdir().unwrap().keep();
-    run(&d2, &["run", "--host", "claude", "--fast", "--resume", "all"], &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark2.to_str().unwrap())]);
+    run(&d2, &["run", "--host", "claude", "--fast", "--resume", "all", "--no-replan"], &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark2.to_str().unwrap())]);
     let argv2 = fs::read_to_string(mark2.join("argv.log")).unwrap();
     let calls2: Vec<&str> = argv2.lines().collect();
     assert_eq!(calls2[2], "resume=sess-t1", "with --resume all, t2 continues t1's session: {argv2}");
@@ -260,8 +261,9 @@ echo '{"session_id":"c","is_error":false,"result":"ok","total_cost_usd":0.1234,"
     assert!(fs::read_to_string(mark.join("env.log")).unwrap().contains("runner=1"));
     let (_, out, _) = run(&d, &["status"], &[]);
     assert!(out.contains("$0.12"), "{out}");
-    let logs = zloop::log::entries(&d, None, 5).unwrap();
-    assert!(fs::read_to_string(&logs[0]).unwrap().contains("- cost: $0.1234   turns: 7   duration: 4s   (runner settlement)"));
+    let st = zloop::state::load(&zloop::state::state_path(&d)).unwrap();
+    let (logs, _) = zloop::log::entries(&d, &st, None, 5).unwrap();
+    assert!(fs::read_to_string(&logs[0].0).unwrap().contains("- cost: $0.1234   turns: 7   duration: 4s   (runner settlement)"));
 }
 
 #[test]
@@ -578,4 +580,110 @@ echo '{"session_id":"lid","is_error":false,"result":"ok"}'"#,
     assert!(j.iter().any(|x| x["event"] == "awake_off" && x["restored_default"] == true));
     let (_, out, _) = run(&d, &["awake"], &vars);
     assert!(out.contains("default (lid-close protection ready"), "{out}");
+}
+
+/// `--reflect-every N`：每 N 个 todo 轮次插一轮回看——不做 todo、不推进轮次、
+/// 不动 NOTES.md（无头模式没人点头），只把建议记进账本。
+#[test]
+fn reflect_every_inserts_a_round_that_does_not_consume_a_todo() {
+    let d = project(&["[P0] a", "[P0] b", "[P0] c"]);
+    // 回看那一轮的 prompt 里有「回看一次」；todo 轮次的 prompt 里有「本轮由 zloop runner」。
+    // 假宿主据此分辨自己被叫来干嘛：回看只回话，todo 轮次才写回。
+    let fake = fake_host(
+        r#"case "$2" in
+  *"回看一次"*) echo "$2" > "$TMPDIR_MARK/reflect-prompt"
+     echo '{"session_id":"r","is_error":false,"result":"建议：第 1、2 条合并"}' ;;
+  *) id=$(zloop next --json | sed -n 's/.*"id": "\([^"]*\)".*/\1/p' | head -1)
+     zloop done "$id" --note "done by fake" --approach "fake host round" >/dev/null 2>&1
+     echo '{"session_id":"s","is_error":false,"result":"ok"}' ;;
+esac"#,
+    );
+    let mark = tempfile::tempdir().unwrap().keep();
+    let (code, out, _) = run(
+        &d,
+        &["run", "--host", "claude", "--fast", "--reflect-every", "2", "--max-rounds", "3"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("插一轮回看"), "{out}");
+
+    let st = state::load(&state::state_path(&d)).unwrap();
+    let reflects: Vec<_> = st.ticks.iter().filter(|t| t.outcome == "reflect").collect();
+    assert_eq!(reflects.len(), 1, "3 轮里应该正好插一次: {:?}", st.ticks.iter().map(|t| &t.outcome).collect::<Vec<_>>());
+    let r = reflects[0];
+    assert!(r.todo.is_none(), "回看不挂在任何 todo 上");
+    assert!(r.note.contains("建议"), "宿主的输出要记进账本: {}", r.note);
+    assert!(r.log.as_ref().is_some_and(|l| l.contains("reflect")), "完整输出留在日志里: {r:?}");
+
+    // 不占 todo 轮次：三条 todo 该做完的照样做完
+    assert_eq!(st.todos.iter().filter(|t| t.status == "done").count(), 3, "{:?}", st.todos);
+    // 回看那一轮不推进轮次编号
+    assert_eq!(zloop::tick::current_round(&st.ticks), 3);
+    // 它也没动经验文件
+    assert!(!d.join(".zloop/NOTES.md").exists(), "无头回看不该自己落地");
+    // 材料包确实是回看用的那一份
+    let prompt = fs::read_to_string(mark.join("reflect-prompt")).unwrap();
+    assert!(prompt.contains("现有经验") && prompt.contains("不要**运行 `zloop reflect --apply`"), "{prompt}");
+}
+
+/// 无头模式下按信号插一轮重估：**只产出建议，绝不自己改 todo**。
+/// 计划是人和 agent 共同定稿的东西——没人点头的时候，runner 最多只能提议。
+#[test]
+fn a_headless_replan_round_suggests_but_never_edits_the_plan() {
+    let d = project(&["[P0] 会拖的一条", "[P0] 另一条", "[P1] 第三条"]);
+    let mark = tempfile::tempdir().unwrap().keep();
+    // 重估轮次的 prompt 里有「重估一次」；干活轮次里有「本轮由 zloop runner」。
+    // 假宿主扮演一个不守规矩的模型：重估时**试图**改计划，用来验证「就算它改了也不算数」这条防线
+    // ——真正的防线是 runner 自己不改，且提示词明说不要改。
+    let fake = fake_host(
+        r#"case "$2" in
+  *"重估一次"*)
+     echo "$2" > "$TMPDIR_MARK/replan-prompt"
+     echo '{"session_id":"rp","is_error":false,"result":"建议：t1 拆成两条，先量再改"}' ;;
+  *) id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+     zloop done "$id" --outcome progress --note "又没做完" >/dev/null 2>&1
+     echo '{"session_id":"s","is_error":false,"result":"ok"}' ;;
+esac"#,
+    );
+    let (code, out, _) = run(
+        &d,
+        &["run", "--host", "claude", "--fast", "--max-rounds", "3"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("重估计划"), "{out}");
+    assert!(out.contains("没有动任何 todo"), "{out}");
+
+    let st = state::load(&state::state_path(&d)).unwrap();
+    // 计划一个字没变：还是三条，文本和优先级都没动
+    assert_eq!(st.todos.len(), 3, "重估不能加减 todo: {:?}", st.todos);
+    assert_eq!(st.todos[0].text, "会拖的一条");
+    assert!(st.todos.iter().all(|t| t.status != "deferred"), "也不能擅自延后: {:?}", st.todos);
+
+    // 建议进了账本
+    let replans: Vec<_> = st.ticks.iter().filter(|t| t.outcome == "replan").collect();
+    assert!(!replans.is_empty(), "至少重估过一次: {:?}", st.ticks.iter().map(|t| &t.outcome).collect::<Vec<_>>());
+    assert!(replans[0].todo.is_none(), "重估不挂在任何 todo 上");
+    assert!(replans[0].note.contains("建议"), "宿主的建议要记下来: {}", replans[0].note);
+    assert!(replans[0].log.as_ref().is_some_and(|l| l.contains("replan")), "{:?}", replans[0]);
+
+    // 一轮活最多跟一次重估
+    let work = st.ticks.iter().filter(|t| t.outcome == "progress").count();
+    assert!(replans.len() <= work, "重估不能比干活的轮次还多: {} vs {work}", replans.len());
+
+    // 提示词里明确禁止改计划
+    let prompt = fs::read_to_string(mark.join("replan-prompt")).unwrap();
+    assert!(prompt.contains("触发的信号") && prompt.contains("最小改动"), "{prompt}");
+    assert!(prompt.contains("不要**运行任何会改 todo 的命令"), "无头必须明说不许改: {prompt}");
+
+    // --no-replan 能关掉
+    let d2 = project(&["[P0] 会拖的一条", "[P0] 另一条"]);
+    let mark2 = tempfile::tempdir().unwrap().keep();
+    run(
+        &d2,
+        &["run", "--host", "claude", "--fast", "--max-rounds", "3", "--no-replan"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark2.to_str().unwrap())],
+    );
+    let st2 = state::load(&state::state_path(&d2)).unwrap();
+    assert!(st2.ticks.iter().all(|t| t.outcome != "replan"), "--no-replan 应该完全不跑");
 }

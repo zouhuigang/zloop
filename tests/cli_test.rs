@@ -64,7 +64,7 @@ fn end_to_end() {
     assert!(o.out.contains("next: t4 [P0] review design"));
     assert!(o.out.contains("log: .zloop/log/"));
 
-    let o = zloop(d, &["done", "t4", "--outcome", "fail", "--note", "reviewer away"], None, &[]);
+    let o = zloop(d, &["done", "t4", "--outcome", "fail", "--note", "reviewer away", "--pitfall", "评审人休假，先跳过"], None, &[]);
     assert_eq!(o.code, 0);
     assert!(o.out.contains("t4 fail"));
 
@@ -97,11 +97,12 @@ fn end_to_end() {
     // logs
     let o = zloop(d, &["log"], None, &[]);
     assert!(o.out.contains("-t1-done.md"));
-    let files = zloop::log::entries(d, Some("t1"), 10).unwrap();
+    let st = state::load(&state::state_path(d)).unwrap();
+    let (files, _) = zloop::log::entries(d, &st, Some("t1"), 10).unwrap();
     assert_eq!(files.len(), 1);
-    let body = fs::read_to_string(&files[0]).unwrap();
+    let body = fs::read_to_string(&files[0].0).unwrap();
     assert!(body.contains("## 验证证据") && body.contains("line2"));
-    let o = zloop(d, &["log", "--show", files[0].file_name().unwrap().to_str().unwrap()], None, &[]);
+    let o = zloop(d, &["log", "--show", files[0].0.file_name().unwrap().to_str().unwrap()], None, &[]);
     assert!(o.out.contains("- note: DESIGN.md written"));
 }
 
@@ -200,20 +201,56 @@ fn context_respects_budget_and_names_next() {
 #[test]
 fn install_is_idempotent_and_refuses_unmanaged() {
     let home = tempfile::tempdir().unwrap();
-    let results = hosts::install(true, true, true, home.path()).unwrap();
-    assert!(results.iter().all(|(_, changed)| *changed));
-    let again = hosts::install(true, true, true, home.path()).unwrap();
-    assert!(again.iter().all(|(_, changed)| !*changed));
+    let results = hosts::install(true, true, true, home.path(), false).unwrap();
+    assert!(results.iter().all(|w| w.changed));
+    let again = hosts::install(true, true, true, home.path(), false).unwrap();
+    assert!(again.iter().all(|w| !w.changed), "什么都没改的重装不该重写文件: {again:?}");
     let skill = home.path().join(".claude/skills/zloop/SKILL.md");
     let text = fs::read_to_string(&skill).unwrap();
     assert!(text.starts_with("---\nname: \"zloop\""));
-    assert!(text.contains(hosts::MANAGED_MARK));
+    assert!(text.contains(hosts::MANAGED_PREFIX));
     assert!(text.contains("zloop context"));
     let settings: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(home.path().join(".claude/settings.json")).unwrap()).unwrap();
     assert_eq!(settings["hooks"]["Stop"][0]["hooks"][0]["command"], hosts::HOOK_COMMAND);
     fs::write(&skill, "# my own file\n").unwrap();
-    assert!(hosts::install_claude(home.path()).is_err());
+    assert!(hosts::install_claude(home.path(), false).is_err());
+}
+
+/// skill 是给人改的（Warp 那边它就是改进的载体）。所以：用户区永远保留，
+/// 托管区被手改过就停下报错——绝不静默覆盖。
+#[test]
+fn install_keeps_your_edits_and_refuses_to_clobber_the_managed_part() {
+    let home = tempfile::tempdir().unwrap();
+    let skill = home.path().join(".claude/skills/zloop/SKILL.md");
+    hosts::install_claude(home.path(), false).unwrap();
+    assert!(fs::read_to_string(&skill).unwrap().contains(hosts::USER_MARK), "模板自带用户区，告诉人往哪写");
+
+    // 1) 用户区里的内容跨重装保留，而且文件一个字节都不用动
+    let mine = "- done 之前一定要跑 cargo test\n- 不要碰 migrations/\n";
+    fs::write(&skill, format!("{}{mine}", fs::read_to_string(&skill).unwrap())).unwrap();
+    let w = hosts::install_claude(home.path(), false).unwrap();
+    assert!(!w[0].changed && w[0].kept_user > 0, "{w:?}");
+    let text = fs::read_to_string(&skill).unwrap();
+    assert!(text.contains("cargo test") && text.contains("migrations"), "{text}");
+
+    // 2) 动了托管区 → 拒绝，并指出两条出路
+    fs::write(&skill, text.replace("zloop context", "zloop ctx")).unwrap();
+    let err = hosts::install_claude(home.path(), false).unwrap_err().to_string();
+    assert!(err.contains("托管区被改过") && err.contains(hosts::USER_MARK) && err.contains("--force"), "{err}");
+    assert!(fs::read_to_string(&skill).unwrap().contains("zloop ctx"), "被拒的安装不能动文件");
+
+    // 3) --force 覆盖托管区，用户区照样留着
+    hosts::install_claude(home.path(), true).unwrap();
+    let text = fs::read_to_string(&skill).unwrap();
+    assert!(text.contains("zloop context") && !text.contains("zloop ctx"), "托管区回到模板");
+    assert!(text.contains("cargo test"), "用户区不受 --force 影响");
+
+    // 4) 老版本装的文件（裸标记、没有指纹）：这次照旧覆盖，但把保护加上
+    fs::write(&skill, "---\nname: \"zloop\"\n---\n\n<!-- zloop-managed:v1 -->\n# 旧版\n").unwrap();
+    let w = hosts::install_claude(home.path(), false).unwrap();
+    assert!(w[0].changed && w[0].migrated, "{w:?}");
+    assert!(fs::read_to_string(&skill).unwrap().contains("fp="), "从此带上指纹");
 }
 
 #[test]
@@ -251,8 +288,12 @@ fn init_force_archives_the_previous_goal() {
     let st = state::load(&state::state_path(d)).unwrap();
     assert_eq!(st.goal.text, "second goal");
     assert!(st.todos.is_empty() && st.ticks.is_empty());
-    // logs from the first goal are untouched
-    assert!(!zloop::log::entries(d, None, 10).unwrap().is_empty());
+    // 第一个目标的日志文件还在磁盘上（只是不再算作当前目标的轮次）
+    let kept = fs::read_dir(d.join(".zloop/log")).unwrap().flatten().count();
+    assert!(kept > 0, "归档目标只是搬家，日志文件不能被删");
+    let st = state::load(&state::state_path(d)).unwrap();
+    let (rows, hidden) = zloop::log::entries(d, &st, None, 10).unwrap();
+    assert!(rows.is_empty() && hidden == kept, "归档掉的目标的轮次不算当前目标的: {rows:?} hidden={hidden}");
 }
 
 #[test]
@@ -359,8 +400,9 @@ fn acceptance_shows_up_and_done_without_evidence_hints() {
     zloop(d, &["edit", "t2", "--acceptance", "lint passes"], None, &[]);
     let o = zloop(d, &["done", "t2", "--note", "ok", "--evidence", "lint output clean", "--no-doc"], None, &[]);
     assert!(!o.out.contains("有验收标准"), "evidence given → no acceptance hint: {}", o.out);
-    let logs = zloop::log::entries(d, Some("t2"), 5).unwrap();
-    assert!(fs::read_to_string(&logs[0]).unwrap().contains("- acceptance: lint passes"));
+    let st = state::load(&state::state_path(d)).unwrap();
+    let (logs, _) = zloop::log::entries(d, &st, Some("t2"), 5).unwrap();
+    assert!(fs::read_to_string(&logs[0].0).unwrap().contains("- acceptance: lint passes"));
 }
 
 #[test]
@@ -448,10 +490,11 @@ fn done_refuses_to_finish_without_a_technical_document() {
     assert_eq!(st.todos[0].status, "open", "rejected call must not change state");
     assert!(st.ticks.is_empty());
 
-    // progress / fail / block are exempt — a round that did not finish cannot document a finished approach
+    // progress / block 不欠"实现思路"——没做完的轮次谈不上"怎么做的"
     let o = zloop(d, &["done", "t1", "--outcome", "progress", "--note", "half"], None, &[]);
     assert_eq!(o.code, 0, "{}", o.err);
-    let o = zloop(d, &["done", "t1", "--outcome", "fail", "--note", "boom"], None, &[]);
+    // fail 欠的是另一样东西：踩到的坑（policy.require_pitfall，见 a_failed_round_must_leave_a_pitfall…）
+    let o = zloop(d, &["done", "t1", "--outcome", "fail", "--note", "boom", "--pitfall", "链接器缺符号"], None, &[]);
     assert_eq!(o.code, 0, "{}", o.err);
     let o = zloop(d, &["done", "t3", "--block", "which db?"], None, &[]);
     assert_eq!(o.code, 0, "{}", o.err);
@@ -583,10 +626,19 @@ fn status_headline_names_the_state_and_colour_is_opt_in() {
     assert!(o.out.contains("就绪"), "{}", o.out);
     assert!(o.out.contains("░"), "progress bar: {}", o.out);
     assert!(o.out.contains("目标") && o.out.contains("把启动时间降到 1 秒"), "目标单独一行: {}", o.out);
-    // 步骤清单：编号 + 文本 + 右栏（id + 图标 + 状态词）
-    assert!(o.out.contains("步骤") && o.out.contains("0/2 完成"), "步骤进度: {}", o.out);
-    assert!(o.out.contains("1. a") && o.out.contains("2. b"), "每一步都编号列出: {}", o.out);
-    assert!(o.out.contains("t1 ▶ 下一个") && o.out.contains("t2 ○ 排队中"), "每一步自己说清状态: {}", o.out);
+    // 清单是一张表：步骤（执行顺序）/ id（命令里敲的）/ 这一步做什么 / 进展
+    assert!(o.out.contains("清单") && o.out.contains("0/2 完成"), "清单进度: {}", o.out);
+    for h in ["步骤", "id", "这一步做什么", "进展"] {
+        assert!(o.out.contains(h), "表头缺 {h}: {}", o.out);
+    }
+    assert!(o.out.contains('┌') && o.out.contains('┼') && o.out.contains('┘'), "画出框线: {}", o.out);
+    // id 每一行都要有——做完的那些以前不显示，看的人只能靠数行猜
+    assert!(o.out.contains("│ t1 │") && o.out.contains("│ t2 │"), "每行都带 id: {}", o.out);
+    assert!(o.out.contains("▶ 下一个") && o.out.contains("○ 排队中"), "每一步自己说清进展: {}", o.out);
+    // 表格每一行宽度必须一致，否则右边框会歪
+    let widths: Vec<usize> =
+        o.out.lines().filter(|l| l.contains('│') || l.contains('┌') || l.contains('└')).map(zloop::style::width).collect();
+    assert!(widths.windows(2).all(|w| w[0] == w[1]), "表格各行宽度不齐: {widths:?}");
     assert!(o.out.contains("开跑") && o.out.contains("zloop start"), "next action spelled out: {}", o.out);
     assert!(!o.out.contains('\u{1b}'), "piped output carries no escape codes: {:?}", o.out);
 
@@ -632,7 +684,7 @@ fn status_headline_names_the_state_and_colour_is_opt_in() {
     assert!(o.out.contains("2/2 完成") && o.out.contains("100%"), "{}", o.out);
     // 做完的步骤要留在清单上打勾——「做过哪几步」是复盘时最想看的
     assert_eq!(o.out.matches('✅').count(), 3, "标题一个 ✅ + 两步各一个: {}", o.out);
-    assert!(o.out.contains("1. a") && o.out.contains("2. b"), "完成后清单还在: {}", o.out);
+    assert!(o.out.contains("│ t1 │") && o.out.contains("│ t2 │"), "完成后清单还在: {}", o.out);
     // 换目标走 goal new（停放旧的、可切回），不再是 init --force（归档、切不回来）
     assert!(o.out.contains("zloop plan --add") && o.out.contains("zloop goal new"), "what to do next: {}", o.out);
     assert!(!o.out.contains("init --force"), "别再教用户覆盖目标: {}", o.out);
@@ -725,4 +777,689 @@ fn switching_goals_is_refused_while_work_is_in_flight() {
     let o = zloop(d, &["goal", "switch", "目标"], None, &[]);
     assert_eq!(o.code, 2);
     assert!(o.err.contains("对上了 3 个目标"), "{}", o.err);
+}
+
+// ---------- 多目标：搬家事务与派活归属（GOALS-REVIEW.md 的 F1–F7 / L1–L2） ----------
+
+/// 被拒的 `goal new` 一定不能把当前目标停走：校验在 park 之前，失败要回滚。
+#[test]
+fn a_rejected_goal_new_leaves_the_current_goal_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "原来的目标"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
+    let path = state::state_path(d);
+
+    // --id 里没有可用字符
+    let o = zloop(d, &["goal", "new", "新的", "--id", "中文标题"], None, &[]);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(path.is_file(), "旧目标必须还在 state.json 里，不能停走后才报错");
+    assert_eq!(state::load(&path).unwrap().goal.text, "原来的目标");
+
+    // --id 撞了当前目标自己的 id（它马上要停到 goals/<id>.json 去）
+    let cur_id = state::load(&path).unwrap().goal.id;
+    let o = zloop(d, &["goal", "new", "新的", "--id", &cur_id], None, &[]);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(o.err.contains("已经有人用了"), "{}", o.err);
+    assert!(path.is_file());
+
+    // 别人持锁：park 也在锁内，所以拿不到锁时一个文件都不该动
+    zloop::state::locked(&path, std::time::Duration::from_secs(30), || {
+        let o = zloop(d, &["goal", "new", "抢锁的目标"], None, &[]);
+        assert_ne!(o.code, 0, "拿不到锁应该失败: {}{}", o.out, o.err);
+        assert!(path.is_file(), "锁超时不能把当前目标吞掉（headless）");
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(state::load(&path).unwrap().goal.text, "原来的目标");
+    assert_eq!(zloop(d, &["goal", "list"], None, &[]).out.matches("共 1 个目标").count(), 1);
+}
+
+/// 读不出来的目标不能被静默隐藏，也不能挡住"把坏的停到一边，开个干净的"这条路。
+#[test]
+fn a_broken_current_goal_can_be_parked_listed_and_archived() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "会被写坏的目标"], None, &[]);
+    fs::write(state::state_path(d), "{\"version\":1,\"goal\":").unwrap();
+
+    let o = zloop(d, &["goal", "new", "干净的新目标"], None, &[]);
+    assert_eq!(o.code, 0, "损坏的当前目标也要能停走: {}{}", o.out, o.err);
+
+    let o = zloop(d, &["goal", "list", "--json"], None, &[]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&o.out).unwrap();
+    assert_eq!(rows.len(), 2, "坏掉的那份要出现在清单里，不能静默消失: {}", o.out);
+    let broken: Vec<&serde_json::Value> = rows.iter().filter(|r| r["status"] == "broken").collect();
+    assert_eq!(broken.len(), 1, "{}", o.out);
+    let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_ne!(ids[0], ids[1], "停走的那份和新目标不能撞同一个 id: {ids:?}");
+    assert!(zloop(d, &["goal", "list"], None, &[]).out.contains("损坏"));
+
+    // 坏的那行也要清得掉
+    let broken_id = broken[0]["id"].as_str().unwrap().to_string();
+    let o = zloop(d, &["goal", "rm", &broken_id], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(!zloop(d, &["goal", "list"], None, &[]).out.contains("损坏"));
+}
+
+/// 目标全停着（没有当前目标）时，项目仍然要能被找到、被恢复——包括从子目录。
+#[test]
+fn a_project_without_a_current_goal_is_still_found_from_a_subdir() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "目标一"], None, &[]);
+    zloop(d, &["goal", "new", "目标二"], None, &[]);
+    // 手工制造"当前目标不在了"：等价于一次被打断的搬家留下的现场
+    let path = state::state_path(d);
+    let id = state::load(&path).unwrap().goal.id;
+    fs::rename(&path, d.join(".zloop/goals").join(format!("{id}.json"))).unwrap();
+
+    let sub = d.join("sub/deeper");
+    fs::create_dir_all(&sub).unwrap();
+    let o = zloop(&sub, &["goal", "list"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("当前没有目标在开着"), "图例不能指着不存在的 ▸: {}", o.out);
+    assert!(o.out.contains("目标一") && o.out.contains("目标二"), "{}", o.out);
+    assert!(o.out.contains("停放"), "停着的目标不叫「进行中」: {}", o.out);
+    assert!(o.out.contains("zloop goal switch <id>"), "要给出恢复指令: {}", o.out);
+
+    // status 的报错也要指路，而不是建议 init 把目标埋掉
+    let o = zloop(&sub, &["status"], None, &[]);
+    assert_eq!(o.code, 1);
+    assert!(o.err.contains("当前没有目标") && o.err.contains("goal switch"), "{}", o.err);
+    assert!(!o.err.contains("zloop init"), "别建议 init: {}", o.err);
+
+    // 从子目录切回去
+    let o = zloop(&sub, &["goal", "switch", &id], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert_eq!(state::load(&state::state_path(d)).unwrap().goal.text, "目标二");
+}
+
+/// 同一条 todo 不能同时派给两个会话：两个 agent 改同一批文件是净损失。
+#[test]
+fn next_does_not_hand_the_same_todo_to_two_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "抢活"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 唯一的活"], None, &[]);
+    let a = [("CLAUDE_CODE_SESSION_ID", "sess-A")];
+    let b = [("CLAUDE_CODE_SESSION_ID", "sess-B")];
+
+    assert!(zloop(d, &["next"], None, &a).out.contains("RUN"));
+    let o = zloop(d, &["next"], None, &b);
+    assert!(o.out.contains("held_by_other"), "别的会话不能抢: {}", o.out);
+    assert!(o.out.contains("sess-A"), "要说清楚在谁手里: {}", o.out);
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert_eq!(st.in_progress.unwrap().session.as_deref(), Some("sess-A"), "持有者不能被顶掉");
+    assert!(st.ticks.is_empty(), "被挡住的一轮不该记 tick");
+
+    // 自己再问一次照旧放行
+    assert!(zloop(d, &["next"], None, &a).out.contains("RUN"));
+    // stale_after_min = 0 关掉这个保护
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.policy.stale_after_min = 0;
+    state::save(&p, &mut st).unwrap();
+    assert!(zloop(d, &["next"], None, &b).out.contains("RUN"), "保护可以关掉");
+}
+
+/// `--force` 换目标之后，在飞会话的写回不能落到新目标头上。
+#[test]
+fn done_refuses_to_write_back_into_another_goal() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "目标X 重构缓存"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] X的活"], None, &[]);
+    let x_id = state::load(&state::state_path(d)).unwrap().goal.id;
+    zloop(d, &["goal", "new", "目标Y 写文档"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] Y的活"], None, &[]);
+    zloop(d, &["goal", "switch", &x_id], None, &[]);
+
+    let a = [("CLAUDE_CODE_SESSION_ID", "sess-A")];
+    assert!(zloop(d, &["next"], None, &a).out.contains("RUN"));
+    // 另一个终端强行换目标：要当场说清后果
+    let o = zloop(d, &["goal", "switch", "写文档", "--force"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("还在别的会话手里"), "--force 要提醒后果: {}", o.out);
+
+    // A 毫不知情地写回 → 必须被拦下，目标Y 一个字都不能被写脏
+    let o = zloop(d, &["done", "t1", "--note", "X 的成果", "--approach", "X 的思路"], None, &a);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(o.err.contains("目标X 重构缓存") && o.err.contains("goal switch"), "{}", o.err);
+    let y = state::load(&state::state_path(d)).unwrap();
+    assert_eq!(y.goal.text, "目标Y 写文档");
+    assert_eq!(y.todos[0].status, "open", "Y 的活不能被 X 的成果标成完成");
+    assert!(y.ticks.is_empty(), "Y 的账本不能多出 X 的那一轮");
+
+    // 按提示切回去，写回落在正确的目标上
+    zloop(d, &["goal", "switch", &x_id], None, &[]);
+    let o = zloop(d, &["done", "t1", "--note", "X 的成果", "--approach", "X 的思路"], None, &a);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    let x = state::load(&state::state_path(d)).unwrap();
+    assert_eq!((x.todos[0].status.as_str(), x.ticks.len()), ("done", 1));
+    assert_eq!(x.todos[0].note, "X 的成果");
+}
+
+/// `.zloop/log/` 是项目级的，而每个目标的 todo id 都从 t1 起——列日志必须认 tick 的账本，
+/// 否则会把别的目标的过程当成本目标的证据摆出来。
+#[test]
+fn log_lists_only_the_current_goals_rounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "目标A"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] A的活"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "A的成果", "--approach", "A的思路"], None, &[]);
+    let a_log = state::load(&state::state_path(d)).unwrap().ticks[0].log.clone().unwrap();
+
+    zloop(d, &["goal", "new", "目标B"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] B的活"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "B的成果", "--no-doc"], None, &[]);
+    let b_log = state::load(&state::state_path(d)).unwrap().ticks[0].log.clone().unwrap();
+    assert_ne!(a_log, b_log);
+    // 两份都在同一个目录里
+    assert!(d.join(".zloop").join(&a_log).is_file() && d.join(".zloop").join(&b_log).is_file());
+
+    // 当前是目标B：只列 B 的，并如实说明藏了几份
+    let o = zloop(d, &["log"], None, &[]);
+    assert!(o.out.contains(&b_log), "{}", o.out);
+    assert!(!o.out.contains(&a_log), "别的目标那份不该列出来: {}", o.out);
+    assert!(o.out.contains("另有 1 份"), "{}", o.out);
+    // --todo 也要按账本过滤，而不是按文件名里的 -t1-
+    let o = zloop(d, &["log", "--todo", "t1"], None, &[]);
+    assert!(o.out.contains(&b_log) && !o.out.contains(&a_log), "{}", o.out);
+    // B 那一轮是 --no-doc，该标 ⚠（文件名可能带 -2 后缀，判断不能靠 ends_with("-done.md")）
+    assert!(o.out.contains('⚠'), "{}", o.out);
+
+    // 切回目标A：反过来
+    zloop(d, &["goal", "switch", "目标A"], None, &[]);
+    let o = zloop(d, &["log"], None, &[]);
+    assert!(o.out.contains(&a_log) && !o.out.contains(&b_log), "{}", o.out);
+    assert!(!o.out.contains('⚠'), "A 那一轮有实现思路: {}", o.out);
+
+    // tick 被 compact 归档后日志变成无主文件：仍然列出（宁可多列，不要把自己的历史藏起来）
+    zloop(d, &["compact", "--keep-days", "0"], None, &[]);
+    let o = zloop(d, &["log"], None, &[]);
+    assert!(o.out.contains(&a_log), "无主文件也要列: {}", o.out);
+    assert!(!o.out.contains(&b_log), "{}", o.out);
+}
+
+// ---------- 反馈通道（GOALS-REVIEW.md 的 W1） ----------
+
+/// 人说的话必须有自己的位置：agent 自述之外的另一路信号，下一轮先看到它。
+#[test]
+fn feedback_records_what_the_human_said() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "写个解析器"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 解析嵌套括号", "--add", "[P1] 补测试"], None, &[]);
+    zloop(d, &["next"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "用正则实现了", "--approach", "正则最快"], None, &[]);
+
+    let words = "正则不行，输入会有嵌套括号，换成手写状态机";
+    let o = zloop(d, &["feedback", "t1", words], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains(words), "{}", o.out);
+    assert!(o.out.contains("zloop edit t1 --status open"), "已完成的 todo 要给出重做的路: {}", o.out);
+
+    let st = state::load(&state::state_path(d)).unwrap();
+    let last = st.ticks.last().unwrap();
+    assert_eq!((last.outcome.as_str(), last.note.as_str()), ("feedback", words));
+    assert_eq!(last.round, 1, "反馈不推进轮次");
+    assert_eq!(st.todos[0].status, "done", "反馈是信号，不改 todo 状态");
+    assert!(st.in_progress.is_none(), "反馈不碰在飞状态");
+
+    // context：单列一节，且不在「当前判断」里重复
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(o.out.contains("## 用户对上一轮的反馈"), "{}", o.out);
+    assert_eq!(o.out.matches(words).count(), 1, "只出现一次: {}", o.out);
+    let (head, _) = o.out.split_once("## 下一条").unwrap();
+    assert!(head.contains(words), "要排在「下一条」前面: {}", o.out);
+
+    // doc：和 agent 自述并排在同一条时间线上
+    let o = zloop(d, &["doc", "t1"], None, &[]);
+    assert!(o.out.contains("#### 实现思路") && o.out.contains("### 用户反馈"), "{}", o.out);
+    let (before, after) = o.out.split_once("### 用户反馈").unwrap();
+    assert!(before.contains("正则最快") && after.contains(words), "反馈排在它回应的那一轮之后: {}", o.out);
+
+    // status：人自己也看得见
+    assert!(zloop(d, &["status"], None, &[]).out.contains("反馈"), "status 要提一句");
+
+    // 下一轮干完活之后，这条反馈就不再堆在交接包里
+    zloop(d, &["done", "t2", "--note", "换成状态机了", "--approach", "手写状态机"], None, &[]);
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(!o.out.contains("## 用户对上一轮的反馈"), "已处理的反馈不再占版面: {}", o.out);
+
+    // 报错路径：不认识的 todo、空话
+    assert_eq!(zloop(d, &["feedback", "t9", "x"], None, &[]).code, 2);
+    assert_eq!(zloop(d, &["feedback", "t1", "   "], None, &[]).code, 2);
+}
+
+/// 连续失败之后循环停下等人——人开口说话，就是它该等到的东西。
+#[test]
+fn feedback_breaks_the_fail_streak() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "难搞的活"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 难搞的活"], None, &[]);
+    for i in 1..=3 {
+        zloop(d, &["done", "t1", "--outcome", "fail", "--note", &format!("第{i}次失败"), "--pitfall", "同一条路走不通"], None, &[]);
+    }
+    let o = zloop(d, &["next"], None, &[]);
+    assert!(o.out.contains("fail_streak"), "{}", o.out);
+
+    zloop(d, &["feedback", "t1", "别再试那条路了，先把依赖升到 2.0"], None, &[]);
+    let o = zloop(d, &["next"], None, &[]);
+    assert!(o.out.contains("RUN"), "人给了新信息，循环该继续: {}", o.out);
+
+    // 不吃配额：feedback 不在 COUNTED 里
+    let st = state::load(&state::state_path(d)).unwrap();
+    let counted = zloop::tick::window_ticks(&st, zloop::state::now()).len();
+    assert_eq!(counted, 3, "只有 3 次 fail 算进窗口: {counted}");
+}
+
+/// 「会话」那行要指向**最近干活**的会话。`summarize` 按首次出现排序，
+/// 所以 `.last()` / `.rev().find()` 都会挑错：先露过面又长期没动的那个会赢。
+#[test]
+fn the_session_line_points_at_whoever_worked_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "两个会话交替"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a", "--add", "[P0] b", "--add", "[P0] c"], None, &[]);
+    let (a, b) = ("sess-aaa-first", "sess-bbb-later");
+    zloop(d, &["done", "t1", "--note", "1", "--no-doc"], None, &[("CLAUDE_CODE_SESSION_ID", a)]);
+    zloop(d, &["done", "t2", "--note", "2", "--no-doc"], None, &[("CLAUDE_CODE_SESSION_ID", b)]);
+    zloop(d, &["done", "t3", "--note", "3", "--no-doc"], None, &[("CLAUDE_CODE_SESSION_ID", a)]);
+
+    // 秒级时间戳可能撞在一起，手工拉开：A 早 → B 中 → A 晚
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    for (i, at) in ["2026-08-28T10:00:00+08:00", "2026-08-28T11:00:00+08:00", "2026-08-28T12:00:00+08:00"].iter().enumerate() {
+        st.ticks[i].at = (*at).into();
+    }
+    state::save(&p, &mut st).unwrap();
+
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains(a), "会话行要给最后干活的那个: {}", o.out);
+    assert!(!o.out.contains(b), "别给先露面但早就没动的那个: {}", o.out);
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(o.out.contains(a) && !o.out.contains(b), "{}", o.out);
+}
+
+/// 失败要变成"学到"：`--outcome fail` 必须留下坑，交接包里能看到踩过哪些。
+#[test]
+fn a_failed_round_must_leave_a_pitfall_and_it_shows_up_in_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "难搞的目标"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 链接第三方库", "--add", "[P1] 压测"], None, &[]);
+
+    // 光说"失败了"不算数
+    let o = zloop(d, &["done", "t1", "--outcome", "fail", "--note", "链接失败"], None, &[]);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(o.err.contains("--pitfall") && o.err.contains("policy.require_pitfall"), "{}", o.err);
+    assert!(o.err.contains("--outcome fail"), "报错要给出能直接抄的重试命令: {}", o.err);
+    assert!(state::load(&state::state_path(d)).unwrap().ticks.is_empty(), "被拒的写回不能留下 tick");
+
+    // 带上坑就放行，并且坑进了账本（不用回头解析 Markdown）
+    let pit = "sqlite3 要用 brew 那份，系统自带的缺符号；下次先 otool -L";
+    let o = zloop(d, &["done", "t1", "--outcome", "fail", "--note", "M1 上链接失败", "--pitfall", pit], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert_eq!(st.ticks[0].pitfalls, vec![pit.to_string()]);
+
+    // 交接包里看得到，而且排在「下一条」前面
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(o.out.contains("## 本目标失败过的地方"), "{}", o.out);
+    assert!(o.out.contains(pit), "{}", o.out);
+    let (head, _) = o.out.split_once("## 下一条").unwrap();
+    assert!(head.contains(pit), "失败要排在「下一条」前面: {}", o.out);
+
+    // block 也算"卡住过的地方"
+    zloop(d, &["done", "t2", "--block", "压测跑 CI 还是本地？"], None, &[]);
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(o.out.contains("压测跑 CI 还是本地？"), "{}", o.out);
+
+    // --no-doc 和 policy 开关都能绕过
+    zloop(d, &["edit", "t1", "--status", "open"], None, &[]);
+    assert_eq!(zloop(d, &["done", "t1", "--outcome", "fail", "--note", "又失败", "--no-doc"], None, &[]).code, 0);
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.policy.require_pitfall = false;
+    st.todos[0].status = "open".into();
+    state::save(&p, &mut st).unwrap();
+    assert_eq!(zloop(d, &["done", "t1", "--outcome", "fail", "--note", "第三次"], None, &[]).code, 0);
+}
+
+/// `stats` 回答的是"跑得顺不顺"，而且每个数字都必须和账本对得上——
+/// 它是 reflect 的输入，算错了后面全错。
+#[test]
+fn stats_counts_match_the_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "有返工有失败的目标"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 顺利的", "--add", "[P0] 反复改的", "--add", "[P1] 会失败的", "--add", "[P2] 要问人的"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "一遍过", "--approach", "直接写完"], None, &[]);
+    zloop(d, &["done", "t2", "--outcome", "progress", "--note", "改了一半"], None, &[]);
+    zloop(d, &["done", "t2", "--outcome", "progress", "--note", "又一半"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "好了", "--no-doc"], None, &[]);
+    zloop(d, &["done", "t3", "--outcome", "fail", "--note", "编不过", "--pitfall", "工具链版本不对"], None, &[]);
+    zloop(d, &["done", "t4", "--block", "用哪个数据库？"], None, &[]);
+    zloop(d, &["feedback", "t2", "其实可以更简单"], None, &[]);
+
+    // --json：逐个字段和 state.json 现推的数字对照
+    let o = zloop(d, &["stats", "--json"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    let st = state::load(&state::state_path(d)).unwrap();
+    let count = |outcome: &str| st.ticks.iter().filter(|t| t.outcome == outcome).count();
+    let counted = st.ticks.iter().filter(|t| zloop::tick::COUNTED.contains(&t.outcome.as_str())).count();
+    assert_eq!(v["rounds"], counted);
+    assert_eq!(v["rework"], count("progress") + count("fail"));
+    assert_eq!(v["fails"], count("fail"));
+    assert_eq!(v["blocks"], count("block"));
+    assert_eq!(v["feedback"], count("feedback"));
+    assert_eq!(v["undocumented"], st.ticks.iter().filter(|t| t.documented == Some(false)).count());
+    assert_eq!(v["done"], st.todos.iter().filter(|t| t.status == "done").count());
+    assert_eq!(v["rework_rate"], 0.6);
+    assert_eq!(v["first_try"], 1, "只有 t1 是一轮做完没返工的");
+
+    // 每条 todo 的轮次也要对上
+    let per: Vec<(String, u64)> = v["todos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["id"].as_str().unwrap().to_string(), t["rounds"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(per, vec![("t1".into(), 1), ("t2".into(), 3), ("t3".into(), 1), ("t4".into(), 0)]);
+
+    // 人看的那一屏：一句话结论 + 一张表，别的命令不重复它
+    let o = zloop(d, &["stats"], None, &[]);
+    assert!(o.out.contains("返工 3（60%）") && o.out.contains("一次过 1/2 条"), "{}", o.out);
+    assert!(o.out.contains("最费劲") && o.out.contains("t2 返工 2 次"), "{}", o.out);
+    for h in ["步骤", "id", "这一步做什么", "轮次", "返工", "文档", "结果"] {
+        assert!(o.out.contains(h), "表头缺 {h}: {}", o.out);
+    }
+    assert!(o.out.contains("一次过") && o.out.contains("等你回话"), "{}", o.out);
+    let widths: Vec<usize> = o.out.lines().filter(|l| l.contains('│')).map(zloop::style::width).collect();
+    assert!(widths.windows(2).all(|w| w[0] == w[1]), "表格各行宽度不齐: {widths:?}");
+
+    // 还没跑过的目标不该假装有数据
+    let fresh = tempfile::tempdir().unwrap();
+    zloop(fresh.path(), &["init", "还没开始"], None, &[]);
+    assert!(zloop(fresh.path(), &["stats"], None, &[]).out.contains("还没有跑过任何一轮"));
+}
+
+/// `zloop reflect`：把材料摆齐给模型，人点头之后才落地。
+#[test]
+fn reflect_gathers_the_material_and_only_lands_when_you_say_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "回看试试"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a", "--add", "[P1] b"], None, &[]);
+    zloop(d, &["done", "t1", "--outcome", "fail", "--note", "编不过", "--pitfall", "工具链版本不对"], None, &[]);
+    zloop(d, &["feedback", "t1", "先升工具链再说"], None, &[]);
+    zloop(d, &["remember", "bench.sh 要在 release 模式下跑"], None, &[]);
+    zloop(d, &["remember", "bench 脚本必须用 release 模式跑，debug 差 3 倍"], None, &[]);
+
+    let o = zloop(d, &["reflect"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    for want in ["## 现有约定", "## 现有经验", "## 失败与卡住过的地方", "## 我当时怎么说 vs 你怎么回的", "## 你要做的"] {
+        assert!(o.out.contains(want), "材料包缺 {want}: {}", o.out);
+    }
+    assert!(o.out.contains("工具链版本不对") && o.out.contains("先升工具链再说"), "{}", o.out);
+    // 机械体检认出那两条其实是同一件事
+    assert!(o.out.contains("像是同一件事"), "{}", o.out);
+    // 经验行不该带 RFC3339 时间戳（模型抄回来会变成双时间戳）
+    assert!(!o.out.contains("+08:00 bench"), "经验只给日期不给完整时间戳: {}", o.out);
+    // 光看不写：NOTES 一个字没动
+    assert_eq!(zloop(d, &["reflect"], None, &[]).out, o.out, "reflect 是只读的");
+
+    // 人点头之后落地；模型抄回来的编号和短横线都要容忍
+    let o = zloop(d, &["reflect", "--apply"], Some("1. bench 脚本必须用 release 模式跑，debug 差 3 倍\n- 不要碰 migrations/\n\n"), &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("经验 2 → 2 条") && o.out.contains("备份"), "{}", o.out);
+    // 经验行保留时间戳（约定不需要——它不轮换，日期没有意义）
+    let notes = fs::read_to_string(d.join(".zloop/NOTES.md")).unwrap();
+    assert!(notes.contains("bench 脚本必须用 release") && notes.contains("不要碰 migrations/"), "{notes}");
+    assert!(!notes.contains("bench.sh 要在"), "被合并掉的那条不该还在: {notes}");
+    assert_eq!(zloop::notes::read(d).lessons.len(), 2, "没写小标题就全算经验");
+    let backups: Vec<_> = fs::read_dir(d.join(".zloop")).unwrap().flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("NOTES.md.bak-")).collect();
+    assert_eq!(backups.len(), 1, "改之前先备份");
+    // 下一轮就带上新的
+    assert!(zloop(d, &["context"], None, &[]).out.contains("不要碰 migrations/"));
+
+    // 空 stdin 不当成"清空"
+    let o = zloop(d, &["reflect", "--apply"], Some("  \n\n"), &[]);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(fs::read_to_string(d.join(".zloop/NOTES.md")).unwrap().contains("migrations"), "被拒的调用不能动文件");
+}
+
+/// 回看那一轮对三条 streak 透明：插一轮反思不等于"失败被解决了"。
+#[test]
+fn a_reflect_round_does_not_reset_the_fail_streak() {
+    let mut st = zloop::state::default_state("g", "g");
+    let items = zloop::todo::parse_plan("[P0] a", 0);
+    zloop::todo::add(&mut st, &items, false);
+    let who = zloop::session::HostSession { host: zloop::session::Host::Cli, session: None };
+    for _ in 0..3 {
+        zloop::tick::record(&mut st, "fail", Some("t1"), "boom", &who).unwrap();
+    }
+    assert_eq!(zloop::tick::fail_streak(&st.ticks), 3);
+    zloop::tick::record(&mut st, "reflect", None, "看了一眼", &who).unwrap();
+    assert_eq!(zloop::tick::fail_streak(&st.ticks), 3, "回看不是进展，不该清掉失败计数");
+    assert_eq!(zloop::tick::current_round(&st.ticks), 0, "回看不推进轮次");
+}
+
+/// 回路的最后一段：学到的东西要能升格成「约定」——每轮都带、不被经验窗口挤掉。
+///
+/// 为什么不写进 SKILL.md：那个文件是**全局**的（`~/.claude/skills/zloop/`），
+/// 把某个项目的规矩写进去会污染别的项目。约定必须是项目级的。
+#[test]
+fn a_lesson_can_be_promoted_to_a_rule_that_ships_every_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "两层经验"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
+    for i in 1..=7 {
+        zloop(d, &["remember", &format!("第 {i} 条经验，随便写点什么凑数")], None, &[]);
+    }
+    zloop(d, &["remember", "done 之前一定要跑 cargo test"], None, &[]);
+
+    // 整理前：8 条经验，窗口只带 5 条，交接包会如实说漏了几条
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(o.out.contains("最近 5 条，另有 3 条更早的没带上"), "{}", o.out);
+    assert!(!o.out.contains("本项目的约定"), "还没有约定就不占版面: {}", o.out);
+    // 材料包点名哪些已经掉出窗口
+    let o = zloop(d, &["reflect"], None, &[]);
+    assert!(o.out.contains("现有约定") && o.out.contains("（窗口外，模型看不到）"), "{}", o.out);
+    assert!(o.out.contains("升格") && o.out.contains("## 约定"), "要教模型怎么写回: {}", o.out);
+
+    // 人点头：升格两条，经验只留两条
+    let o = zloop(
+        d,
+        &["reflect", "--apply"],
+        Some("## 约定\n- done 之前一定要跑 cargo test\n- 不要碰 migrations/\n## 经验\n1. 第 6 条经验\n- 第 7 条经验\n"),
+        &[],
+    );
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("约定 0 → 2 条 · 经验 8 → 2 条"), "{}", o.out);
+
+    // 关键：再写 6 条经验把窗口挤满，约定照样每轮都在
+    for i in 1..=6 {
+        zloop(d, &["remember", &format!("后来又加的第 {i} 条")], None, &[]);
+    }
+    let o = zloop(d, &["context"], None, &[]);
+    let (head, _) = o.out.split_once("## 当前判断").unwrap();
+    assert!(head.contains("## 本项目的约定（每轮都要遵守）"), "约定要紧跟目标: {}", o.out);
+    assert!(o.out.contains("- done 之前一定要跑 cargo test") && o.out.contains("- 不要碰 migrations/"), "{}", o.out);
+    assert!(!o.out.contains("第 6 条经验"), "经验照旧轮换: {}", o.out);
+
+    // 篇幅极紧时先丢经验，约定和「下一条」不丢
+    let o = zloop(d, &["context", "--budget", "700"], None, &[]);
+    assert!(o.out.contains("本项目的约定") && o.out.contains("## 下一条"), "{}", o.out);
+
+    // 老格式（没有小标题的一串 -）照旧能读：全算经验
+    fs::write(d.join(".zloop/NOTES.md"), "# zloop notes\n\n- 老格式的一条\n").unwrap();
+    let n = zloop::notes::read(d);
+    assert!(n.rules.is_empty() && n.lessons.len() == 1, "{n:?}");
+}
+
+/// Warp 的 improver 读的是「agent 建议了什么」和「人最后怎么回应」之**差**——
+/// 分成两栏各列一遍是看不出差的，必须配对到同一轮上。
+#[test]
+fn reflect_pairs_what_i_said_with_what_you_replied() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "配对试试"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 写解析器", "--add", "[P0] 加缓存", "--add", "[P1] 没人管的一条"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "用正则实现了", "--approach", "正则最快，输入看着很规整"], None, &[]);
+    zloop(d, &["feedback", "t1", "正则不行，输入会有嵌套括号，换成手写状态机"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "加了个 LRU", "--approach", "标准库 HashMap + 手写链表"], None, &[]);
+    zloop(d, &["feedback", "t2", "别自己写链表，用 lru crate"], None, &[]);
+    zloop(d, &["done", "t3", "--note", "顺手做完了", "--approach", "没什么可说的"], None, &[]);
+
+    let o = zloop(d, &["reflect"], None, &[]);
+    assert!(o.out.contains("我当时怎么说 vs 你怎么回的"), "{}", o.out);
+    // 成对出现：我的一句话结果 + 实现思路摘要，紧跟着人的原话
+    let (_, tail) = o.out.split_once("### t1").unwrap();
+    let block = tail.split("\n\n").next().unwrap();
+    assert!(block.contains("用正则实现了") && block.contains("实现思路：正则最快"), "配对块要带上实现思路: {block}");
+    assert!(block.contains("正则不行，输入会有嵌套括号"), "紧跟着人的原话: {block}");
+    // 最近的排在前面
+    assert!(o.out.find("### t2").unwrap() < o.out.find("### t1").unwrap(), "最近的在前: {}", o.out);
+    // 没人回过话的轮次不占版面
+    assert!(!o.out.contains("### t3"), "t3 没人回过话，不该出现: {}", o.out);
+    assert!(!o.out.contains("顺手做完了"), "{}", o.out);
+    // 缩进没有从源码里漏出来
+    assert!(o.out.contains("\n_只列有人回过话的轮次"), "说明行不该带缩进: {:?}", o.out);
+
+    // 配不上的反馈（这条 todo 还没写回过任何一轮）也要照实说
+    zloop(d, &["plan", "--add", "[P2] 还没开始的一条"], None, &[]);
+    zloop(d, &["feedback", "t4", "这条先别做"], None, &[]);
+    let o = zloop(d, &["reflect"], None, &[]);
+    let (_, tail) = o.out.split_once("### t4").unwrap();
+    assert!(tail.contains("这条反馈之前没有已写回的轮次"), "{}", o.out);
+}
+
+/// `remember --rule`：不绕一整轮 reflect 也能顺手钉一条约定。
+#[test]
+fn remember_rule_pins_a_convention_without_a_reflect_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "直接钉约定"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
+    zloop(d, &["remember", "普通经验一条"], None, &[]);
+    let stamped = fs::read_to_string(d.join(".zloop/NOTES.md")).unwrap();
+    let stamp = stamped.lines().find(|l| l.contains("普通经验一条")).unwrap().to_string();
+
+    let o = zloop(d, &["remember", "--rule", "done 之前一定要跑 cargo test"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("约定 +1（共 1 条"), "{}", o.out);
+    zloop(d, &["remember", "--rule", "不要碰 migrations/"], None, &[]);
+
+    // 同一条不会钉两遍
+    let o = zloop(d, &["remember", "--rule", "done 之前一定要跑 cargo test"], None, &[]);
+    assert!(o.out.contains("已经在了（共 2 条）"), "{}", o.out);
+
+    let n = zloop::notes::read(d);
+    assert_eq!(n.rules.len(), 2);
+    assert_eq!(n.lessons.len(), 1, "经验没被动过");
+    // 加约定是纯增量，不该像 reflect --apply 那样每次留一份备份
+    let baks = fs::read_dir(d.join(".zloop")).unwrap().flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".bak-")).count();
+    assert_eq!(baks, 0, "增量操作不备份");
+    // 重写文件不能把经验的原始时刻抹掉
+    assert!(fs::read_to_string(d.join(".zloop/NOTES.md")).unwrap().contains(&stamp), "时间戳要原样保留");
+
+    // 立刻生效：每轮都带
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(o.out.contains("## 本项目的约定（每轮都要遵守）") && o.out.contains("- 不要碰 migrations/"), "{}", o.out);
+    // 空话不收
+    assert_eq!(zloop(d, &["remember", "--rule", "   "], None, &[]).code, 2);
+}
+
+/// 人写的正文里出现 `--xxx` 是常事（尤其在记「哪个 flag 不该用」这种坑的时候）。
+/// 装散文的参数都要 `allow_hyphen_values`，否则整条命令被 clap 拒掉——写 t8 的
+/// `--decision` 时实撞过一次。
+#[test]
+fn prose_arguments_accept_text_that_starts_with_a_dash() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "--force 开头的目标名"], None, &[]);
+    assert_eq!(state::load(&state::state_path(d)).unwrap().goal.text, "--force 开头的目标名");
+    zloop(d, &["plan", "--add", "[P0] 一条活", "--add", "[P1] --force 别用"], None, &[]);
+
+    let o = zloop(
+        d,
+        &["done", "t1",
+          "--note", "--rule 只给人用",
+          "--approach", "--force 会归档旧目标",
+          "--decision", "--apply 那条路径会删东西",
+          "--pitfall", "-x 开头的一句话"],
+        None,
+        &[],
+    );
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    let st = state::load(&state::state_path(d)).unwrap();
+    let t = st.ticks.last().unwrap();
+    assert_eq!(t.note, "--rule 只给人用");
+    assert_eq!(t.pitfalls, vec!["-x 开头的一句话".to_string()]);
+    assert_eq!(st.todos[1].text, "[P1] --force 别用".trim_start_matches("[P1] "));
+
+    // 其余入口同样
+    assert_eq!(zloop(d, &["remember", "--rule", "--apply 之前先看备份"], None, &[]).code, 0);
+    assert_eq!(zloop(d, &["feedback", "t2", "--no-doc 用多了就没文档了"], None, &[]).code, 0);
+    assert_eq!(zloop(d, &["goal", "new", "--reflect-every 相关的活"], None, &[]).code, 0);
+    assert_eq!(zloop::notes::read(d).rules, vec!["--apply 之前先看备份".to_string()]);
+
+    // 代价是有界的：打错的 flag 值照旧报错，漏写值也不会被悄悄吞掉
+    zloop(d, &["goal", "switch", "--force 开头的目标名"], None, &[]);
+    assert_ne!(zloop(d, &["done", "t1", "--outcome", "faill"], None, &[]).code, 0);
+    assert_ne!(zloop(d, &["done", "t1", "--note", "--approach", "真正的思路"], None, &[]).code, 0);
+}
+
+/// 做完一条就重估：**沉默是默认**，只有账本里读得出偏离信号才提一句。
+/// 依据见 docs/ADAPTIVE-REPLAN.md §2——每轮都催重规划会制造计划抖动。
+#[test]
+fn done_only_nudges_a_replan_when_the_ledger_says_something_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "把冷启动降到 1 秒"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 找最慢的三处", "--add", "[P0] 加缓存", "--add", "[P1] 补基准 :: bench.sh 跑得出数"], None, &[]);
+
+    // 一切顺利：一个字都不多说
+    let o = zloop(d, &["done", "t1", "--note", "定位到 3 处", "--approach", "tracing 打点"], None, &[]);
+    assert!(!o.out.contains("计划可能要调整"), "顺利的一轮不该打扰: {}", o.out);
+
+    // 连续两轮没做完 → 停滞信号
+    zloop(d, &["done", "t2", "--outcome", "progress", "--note", "改了一半"], None, &[]);
+    let o = zloop(d, &["done", "t2", "--outcome", "progress", "--note", "又一半"], None, &[]);
+    assert!(o.out.contains("计划可能要调整") && o.out.contains("t2 连续 2 轮没做完"), "{}", o.out);
+    assert!(o.out.contains("zloop replan"), "要给出下一步: {}", o.out);
+
+    // 人开口之后，信号不能消失——那正是最该重估的时刻
+    zloop(d, &["feedback", "t2", "缓存方向不对，先量再说"], None, &[]);
+    let o = zloop(d, &["done", "t2", "--outcome", "progress", "--note", "第三次"], None, &[]);
+    assert!(o.out.contains("t2 有你的反馈"), "人说过的话要一直算数: {}", o.out);
+    assert!(o.out.contains("连续 3 轮没做完"), "「在拖」不会因为人说了句话就不拖: {}", o.out);
+
+    // 材料包：目标 + 剩下的 + 信号 + 人的原话 + 只提最小改动
+    let o = zloop(d, &["replan"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("# 重估一次：把冷启动降到 1 秒"), "{}", o.out);
+    assert!(o.out.contains("## 剩下的 2 条") && o.out.contains("bench.sh 跑得出数"), "剩余任务连验收标准一起给: {}", o.out);
+    assert!(o.out.contains("[stalled]") && o.out.contains("[rework]") && o.out.contains("[feedback]"), "{}", o.out);
+    assert!(o.out.contains("缓存方向不对，先量再说"), "光说「有反馈」没用，要给原话: {}", o.out);
+    assert!(o.out.contains("别重开一张清单") && o.out.contains("人点头之后"), "{}", o.out);
+    assert!(o.out.contains("不改是完全合格的结论"), "别为了改而改: {}", o.out);
+    // 只读：跑两次一样，什么都没动
+    let before = fs::read_to_string(state::state_path(d)).unwrap();
+    assert_eq!(zloop(d, &["replan"], None, &[]).out, o.out);
+    assert_eq!(fs::read_to_string(state::state_path(d)).unwrap(), before, "replan 是只读的");
+
+    // 全做完之后不再提（没有「后续」可调整了）
+    zloop(d, &["done", "t2", "--note", "好了", "--no-doc"], None, &[]);
+    let o = zloop(d, &["done", "t3", "--note", "好了", "--no-doc"], None, &[]);
+    assert!(!o.out.contains("计划可能要调整"), "{}", o.out);
 }

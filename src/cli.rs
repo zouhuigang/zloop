@@ -26,6 +26,7 @@ pub struct Cli {
 pub enum Cmd {
     /// Create .zloop/state.json for a goal
     Init {
+        #[arg(allow_hyphen_values = true)]
         goal: String,
         /// Replace an existing state file
         #[arg(long)]
@@ -34,7 +35,7 @@ pub enum Cmd {
     /// Append ordered todos ([P0]/[P1]/[P2] text per line)
     Plan {
         /// One todo line; repeatable
-        #[arg(long, value_name = "LINE")]
+        #[arg(long, value_name = "LINE", allow_hyphen_values = true)]
         add: Vec<String>,
         /// Read todo lines from a file
         #[arg(long)]
@@ -58,36 +59,39 @@ pub enum Cmd {
     Done {
         id: String,
         /// One-line result
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         note: Option<String>,
         #[arg(long, default_value = "done", value_parser = ["done", "progress", "fail"])]
         outcome: String,
         /// Mark the todo blocked on the user
-        #[arg(long, value_name = "QUESTION")]
+        #[arg(long, value_name = "QUESTION", allow_hyphen_values = true)]
         block: Option<String>,
         /// Insert a successor todo right after this one
-        #[arg(long, value_name = "LINE")]
+        #[arg(long, value_name = "LINE", allow_hyphen_values = true)]
         next: Option<String>,
         /// Details for the log file: literal text or @path
-        #[arg(long, value_name = "TEXT|@FILE")]
+        #[arg(long, value_name = "TEXT|@FILE", allow_hyphen_values = true)]
         evidence: Option<String>,
         /// 实现思路：怎么做的、为什么这么做（literal text or @path）。outcome=done 时必填
-        #[arg(long, value_name = "TEXT|@FILE")]
+        #[arg(long, value_name = "TEXT|@FILE", allow_hyphen_values = true)]
         approach: Option<String>,
         /// 关键决策 / 取舍，可重复
-        #[arg(long, value_name = "TEXT")]
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
         decision: Vec<String>,
         /// 遇到的坑与结论，可重复
-        #[arg(long, value_name = "TEXT")]
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
         pitfall: Vec<String>,
         /// 这一轮不写技术文档（绕过 policy.require_doc）
         #[arg(long = "no-doc")]
         no_doc: bool,
+        /// 派活来自别的目标时也照记到当前目标
+        #[arg(long)]
+        force: bool,
     },
     /// Change a todo's text, status, priority or dependencies
     Edit {
         id: String,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         text: Option<String>,
         #[arg(long, value_parser = todo::STATUSES)]
         status: Option<String>,
@@ -97,17 +101,30 @@ pub enum Cmd {
         #[arg(long = "blocked-by", value_name = "IDS")]
         blocked_by: Option<String>,
         /// How to verify the todo is done; '' clears
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         acceptance: Option<String>,
     },
     /// Send a notification through policy.notify_url / notify_cmd (use it to test your webhook)
     Notify {
         /// Message text (default: a test message)
+        #[arg(allow_hyphen_values = true)]
         text: Option<String>,
+    },
+    /// 人对某一轮的回应：`zloop feedback t3 "方向不对，别走这条路"`（下一轮的 context 会带上）
+    Feedback {
+        /// 反馈针对哪条 todo
+        id: String,
+        /// 你要说的话
+        #[arg(allow_hyphen_values = true)]
+        text: String,
     },
     /// Write a lesson to .zloop/NOTES.md; the newest few appear in `zloop context`
     Remember {
+        #[arg(allow_hyphen_values = true)]
         text: String,
+        /// 钉成**约定**而不是经验：每轮都带给模型、不会被最新几条挤掉
+        #[arg(long)]
+        rule: bool,
     },
     /// Pause the goal: `next` stops, the runner exits at the next check
     Pause,
@@ -118,6 +135,19 @@ pub enum Cmd {
         /// Keep todos finished within this many days
         #[arg(long = "keep-days", default_value_t = 7)]
         keep_days: i64,
+    },
+    /// 重估一次：对着最终目标看剩下的任务还对不对，提最小改动（改不改由你点头）
+    Replan,
+    /// 回看一次：把账本 + 经验 + 用户反馈摆齐，让模型给出整理建议（`--apply` 从 stdin 落地）
+    Reflect {
+        /// 从 stdin 读整理后的经验清单（一行一条）重写 .zloop/NOTES.md；旧文件自动备份
+        #[arg(long)]
+        apply: bool,
+    },
+    /// 这个目标跑得顺不顺：轮次、返工率、一次过、花费（`--json` 给脚本）
+    Stats {
+        #[arg(long)]
+        json: bool,
     },
     /// Read-only overview
     Status {
@@ -147,6 +177,9 @@ pub enum Cmd {
         /// macOS: write /etc/sudoers.d/zloop-pmset so the runner can disable lid-close sleep (asks for your password once)
         #[arg(long)]
         sudoers: bool,
+        /// 托管区被手改过时也照写（会丢掉那些改动；`<!-- zloop:user -->` 之后的内容一律保留）
+        #[arg(long)]
+        force: bool,
     },
     /// macOS sleep protection: `status` (default) or `reconcile` (restore the default when no runner is alive)
     Awake {
@@ -214,6 +247,7 @@ pub enum GoalCmd {
     },
     /// 新目标：把当前目标停走，开一个新的（旧的还能切回来）
     New {
+        #[arg(allow_hyphen_values = true)]
         text: String,
         /// 自己指定 id（默认从目标文字里的英文词取，取不到就 g1/g2/…）
         #[arg(long)]
@@ -265,6 +299,12 @@ pub struct RunArgs {
     /// Do not touch sleep settings (default: caffeinate + lid-close protection while the runner lives)
     #[arg(long = "no-keep-awake")]
     pub no_keep_awake: bool,
+    /// 每 N 个 todo 轮次插一轮「回看」（读账本 + 经验 + 反馈给建议，不做 todo；0 = 关）
+    #[arg(long = "reflect-every", default_value_t = 0)]
+    pub reflect_every: u32,
+    /// 关掉「写回之后按信号重估计划」（默认开；命中信号才跑，只产出建议不改 todo）
+    #[arg(long = "no-replan")]
+    pub no_replan: bool,
 }
 
 impl RunArgs {
@@ -280,6 +320,8 @@ impl RunArgs {
             max_budget_usd: self.max_budget_usd.clone(),
             git_commit: self.git_commit,
             keep_awake: !self.no_keep_awake,
+            reflect_every: self.reflect_every,
+            no_replan: self.no_replan,
         }
     }
 
@@ -317,17 +359,38 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Init { goal, force } => cmd_init(&cli.dir, &goal, force),
         Cmd::Plan { add, file, replace, from_loopx } => cmd_plan(&path, add, file, replace, from_loopx),
         Cmd::Next { json, peek } => cmd_next(&root, &path, json, peek),
-        Cmd::Done { id, note, outcome, block, next, evidence, approach, decision, pitfall, no_doc } => {
-            cmd_done(&root, &path, &id, note, &outcome, block, next, DoneDoc { evidence, approach, decision, pitfall, no_doc })
+        Cmd::Done { id, note, outcome, block, next, evidence, approach, decision, pitfall, no_doc, force } => {
+            cmd_done(&root, &path, &id, note, &outcome, block, next, DoneDoc { evidence, approach, decision, pitfall, no_doc }, force, style::Style::detect(cli.no_color))
         }
+        Cmd::Replan => {
+            print!("{}", crate::replan::packet(&state::load(&path)?));
+            Ok(0)
+        }
+        Cmd::Reflect { apply } => cmd_reflect(&root, &path, apply, style::Style::detect(cli.no_color)),
+        Cmd::Stats { json } => cmd_stats(&path, json, style::Style::detect(cli.no_color)),
         Cmd::Doc { todo, all, out } => cmd_doc(&root, &path, todo, all, out),
         Cmd::Edit { id, text, status, priority, blocked_by, acceptance } => {
             cmd_edit(&path, &id, text, status, priority, blocked_by, acceptance)
         }
-        Cmd::Remember { text } => {
+        Cmd::Feedback { id, text } => cmd_feedback(&path, &id, &text),
+        Cmd::Remember { text, rule } => {
             state::load(&path)?;
-            let p = crate::notes::remember(&root, &text)?;
-            println!("remembered → {}", p.display());
+            if text.trim().is_empty() {
+                eprintln!("remember: 要记点什么");
+                return Ok(2);
+            }
+            if rule {
+                let (p, already) = crate::notes::add_rule(&root, &text)?;
+                let n = crate::notes::read(&root).rules.len();
+                if already {
+                    println!("这条约定已经在了（共 {n} 条）→ {}", p.display());
+                } else {
+                    println!("约定 +1（共 {n} 条，每轮都带给模型）→ {}", p.display());
+                }
+            } else {
+                let p = crate::notes::remember(&root, &text)?;
+                println!("remembered → {}", p.display());
+            }
             Ok(0)
         }
         Cmd::Pause => {
@@ -369,14 +432,20 @@ pub fn run(cli: Cli) -> Result<i32> {
             println!("{}", prompt::heartbeat(&st, &host, &root)?);
             Ok(0)
         }
-        Cmd::Install { claude, codex, claude_stop_hook, sudoers } => {
+        Cmd::Install { claude, codex, claude_stop_hook, sudoers, force } => {
             if !(claude || codex || claude_stop_hook || sudoers) {
                 eprintln!("install: choose --claude, --codex, --claude-stop-hook and/or --sudoers");
                 return Ok(2);
             }
             let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
-            for (p, changed) in hosts::install(claude, codex, claude_stop_hook, &home)? {
-                println!("{}{}", if changed { "wrote  " } else { "kept   " }, p.display());
+            for w in hosts::install(claude, codex, claude_stop_hook, &home, force)? {
+                println!("{}{}", if w.changed { "wrote  " } else { "kept   " }, w.path.display());
+                if w.kept_user > 0 {
+                    println!("       保留了你的自定义段落（{} 之后 {} 字节）", hosts::USER_MARK, w.kept_user);
+                }
+                if w.migrated {
+                    println!("       这一份是旧版装的，现在加上了改动保护：写在 {} 之后的内容以后不会被覆盖", hosts::USER_MARK);
+                }
             }
             if sudoers {
                 let p = crate::awake::install_sudoers()?;
@@ -525,6 +594,23 @@ fn cmd_next(root: &Path, path: &Path, json: bool, peek: bool) -> Result<i32> {
     let who = session::detect();
     let (decision, mut payload) = state::transaction(path, |st| {
         let now = state::now();
+        // 别人正拿着这一轮：不派活、不记 tick、不动 in_progress——抢占过来只会让两个 agent 撞车
+        if !peek {
+            if let Some(ip) = tick::held_by_other(st, &who, now) {
+                let d = tick::hold_decision(st);
+                let mut payload = tick::to_json(&d, st);
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert(
+                        "held_by".into(),
+                        serde_json::json!({
+                            "todo": ip.todo, "round": ip.round, "since": ip.started_at,
+                            "host": ip.host, "session": ip.session,
+                        }),
+                    );
+                }
+                return Ok((d, payload));
+            }
+        }
         let d = tick::decide(st, now);
         if !peek {
             if d.should_run {
@@ -568,6 +654,17 @@ fn cmd_next(root: &Path, path: &Path, json: bool, peek: bool) -> Result<i32> {
             Some(m) => format!("{m} min"),
         };
         println!("WAIT ({}) remaining {} · retry in {}", decision.reason, payload["remaining"], interval);
+        if decision.reason == "held_by_other" {
+            let h = &payload["held_by"];
+            println!(
+                "     {} 已经派给了 {}（第 {} 轮，{} 开始）：等它写回，或 `zloop edit {} --status open` 放回去",
+                h["todo"].as_str().unwrap_or("?"),
+                h["session"].as_str().unwrap_or("另一个会话"),
+                h["round"],
+                h["since"].as_str().unwrap_or("?"),
+                h["todo"].as_str().unwrap_or("?"),
+            );
+        }
     }
     Ok(0)
 }
@@ -591,14 +688,49 @@ fn cmd_done(
     block: Option<String>,
     next: Option<String>,
     input: DoneDoc,
+    force: bool,
+    c: style::Style,
 ) -> Result<i32> {
     let who = session::detect();
+    let st_now = state::load(path)?;
+
+    // 派活来自另一个（现在停着的）目标：写回会记错目标，先让用户切回去。
+    // 和文档检查一样放在任何写入之前，被拒的调用什么都不改。
+    if !force {
+        if let Some(from) = crate::goals::parked_holder(root, id, &who) {
+            eprintln!(
+                "done: {id} 是停放中的目标「{}」[{}] 派给这个会话的，当前目标是「{}」。\n\
+                 直接写回会把成果记到当前目标头上：先 `zloop goal switch {}` 再写回；\n\
+                 确实要记在当前目标：加 --force。",
+                style::truncate(&from.text, 30),
+                from.id,
+                style::truncate(&st_now.goal.text, 30),
+                from.id
+            );
+            return Ok(2);
+        }
+    }
 
     // Every finished todo must explain itself. Checked before any state write so a rejected
     // call changes nothing and can simply be retried with the missing text.
-    let policy_requires = state::load(path)?.policy.require_doc;
+    let policy_requires = st_now.policy.require_doc;
     let finishing = outcome == "done" && block.is_none();
     let has_approach = input.approach.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+
+    // 失败最该留下的是"为什么不行"。连续失败会让循环停下等人，而如果原因没有落点，
+    // 下一轮（或下一个会话）会把同一个坑再踩一遍——那正是"停下来"和"学到"的差别。
+    let failing = outcome == "fail" && block.is_none();
+    let has_pitfall = input.pitfall.iter().any(|p| !p.trim().is_empty());
+    if st_now.policy.require_pitfall && failing && !input.no_doc && !has_pitfall {
+        eprintln!(
+            "done: {id} 这一轮失败了，得留下踩到的坑（policy.require_pitfall），否则下次还会踩。带上 --pitfall 再重试：\n\n\
+             \x20 zloop done {id} --outcome fail --note \"<一句话：卡在哪>\" \\\n\
+             \x20   --pitfall \"<试了什么、为什么不行、下次该从哪切入>\" \\\n\
+             \x20   --evidence \"<报错输出，或 @文件>\"\n\n\
+             真没什么可记的：加 --no-doc；想永久关闭：把 .zloop/state.json 的 policy.require_pitfall 设为 false。"
+        );
+        return Ok(2);
+    }
     if policy_requires && finishing && !input.no_doc && !has_approach {
         eprintln!(
             "done: {id} 完成时需要留下技术文档（policy.require_doc）。带上实现思路再重试，例如：\n\n\
@@ -635,9 +767,11 @@ fn cmd_done(
         if let Some(last) = st.ticks.last_mut() {
             last.log = Some(rel.clone());
             last.documented = documented;
+            last.pitfalls = doc.pitfalls.clone();
         }
         tick_rec.log = Some(rel);
         tick_rec.documented = documented;
+        tick_rec.pitfalls = doc.pitfalls.clone();
         st.in_progress = None; // the round is written back; phase goes back to idle/stopped
         let d = tick::decide(st, state::now());
         Ok(Ok((tick_rec, d, todo::remaining(st), todo_snapshot.acceptance.clone())))
@@ -664,6 +798,50 @@ fn cmd_done(
     println!("remaining {remaining} · next: {following}");
     if let Some(l) = &tick_rec.log {
         println!("log: .zloop/{l}");
+    }
+    // 便宜的体检：账本里读得出偏离信号才提一句。**没命中就一声不吭**——
+    // 每轮都催着重规划会制造计划抖动，代价比漏提一次大（见 docs/ADAPTIVE-REPLAN.md §2）。
+    if remaining > 0 {
+        if let Some(why) = crate::replan::hint(&state::load(path)?) {
+            println!("\n⚠ 计划可能要调整：{why}\n  想清楚剩下的任务还对不对：{}", c.bold("zloop replan"));
+        }
+    }
+    Ok(0)
+}
+
+/// `zloop feedback`：把**人说的话**记进账本。
+///
+/// 为什么要单独一条命令而不是塞进 `done --note`：`note` / `approach` / `pitfall` 全是 agent 自述，
+/// 而"人怎么回应"是另一路信号——没有它就算不出"agent 建议的"和"人接受的"之间的差，
+/// 也就没有任何东西可以拿来改进下一轮（Warp 的 improver 读的正是这个差）。
+fn cmd_feedback(path: &Path, id: &str, text: &str) -> Result<i32> {
+    let text = text.trim();
+    if text.is_empty() {
+        eprintln!("feedback: 反馈不能是空的");
+        return Ok(2);
+    }
+    let who = session::detect();
+    let result = state::transaction(path, |st| {
+        let idx = match todo::index_of(st, id) {
+            Ok(i) => i,
+            Err(e) => return Ok(Err(e)),
+        };
+        let status = st.todos[idx].status.clone();
+        // 不动 todo 状态、不清 in_progress：反馈是信号，不是写回
+        tick::record(st, tick::FEEDBACK, Some(id), text, &who)?;
+        Ok(Ok((status, tick::pending_feedback(st).len())))
+    })?;
+    let (status, pending) = match result {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("feedback: {e}");
+            return Ok(2);
+        }
+    };
+    println!("feedback → {id}：{}", style::truncate(text, 60));
+    println!("下一轮的 `zloop context` 会带上{}", if pending > 1 { format!("（共 {pending} 条待处理）") } else { String::new() });
+    if todo::is_terminal(&status) {
+        println!("（{id} 已经是 {status}；要让它重做：`zloop edit {id} --status open`）");
     }
     Ok(0)
 }
@@ -738,6 +916,15 @@ fn cmd_edit(
     }
 }
 
+/// 清单里的状态词：停着的目标不叫"进行中"（没人会派活给它），坏掉的直接说坏了。
+fn row_status_zh(r: &crate::goals::Row) -> &str {
+    match r.status.as_str() {
+        crate::goals::BROKEN => "损坏",
+        "active" if !r.current => "停放",
+        other => goal_status_zh(other),
+    }
+}
+
 fn goal_status_zh(s: &str) -> &str {
     match s {
         "active" => "进行中",
@@ -749,6 +936,19 @@ fn goal_status_zh(s: &str) -> &str {
 
 fn short_time(iso: &str) -> String {
     state::parse_iso(iso).map(|dt| dt.format("%m-%d %H:%M").to_string()).unwrap_or_else(|_| iso.chars().take(11).collect())
+}
+
+/// `--force` 把带着在飞派活的目标停走了：那个会话再写回会被 `done` 拦下，先说清楚。
+fn warn_parked_handout(p: &crate::goals::Row, c: style::Style) {
+    let Ok(st) = state::load(&p.path) else { return };
+    let Some(ip) = st.in_progress else { return };
+    println!(
+        "  {} {} 第 {} 轮还在别的会话手里；它写回时会被拦下，让它先 `zloop goal switch {}`",
+        c.dim("⚠"),
+        ip.todo,
+        ip.round,
+        p.id
+    );
 }
 
 fn cmd_goal(root: &Path, cmd: GoalCmd, c: style::Style) -> Result<i32> {
@@ -774,10 +974,16 @@ fn cmd_goal(root: &Path, cmd: GoalCmd, c: style::Style) -> Result<i32> {
             }
             let w = style::term_width().clamp(46, 110);
             let id_w = rows.iter().map(|r| style::width(&r.id)).max().unwrap_or(2).max(2);
-            let st_w = rows.iter().map(|r| style::width(goal_status_zh(&r.status))).max().unwrap_or(6);
+            let st_w = rows.iter().map(|r| style::width(row_status_zh(r))).max().unwrap_or(6);
             let pg_w = rows.iter().map(|r| format!("{}/{}", r.done, r.total).len()).max().unwrap_or(3);
+            let has_current = rows.iter().any(|r| r.current);
             println!();
-            println!("  {}", c.dim(&format!("共 {} 个目标 · ▸ 是当前那个", rows.len())));
+            if has_current {
+                println!("  {}", c.dim(&format!("共 {} 个目标 · ▸ 是当前那个", rows.len())));
+            } else {
+                // 没有当前目标（上一次搬家中断，或刚归档掉了当前那个）：别让图例指着不存在的 ▸
+                println!("  {}", c.dim(&format!("共 {} 个目标 · 当前没有目标在开着", rows.len())));
+            }
             for r in &rows {
                 let progress = format!("{}/{}", r.done, r.total);
                 let head = format!(
@@ -785,8 +991,8 @@ fn cmd_goal(root: &Path, cmd: GoalCmd, c: style::Style) -> Result<i32> {
                     if r.current { "▸" } else { " " },
                     r.id,
                     " ".repeat(id_w - style::width(&r.id)),
-                    goal_status_zh(&r.status),
-                    " ".repeat(st_w - style::width(goal_status_zh(&r.status))),
+                    row_status_zh(r),
+                    " ".repeat(st_w - style::width(row_status_zh(r))),
                     " ".repeat(pg_w - progress.len()),
                     progress,
                     short_time(&r.last),
@@ -799,14 +1005,16 @@ fn cmd_goal(root: &Path, cmd: GoalCmd, c: style::Style) -> Result<i32> {
                 }
             }
             println!();
+            if !has_current {
+                println!("  {}  {}", c.dim("开一个"), c.bold("zloop goal switch <id>   # 先把一个开进来，其余命令才能用"));
+            }
             println!("  {}  {}", c.dim("切换"), c.bold("zloop goal switch <id 或目标里的片段>"));
             println!("  {}  {}", c.dim("新建"), c.bold("zloop goal new \"新目标\""));
             println!();
             Ok(0)
         }
         GoalCmd::New { text, id, force } => {
-            crate::goals::ensure_idle(root, force)?;
-            let (parked, cur) = crate::goals::create(root, &text, id.as_deref())?;
+            let (parked, cur) = crate::goals::create(root, &text, id.as_deref(), force)?;
             if let Some(p) = parked {
                 println!(
                     "停放「{}」[{}] {} {}/{} · 切回：{}",
@@ -817,21 +1025,24 @@ fn cmd_goal(root: &Path, cmd: GoalCmd, c: style::Style) -> Result<i32> {
                     p.total,
                     c.bold(&format!("zloop goal switch {}", p.id))
                 );
+                warn_parked_handout(&p, c);
             }
             println!("新目标 [{}] {}", cur.id, cur.text);
             println!("下一步：{}", c.bold("zloop plan   # 每行一条 `[P0] 文本`，从 stdin 读"));
             Ok(0)
         }
         GoalCmd::Switch { needle, force } => {
-            crate::goals::ensure_idle(root, force)?;
-            let sw = crate::goals::switch(root, &needle)?;
+            let sw = crate::goals::switch(root, &needle, force)?;
             match sw.parked {
-                Some(p) => println!(
-                    "停放「{}」[{}] · 切回：{}",
-                    style::truncate(&p.text, 30),
-                    p.id,
-                    c.bold(&format!("zloop goal switch {}", p.id))
-                ),
+                Some(p) => {
+                    println!(
+                        "停放「{}」[{}] · 切回：{}",
+                        style::truncate(&p.text, 30),
+                        p.id,
+                        c.bold(&format!("zloop goal switch {}", p.id))
+                    );
+                    warn_parked_handout(&p, c);
+                }
                 None => println!("已经是当前目标"),
             }
             println!(
@@ -878,6 +1089,11 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     // ---- the verdict, in one word ----
     let finished = st.todos.iter().filter(|t| t.status == "done").count();
     let total = st.todos.len();
+    // 延后的 todo 在调度器眼里已经了结（`todo::is_terminal` 含 deferred），所以它不能留在
+    // 进度的分母里——否则会出现"✅ 完成 + 8 条全部完成 + 75%"这种自相矛盾的一屏。
+    let deferred = st.todos.iter().filter(|t| t.status == "deferred").count();
+    let planned = total - deferred;
+    let later = if deferred > 0 { format!(" · {deferred} 条延后") } else { String::new() };
     let (icon, word, code): (&str, &str, &str) = match () {
         // 刚开的目标还没有待办：说"待规划"，别说"全部完成"（decide 对空清单返回 all_done）
         _ if total == 0 => ("◦", "待规划", "34"),
@@ -891,7 +1107,7 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         _ if d.should_run => ("▶", "就绪", "34"),
         _ => ("•", "空闲", "2"),
     };
-    let pct = if total > 0 { finished * 100 / total } else { 0 };
+    let pct = (finished * 100).checked_div(planned).unwrap_or(0);
     let spent = tick::spent_usd(&st.ticks);
     let money = if spent > 0.0 {
         let cap = if st.policy.max_total_usd > 0.0 { format!("（上限 ${:.2}）", st.policy.max_total_usd) } else { String::new() };
@@ -906,7 +1122,7 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         " ".repeat(10usize.saturating_sub(style::width(word)).max(1))
     );
     // The bar is the first thing to go in a narrow window; the percentage carries the same news.
-    let bar = if w >= 70 { format!("{} ", style::bar(finished, total, 16, c)) } else { String::new() };
+    let bar = if w >= 70 { format!("{} ", style::bar(finished, planned, 16, c)) } else { String::new() };
     println!();
     println!(
         "  {icon} {head}{bar}{}  {}",
@@ -918,20 +1134,19 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     );
     println!("  {}    {}", c.dim("目标"), style::truncate(&st.goal.text, text.saturating_sub(8)));
 
-    // ---- 步骤清单：做过的、正在做的、还没做的，一张勾选表 ----
-    // 顺序用 state.todos 的原始顺序（= 步骤顺序，也对应 t1/t2/t3），执行顺序由「下一个」标出来，
-    // 因为 `next` 是按优先级挑的，不一定是清单的下一行。
+    // ---- 清单：做过的、正在做的、还没做的，一张带框的表 ----
+    // 两列编号是两回事，都要显示：**步骤**是执行顺序（`state.todos` 的数组顺序），
+    // **id** 是创建时发的（t1…tN），而 `done --next` 会把后继插在当前这条后面——
+    // 于是第 4 步可能是 t8。以前只给没做完的行显示 id，看的人只能猜，正是误解的来源。
     const MAX_ROWS: usize = 15;
     if !st.todos.is_empty() {
         let next_id = d.todo.as_ref().map(|t| t.id.clone());
-        let step_of: std::collections::HashMap<&str, usize> =
-            st.todos.iter().enumerate().map(|(i, t)| (t.id.as_str(), i + 1)).collect();
-
         struct Row {
             n: usize,
+            id: String,
             text: String,
-            /// 右栏：id（做完的不用）+ 图标 + 状态词
-            meta: String,
+            /// 「进展」列：图标 + 状态词
+            stat: String,
             finished: bool,
             paint: u8, // 0 dim, 1 done, 2 active, 3 wait
             sub: Vec<(String, String, u8)>, // (前缀, 内容, paint)
@@ -945,30 +1160,21 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
                 dep.as_str() != todo::USER && !st.todos.iter().any(|x| &x.id == *dep && x.status == "done")
             });
             let is_next = next_id.as_deref() == Some(t.id.as_str());
-            let (icon, word, paint) = if t.status == "done" {
-                ("✅", String::new(), 1)
+            let (icon, word, paint): (&str, String, u8) = if t.status == "done" {
+                ("✅", "完成".into(), 1)
             } else if t.status == "deferred" {
                 ("⏭", "已延后".into(), 0)
             } else if running_now {
                 ("🔄", "执行中".into(), 2)
             } else if waiting_on_you {
-                ("!", "等你回话".into(), 3)
+                ("❗", "等你回话".into(), 3)
             } else if let Some(dep) = pending_dep {
-                let label = match step_of.get(dep.as_str()) {
-                    Some(n) => format!("等第 {n} 步"),
-                    None => format!("等 {dep}"),
-                };
-                ("⏳", label, 0)
+                // id 现在每行都看得见，所以直接说等哪条，不用再绕一层步骤号
+                ("⏳", format!("等 {dep}"), 0)
             } else if is_next {
                 ("▶", "下一个".into(), 2)
             } else {
                 ("○", "排队中".into(), 0)
-            };
-            // 做完的那些不需要 id——需要敲命令的才需要。
-            let meta = match (t.status.as_str(), word.is_empty()) {
-                ("done", _) => icon.to_string(),
-                (_, true) => format!("{} {icon}", t.id),
-                (_, false) => format!("{} {icon} {word}", t.id),
             };
             let mut sub = Vec::new();
             if waiting_on_you && !t.note.is_empty() {
@@ -982,7 +1188,15 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
                     sub.push(("验收：".into(), a.clone(), 0));
                 }
             }
-            rows.push(Row { n: i + 1, text: t.text.clone(), meta, finished: todo::is_terminal(&t.status), paint, sub });
+            rows.push(Row {
+                n: i + 1,
+                id: t.id.clone(),
+                text: t.text.clone(),
+                stat: format!("{icon} {word}"),
+                finished: todo::is_terminal(&t.status),
+                paint,
+                sub,
+            });
         }
 
         // 太长就折叠：没做完的全留着，前面垫 3 步做过的当上下文，其余收成一行。
@@ -994,48 +1208,114 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             tail = shown.len() - MAX_ROWS;
             shown = &shown[..MAX_ROWS];
         }
-        let meta_w = shown.iter().map(|r| style::width(&r.meta)).max().unwrap_or(0);
-        let num_w = shown.iter().map(|r| r.n.to_string().len()).max().unwrap_or(1);
-        let longest = shown.iter().map(|r| style::width(&r.text)).max().unwrap_or(0);
-        // 文本列按实际最长的一条收窄（省掉一大片空白），和右栏之间留 4 列。
-        let gap = 4;
-        let text_w = text.saturating_sub(num_w + 2 + meta_w + gap).max(12).min(longest.max(12));
+
+        // 列宽：中文和 emoji 都按 style::width 的两列口径算，否则框线会歪
+        let head = ["步骤", "id", "这一步做什么", "进展"];
+        let w_n = shown.iter().map(|r| r.n.to_string().len()).max().unwrap_or(1).max(style::width(head[0]));
+        let w_id = shown.iter().map(|r| style::width(&r.id)).max().unwrap_or(2).max(style::width(head[1]));
+        let w_st = shown.iter().map(|r| style::width(&r.stat)).max().unwrap_or(0).max(style::width(head[3]));
+        let widest = shown
+            .iter()
+            .map(|r| style::width(&r.text))
+            .chain(shown.iter().flat_map(|r| r.sub.iter()).map(|(p, ct, _)| {
+                style::width(p) + usize::from(!p.ends_with('：')) + style::width(ct)
+            }))
+            .max()
+            .unwrap_or(0);
+        // 框线开销：4 列各占 `│ 内容 ` = 宽度 + 3，末尾再一个 `│`
+        let w_tx = text.saturating_sub(w_n + w_id + w_st + 13).max(12).min(widest.max(style::width(head[2])));
+
+        let bar_ch = c.dim("│");
+        let rule = |l: &str, m: &str, r: &str| {
+            c.dim(&format!(
+                "{l}{}{m}{}{m}{}{m}{}{r}",
+                "─".repeat(w_n + 2),
+                "─".repeat(w_id + 2),
+                "─".repeat(w_tx + 2),
+                "─".repeat(w_st + 2)
+            ))
+        };
+        let pad = |s: &str, w: usize| " ".repeat(w.saturating_sub(style::width(s)));
+        // 附注和折叠提示只占「这一步做什么」那一格，别的格留空——框线才不会错位
+        let note_row = |body: &str| {
+            let text = style::truncate(body, w_tx);
+            println!(
+                "  {bar_ch} {} {bar_ch} {} {bar_ch} {}{} {bar_ch} {} {bar_ch}",
+                " ".repeat(w_n),
+                " ".repeat(w_id),
+                c.dim(&text),
+                pad(&text, w_tx),
+                " ".repeat(w_st),
+            );
+        };
 
         println!();
+        println!("  {}    {}", c.dim("清单"), c.bold(&format!("{finished}/{planned} 完成{later}")));
+        println!("  {}", rule("┌", "┬", "┐"));
         println!(
-            "  {}{}{}",
-            c.dim("步骤"),
-            " ".repeat(4),
-            c.bold(&format!("{finished}/{total} 完成"))
+            "  {bar_ch} {}{} {bar_ch} {}{} {bar_ch} {}{} {bar_ch} {}{} {bar_ch}",
+            c.dim(head[0]),
+            pad(head[0], w_n),
+            c.dim(head[1]),
+            pad(head[1], w_id),
+            c.dim(head[2]),
+            pad(head[2], w_tx),
+            c.dim(head[3]),
+            pad(head[3], w_st),
         );
+        println!("  {}", rule("├", "┼", "┤"));
+        // 表格宽度装不下的命令：半条命令比放到表外更糟，所以攒起来印在表下面
+        let mut spill: Vec<(String, String)> = Vec::new();
         if dropped > 0 {
-            println!("  {}", c.dim(&format!("…  前 {dropped} 步已收起 · zloop log 里有它们的记录")));
+            note_row(&format!("… 前 {dropped} 步已收起 · zloop log 里有它们的记录"));
         }
         for r in shown {
-            let body = style::truncate(&r.text, text_w);
-            let pad = " ".repeat(text_w.saturating_sub(style::width(&body)) + gap + meta_w.saturating_sub(style::width(&r.meta)));
-            let (body, meta) = match r.paint {
-                1 => (c.dim(&body), c.green(&r.meta)),
-                2 => (c.bold(&body), c.cyan(&r.meta)),
-                3 => (c.yellow(&body), c.yellow(&r.meta)),
-                _ => (c.dim(&body), c.dim(&r.meta)),
+            let body = style::truncate(&r.text, w_tx);
+            let n = r.n.to_string();
+            let (body_p, stat_p) = (pad(&body, w_tx), pad(&r.stat, w_st));
+            let (body_c, stat_c) = match r.paint {
+                1 => (c.dim(&body), c.green(&r.stat)),
+                2 => (c.bold(&body), c.cyan(&r.stat)),
+                3 => (c.yellow(&body), c.yellow(&r.stat)),
+                _ => (c.dim(&body), c.dim(&r.stat)),
             };
-            println!("  {:>num_w$}. {body}{pad}{meta}", r.n);
+            println!(
+                "  {bar_ch} {}{} {bar_ch} {}{} {bar_ch} {body_c}{body_p} {bar_ch} {stat_c}{stat_p} {bar_ch}",
+                " ".repeat(w_n.saturating_sub(n.len())),
+                if r.paint == 2 { c.cyan(&n) } else { c.dim(&n) },
+                if r.paint == 2 { c.cyan(&r.id) } else { c.dim(&r.id) },
+                pad(&r.id, w_id),
+            );
             for (prefix, content, paint) in &r.sub {
-                let indent = " ".repeat(num_w + 4);
-                let room = text.saturating_sub(num_w + 4 + style::width(prefix) + 1);
-                // 命令不裁：半条命令比折行更糟。
-                let content = if *paint == 4 { content.clone() } else { style::truncate(content, room) };
-                let line = match paint {
-                    3 => format!("{} {}", c.yellow(prefix), c.yellow(&content)),
-                    4 => format!("{} {}", c.dim(prefix), c.bold(&content)),
-                    _ => c.dim(&format!("{prefix}{content}")),
+                let room = w_tx.saturating_sub(style::width(prefix) + usize::from(!prefix.ends_with('：')));
+                if *paint == 4 && style::width(content) > room {
+                    spill.push((r.id.clone(), content.clone()));
+                    continue;
+                }
+                let content = style::truncate(content, room);
+                // 「验收：」这类前缀自带冒号，再加空格就成了两道分隔
+                let sep = if prefix.ends_with('：') { "" } else { " " };
+                let plain = format!("{prefix}{sep}{content}");
+                let painted = match paint {
+                    3 => format!("{}{sep}{}", c.yellow(prefix), c.yellow(&content)),
+                    4 => format!("{}{sep}{}", c.dim(prefix), c.bold(&content)),
+                    _ => c.dim(&plain),
                 };
-                println!("  {indent}{line}");
+                println!(
+                    "  {bar_ch} {} {bar_ch} {} {bar_ch} {painted}{} {bar_ch} {} {bar_ch}",
+                    " ".repeat(w_n),
+                    " ".repeat(w_id),
+                    pad(&plain, w_tx),
+                    " ".repeat(w_st),
+                );
             }
         }
         if tail > 0 {
-            println!("  {}", c.dim(&format!("…  后面还有 {tail} 步 · zloop status --json 看全部")));
+            note_row(&format!("… 后面还有 {tail} 步 · zloop status --json 看全部"));
+        }
+        println!("  {}", rule("└", "┴", "┘"));
+        for (id, cmd) in &spill {
+            println!("  {} {}", c.dim(&format!("{id} 答完敲")), c.bold(cmd));
         }
     }
 
@@ -1048,7 +1328,7 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     } else if !ph.detail.is_empty() {
         ph.detail.clone()
     } else if st.goal.status == "done" || d.reason == "all_done" {
-        format!("{total} 条待办全部完成，目标结束")
+        format!("{planned} 条待办全部完成，目标结束{}", if deferred > 0 { format!("（另有 {deferred} 条延后）") } else { String::new() })
     } else if st.goal.status == "paused" {
         "你按了暂停，待办原地保留".into()
     } else if d.should_run {
@@ -1073,6 +1353,13 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         let s = style::truncate(&s, val.saturating_sub(2));
         rows.push(("睡眠", if warn { c.yellow(&format!("⚠ {s}")) } else { c.dim(&s) }));
     }
+    // 人说过的话要在人自己的视图里也能看见，否则"我说了它没反应"无从判断
+    let pending = crate::tick::pending_feedback(&st);
+    if let Some(last) = pending.last() {
+        let head = if pending.len() > 1 { format!("{} 条待处理，最近：", pending.len()) } else { String::new() };
+        let text = style::truncate(&last.note, val.saturating_sub(style::width(&head) + 2));
+        rows.push(("反馈", c.yellow(&format!("{head}{text}"))));
+    }
     let undocumented = st.ticks.iter().filter(|t| t.documented == Some(false)).count();
     if undocumented > 0 {
         rows.push(("文档", c.yellow(&format!("{undocumented} 轮缺实现思路 · zloop log 里带 ⚠"))));
@@ -1082,7 +1369,8 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         rows.push(("其他", c.dim(&format!("另有 {parked} 个目标停着 · zloop goal list"))));
     }
     let sessions = session::summarize(&st, root);
-    if let Some(cmd) = sessions.last().and_then(|s| s.resume.as_deref()) {
+    // 最近干活的那个会话，不是"最近第一次露面"的那个（summarize 按首次出现排序）
+    if let Some(cmd) = session::latest(&sessions, None).and_then(|s| s.resume.as_deref()) {
         // Never truncated: a half-copied resume command is worse than a line that wraps.
         rows.push(("会话", cmd.to_string()));
     }
@@ -1216,16 +1504,29 @@ fn cmd_log(root: &Path, todo: Option<String>, last: usize, show: Option<String>)
         print!("{}", std::fs::read_to_string(p)?);
         return Ok(0);
     }
-    let files = log::entries(root, todo.as_deref(), last)?;
+    let st = state::load(&state::state_path(root))?;
+    let (files, hidden) = log::entries(root, &st, todo.as_deref(), last)?;
     if files.is_empty() {
-        println!("no logs yet (written by `zloop done`)");
+        if hidden > 0 {
+            println!("这个目标还没有日志（另有 {hidden} 份属于别的目标 · zloop goal list）");
+        } else {
+            println!("no logs yet (written by `zloop done`)");
+        }
         return Ok(0);
     }
     let mut undocumented = 0;
-    for f in &files {
+    for (f, tick) in &files {
         let rel = f.strip_prefix(root).unwrap_or(f);
-        let expects_doc = f.file_name().map(|n| n.to_string_lossy().ends_with("-done.md")).unwrap_or(false);
-        let mark = if !expects_doc || log::file_is_documented(f) {
+        // 这一轮是不是"完成"、有没有留实现思路，都认 tick 的账；无主文件才退回文件名 / 读文件
+        let expects_doc = match tick {
+            Some(t) => t.outcome == "done",
+            None => log::name_is_done(f),
+        };
+        let documented = match tick.as_ref().and_then(|t| t.documented) {
+            Some(v) => v,
+            None => log::file_is_documented(f),
+        };
+        let mark = if !expects_doc || documented {
             "  "
         } else {
             undocumented += 1;
@@ -1236,6 +1537,177 @@ fn cmd_log(root: &Path, todo: Option<String>, last: usize, show: Option<String>)
     if undocumented > 0 {
         println!("\n⚠ = 只有结果记录，没有实现思路；`zloop doc <todo>` 汇总时会标出来");
     }
+    if hidden > 0 {
+        println!("\n另有 {hidden} 份日志属于别的目标，没有列出来（`zloop goal list`）");
+    }
+    Ok(0)
+}
+
+/// `zloop reflect`：不做 todo 的那一轮——把材料摆齐给模型，或者把人点头后的结果落地。
+///
+/// zloop 自己不产生判断：它只汇材料 + 做几项机械体检。判断是模型的事，落地要人点头
+/// （Warp 那边人审的形态是 PR review，zloop 没有 PR，所以是 `--apply` 这一步）。
+fn cmd_reflect(root: &Path, path: &Path, apply: bool, c: style::Style) -> Result<i32> {
+    let st = state::load(path)?;
+    if !apply {
+        print!("{}", crate::reflect::packet(&st, root, crate::notes::WINDOW));
+        return Ok(0);
+    }
+    let mut raw = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw)?;
+    // 模型抄回来的清单：容忍编号（"1. "、"R1. "）、各种项目符号、以及有没有小标题
+    let cleaned: String = raw
+        .lines()
+        .map(|l| {
+            let t = l.trim();
+            if t.starts_with("## ") {
+                return t.to_string();
+            }
+            let t = t.trim_start_matches(['-', '*', '·', 'R']).trim();
+            let t = match t.split_once(". ") {
+                Some((n, rest)) if n.chars().all(|ch| ch.is_ascii_digit()) => rest,
+                _ => t,
+            };
+            if t.is_empty() { String::new() } else { format!("- {t}") }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let next = crate::notes::parse(&cleaned);
+    if next.rules.is_empty() && next.lessons.is_empty() {
+        eprintln!("reflect --apply: stdin 是空的。要清空请显式给一行占位，或者直接删 .zloop/NOTES.md");
+        return Ok(2);
+    }
+    let before = crate::notes::read(root);
+    let (p, backup) = crate::notes::replace(root, &next)?;
+    println!(
+        "约定 {} → {} 条 · 经验 {} → {} 条：{}",
+        before.rules.len(),
+        next.rules.len(),
+        before.lessons.len(),
+        next.lessons.len(),
+        p.display()
+    );
+    println!("  {} {}", c.dim("旧的备份在"), backup.display());
+    println!("  {} {}", c.dim("下一轮的"), c.bold("zloop context：约定全带，经验带最新几条"));
+    Ok(0)
+}
+
+/// `zloop stats`：把账本里已经记着的东西汇成"这个目标跑得顺不顺"。
+///
+/// 和 `status` 分工：`status` 回答"还剩什么、我该敲什么"，`stats` 回答"跑得怎么样"——
+/// 返工率、一次过、哪一步最费劲。它同时是 reflect（W2/W6）的输入，
+/// 因为 Warp 那条回路是"跑 → 打分 → 自改进"，打分得先有人算出来。
+fn cmd_stats(path: &Path, json: bool, c: style::Style) -> Result<i32> {
+    let st = state::load(path)?;
+    let s = crate::stats::compute(&st);
+    if json {
+        print_json(&serde_json::to_value(&s)?);
+        return Ok(0);
+    }
+    let w = style::term_width().clamp(46, 96);
+    let text = w.saturating_sub(4);
+    let pct = |a: usize, b: usize| (a * 100).checked_div(b).map(|v| format!("{v}%")).unwrap_or_else(|| "—".into());
+
+    println!();
+    println!("  {}    {}", c.dim("统计"), style::truncate(&s.goal, text.saturating_sub(8)));
+    println!();
+    if s.rounds == 0 {
+        println!("  {}", c.dim("还没有跑过任何一轮 · zloop next 开始"));
+        return Ok(0);
+    }
+    let mut rows: Vec<(&str, String)> = vec![
+        ("轮次", format!("{} 轮 · 返工 {}（{}）· 失败 {}", s.rounds, s.rework, pct(s.rework, s.rounds), s.fails)),
+        (
+            "质量",
+            format!(
+                "一次过 {}/{} 条 · 无文档 {} 轮 · 被挡 {} 次 · 用户反馈 {} 条{}",
+                s.first_try,
+                s.done,
+                s.undocumented,
+                s.blocks,
+                s.feedback,
+                if s.reflects > 0 { format!(" · 回看 {} 次", s.reflects) } else { String::new() }
+            ),
+        ),
+    ];
+    if s.cost_usd > 0.0 || s.duration_ms > 0 {
+        let mut v = Vec::new();
+        if s.cost_usd > 0.0 {
+            v.push(format!("${:.2}", s.cost_usd));
+        }
+        if s.duration_ms > 0 {
+            v.push(format!("宿主累计 {}m", s.duration_ms / 60_000));
+        }
+        rows.push(("花费", v.join(" · ")));
+    }
+    if let Some(r) = crate::stats::roughest(&s) {
+        rows.push((
+            "最费劲",
+            format!("{} 返工 {} 次{}", r.id, r.rework, if r.blocks > 0 { format!("、被挡 {} 次", r.blocks) } else { String::new() }),
+        ));
+    }
+    for (k, v) in &rows {
+        println!("  {}{}{}", c.dim(k), " ".repeat(8usize.saturating_sub(style::width(k))), style::truncate(v, text.saturating_sub(8)));
+    }
+
+    let show_cost = s.cost_usd > 0.0;
+    let mut head: Vec<&str> = vec!["步骤", "id", "这一步做什么", "轮次", "返工", "文档"];
+    let mut align = vec![
+        style::Align::Right,
+        style::Align::Left,
+        style::Align::Left,
+        style::Align::Right,
+        style::Align::Right,
+        style::Align::Left,
+    ];
+    if show_cost {
+        head.push("花费");
+        align.push(style::Align::Right);
+    }
+    head.push("结果");
+    align.push(style::Align::Left);
+
+    let body: Vec<Vec<String>> = s
+        .todos
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mut r = vec![
+                (i + 1).to_string(),
+                t.id.clone(),
+                t.text.clone(),
+                if t.rounds == 0 { "—".into() } else { t.rounds.to_string() },
+                if t.rework == 0 { "—".into() } else { t.rework.to_string() },
+                if t.status != "done" {
+                    "—".into()
+                } else if t.documented {
+                    "有".into()
+                } else {
+                    "缺".into()
+                },
+            ];
+            if show_cost {
+                r.push(if t.cost_usd > 0.0 { format!("${:.2}", t.cost_usd) } else { "—".into() });
+            }
+            r.push(match (t.status.as_str(), t.first_try) {
+                ("done", true) => "一次过",
+                ("done", false) => "完成",
+                ("deferred", _) => "已延后",
+                ("blocked", _) => "等你回话",
+                _ if t.rounds > 0 => "在做",
+                _ => "没开始",
+            }
+            .to_string());
+            r
+        })
+        .collect();
+
+    println!();
+    for line in style::table(&head, &body, &align, 2, text, &c) {
+        println!("  {line}");
+    }
+    println!();
+    println!("  {}  {}", c.dim("看细节"), c.bold("zloop log · zloop doc --all"));
     Ok(0)
 }
 

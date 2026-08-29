@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 pub const GOALS_DIR: &str = "goals";
 pub const ARCHIVE_DIR: &str = "archive";
+/// 搬家事务等锁的上限；和 `state::transaction` 用的一样，写命令彼此排队而不是各自开工。
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct Row {
@@ -47,8 +49,8 @@ pub fn sanitize_id(raw: &str) -> String {
             last_dash = true;
         }
     }
-    let out = out.trim_matches(['-', '.']).to_string();
-    out.chars().take(40).collect()
+    let out: String = out.chars().take(40).collect();
+    out.trim_matches(['-', '.']).to_string()
 }
 
 /// 目标文字里的 ASCII 词能拼出可读 id 就用它（`keep-awake`），中文目标拼不出就交给 `g<N>`。
@@ -85,8 +87,31 @@ pub fn fresh_id(root: &Path, text: &str) -> String {
         .unwrap_or_else(|| "g".into())
 }
 
+/// 读不出来的目标（损坏 / 版本不匹配）**也要出现在清单里**：静默隐藏会让用户以为目标丢了。
+pub const BROKEN: &str = "broken";
+
 fn row_of(path: &Path, current: bool) -> Option<Row> {
-    let st = state::load(path).ok()?;
+    if !path.is_file() {
+        return None;
+    }
+    let st = match state::load(path) {
+        Ok(st) => st,
+        Err(_) => {
+            return Some(Row {
+                id: path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+                text: format!(
+                    "(读不出来，文件还在 .zloop/…/{})",
+                    path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
+                ),
+                status: BROKEN.into(),
+                done: 0,
+                total: 0,
+                last: String::new(),
+                current,
+                path: path.to_path_buf(),
+            })
+        }
+    };
     Some(Row {
         id: st.goal.id.clone(),
         text: st.goal.text.clone(),
@@ -174,30 +199,58 @@ pub fn ensure_idle(root: &Path, force: bool) -> Result<()> {
 }
 
 /// 把当前目标停到 `goals/<id>.json`。没有 state.json 就什么都不做。
+///
+/// **必须在 `state::locked` 内调用**：搬家和后续的开进 / 新建是一个事务，中间被别的进程
+/// 插一次 load-modify-save 就会让同一个目标同时出现在两个位置。
+///
+/// 读不出来的当前目标（损坏 / 版本不匹配）也照搬——多目标的价值之一就是"把坏的停到一边，
+/// 开个干净的接着干"，这条路不能被一次解析失败堵死。
 pub fn park(root: &Path) -> Result<Option<Row>> {
     let cur = state::state_path(root);
     if !cur.exists() {
         return Ok(None);
     }
-    let mut st = state::load(&cur)?;
+    let loaded = state::load(&cur);
+    let (id_hint, text_hint) = match &loaded {
+        Ok(st) => (st.goal.id.clone(), st.goal.text.clone()),
+        Err(_) => (String::new(), String::new()),
+    };
     let dir = goals_dir(root);
     fs::create_dir_all(&dir)?;
     // id 要和文件名一一对应：空的、带怪字符的、或者撞了停车位的，都换一个。
-    let clean = sanitize_id(&st.goal.id);
+    let clean = sanitize_id(&id_hint);
     let id = if clean.is_empty() || dir.join(format!("{clean}.json")).exists() {
-        fresh_id(root, &st.goal.text)
+        fresh_id(root, &text_hint)
     } else {
         clean
     };
     let target = dir.join(format!("{id}.json"));
-    if id == st.goal.id {
-        fs::rename(&cur, &target).with_context(|| format!("停放 {} → {}", cur.display(), target.display()))?;
-    } else {
-        st.goal.id = id.clone();
-        state::save(&target, &mut st)?;
-        fs::remove_file(&cur)?;
+    match loaded {
+        Ok(mut st) if id != id_hint => {
+            // 换了 id 就得把文件里的 id 一起改，否则 id 和文件名对不上
+            st.goal.id = id.clone();
+            state::save(&target, &mut st)?;
+            fs::remove_file(&cur)?;
+        }
+        _ => {
+            fs::rename(&cur, &target)
+                .with_context(|| format!("停放 {} → {}", cur.display(), target.display()))?;
+        }
     }
     Ok(row_of(&target, false))
+}
+
+/// park 的反向操作：把刚停走的那份搬回 `state.json`。
+///
+/// 只在"park 之后、这一步失败了"时调用。同一文件系统内的 rename 是原子的，所以这就是回滚：
+/// 项目要么停在旧目标上，要么开在新目标上，不会两头都没有。
+fn unpark(root: &Path, parked: &Option<Row>) {
+    let Some(row) = parked else { return };
+    let cur = state::state_path(root);
+    if cur.exists() {
+        return;
+    }
+    let _ = fs::rename(&row.path, &cur);
 }
 
 /// 把停着的那份开进 `state.json`（要求当前位置是空的）。
@@ -216,42 +269,113 @@ pub struct Switched {
 }
 
 /// 停当前 + 开目标那份。已经是当前目标就什么都不做。
-pub fn switch(root: &Path, needle: &str) -> Result<Switched> {
-    let want = resolve(root, needle)?;
-    if want.current {
-        return Ok(Switched { parked: None, current: want });
-    }
-    let parked_row = park(root)?;
-    engage(root, &want.path)?;
-    let current = row_of(&state::state_path(root), true).context("切换后读不出状态")?;
-    Ok(Switched { parked: parked_row, current })
+///
+/// 整段在 state 锁内完成：先把该拒的全拒掉（目标不存在、runner 在跑、有轮次没写回），
+/// 再动文件；开进失败就把停走的那份搬回来。
+pub fn switch(root: &Path, needle: &str, force: bool) -> Result<Switched> {
+    let path = state::state_path(root);
+    state::locked(&path, LOCK_WAIT, || {
+        let want = resolve(root, needle)?;
+        if want.current {
+            return Ok(Switched { parked: None, current: want });
+        }
+        ensure_idle(root, force)?;
+        let parked_row = park(root)?;
+        if let Err(e) = engage(root, &want.path) {
+            unpark(root, &parked_row);
+            return Err(e);
+        }
+        match row_of(&path, true) {
+            Some(current) => Ok(Switched { parked: parked_row, current }),
+            None => {
+                unpark(root, &parked_row);
+                bail!("切换后读不出状态：{}", path.display())
+            }
+        }
+    })
 }
 
 /// 新目标：停走当前的，在 `state.json` 上开一个新的。
-pub fn create(root: &Path, text: &str, id: Option<&str>) -> Result<(Option<Row>, Row)> {
+///
+/// 顺序是**先校验完再动文件**：id 不合法、id 撞了、runner 在跑、有轮次没写回，都要在 park 之前拒掉。
+/// 反过来（老的实现）会让一次参数打错就把项目留在"没有当前目标"的状态。
+pub fn create(root: &Path, text: &str, id: Option<&str>, force: bool) -> Result<(Option<Row>, Row)> {
     let text = text.trim();
     if text.is_empty() {
         bail!("目标不能是空的");
     }
-    let parked_row = park(root)?;
-    let id = match id {
-        Some(raw) => {
-            let clean = sanitize_id(raw);
-            if clean.is_empty() {
-                bail!("--id {raw:?} 里没有可用字符（只留 a-z 0-9 . _ -）");
-            }
-            if goals_dir(root).join(format!("{clean}.json")).exists() {
-                bail!("id {clean:?} 已经有人用了：`zloop goal list`");
-            }
-            clean
-        }
-        None => fresh_id(root, text),
-    };
     let path = state::state_path(root);
-    let mut st = state::default_state(text, &id);
-    state::locked(&path, std::time::Duration::from_secs(5), || state::save(&path, &mut st))?;
-    let current = row_of(&path, true).context("新目标写完读不出来")?;
-    Ok((parked_row, current))
+    state::locked(&path, LOCK_WAIT, || {
+        // 早拒：不合法或已被占用的 --id，在动任何文件之前就 bail
+        let requested = match id {
+            Some(raw) => {
+                let clean = sanitize_id(raw);
+                if clean.is_empty() {
+                    bail!("--id {raw:?} 里没有可用字符（只留 a-z 0-9 . _ -）");
+                }
+                // 当前目标的 id 也算被占：它马上就要停到 goals/<id>.json 去
+                if taken(root).iter().any(|u| u == &clean) {
+                    bail!("id {clean:?} 已经有人用了：`zloop goal list`");
+                }
+                Some(clean)
+            }
+            None => None,
+        };
+        ensure_idle(root, force)?;
+        let parked_row = park(root)?;
+        // id 要在 park **之后**定：当前目标读不出来时 `taken()` 数不到它，停走的那份可能
+        // 刚占掉一个 `g<N>`，这里再看一次才不会和它撞成同一个 id。
+        let id = match requested {
+            Some(clean) => {
+                if taken(root).iter().any(|u| u == &clean) {
+                    unpark(root, &parked_row);
+                    bail!("id {clean:?} 已经有人用了：`zloop goal list`");
+                }
+                clean
+            }
+            None => fresh_id(root, text),
+        };
+        let mut st = state::default_state(text, &id);
+        if let Err(e) = state::save(&path, &mut st) {
+            unpark(root, &parked_row);
+            return Err(e);
+        }
+        match row_of(&path, true) {
+            Some(current) => Ok((parked_row, current)),
+            None => {
+                unpark(root, &parked_row);
+                bail!("新目标写完读不出来：{}", path.display())
+            }
+        }
+    })
+}
+
+/// 这条 todo 是不是某个**停放中**的目标派给"我"的？
+///
+/// `goal switch --force` 会把带着在飞派活的目标一起停走，而 `done` 只认 todo id + 当前
+/// `state.json`：于是那个会话的写回会落到**新目标**头上——新目标的同名 todo 被标成完成、
+/// note 是旧目标的成果，旧目标的账本一条记录都没有。判断条件收得很紧（同一个 session、
+/// 同一个 todo id、派活还没过期），所以只会在真的串了目标时拦人。
+pub fn parked_holder(root: &Path, todo_id: &str, who: &crate::session::HostSession) -> Option<Row> {
+    let mine = who.session.as_deref()?;
+    let now = state::now();
+    for row in parked(root) {
+        let Ok(st) = state::load(&row.path) else { continue };
+        let Some(ip) = &st.in_progress else { continue };
+        if ip.todo != todo_id || ip.session.as_deref() != Some(mine) {
+            continue;
+        }
+        if st.policy.stale_after_min <= 0 {
+            continue; // 保护被关掉了
+        }
+        let stale = state::parse_iso(&ip.started_at)
+            .map(|s| (now - s).num_minutes() >= st.policy.stale_after_min)
+            .unwrap_or(true);
+        if !stale {
+            return Some(row);
+        }
+    }
+    None
 }
 
 /// 归档一个停着的目标：搬到 `.zloop/archive/`，从 `goal list` 里消失，但文件还在。
@@ -260,10 +384,11 @@ pub fn archive(root: &Path, needle: &str) -> Result<(Row, PathBuf)> {
     if row.current {
         bail!("{} 是当前目标：先 `zloop goal switch <别的>` 再归档它", row.id);
     }
-    let st = state::load(&row.path)?;
     let dir = root.join(STATE_DIR).join(ARCHIVE_DIR);
     fs::create_dir_all(&dir)?;
-    let stamp = st.goal.created_at.replace([':', '+'], "");
+    // 读不出来的目标也要能归档掉，否则 `goal list` 里那行"损坏"永远清不掉
+    let created = state::load(&row.path).map(|st| st.goal.created_at).unwrap_or_else(|_| state::now_iso());
+    let stamp = created.replace([':', '+'], "");
     let mut target = dir.join(format!("{stamp}-{}.json", row.id));
     let mut n = 1;
     while target.exists() {

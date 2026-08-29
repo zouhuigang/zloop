@@ -11,7 +11,52 @@ use chrono::{DateTime, Duration, FixedOffset};
 use serde_json::{json, Map, Value};
 
 pub const COUNTED: [&str; 3] = ["done", "progress", "fail"];
-pub const OUTCOMES: [&str; 6] = ["done", "progress", "fail", "block", "noop", "edit"];
+/// `feedback` 是唯一一个**人写的** outcome（`zloop feedback`）：agent 自述之外的另一路信号。
+/// 它不计入 `COUNTED`（不吃配额、不推进轮次），但会打断 fail / noop / progress 三条 streak——
+/// 人开口说话正是"停下来等人"该等到的东西，等到了就该让循环继续。
+pub const OUTCOMES: [&str; 9] =
+    ["done", "progress", "fail", "block", "noop", "edit", "feedback", "reflect", "replan"];
+pub const FEEDBACK: &str = "feedback";
+/// 回看的那一轮：不做 todo，只读账本 + 经验 + 反馈，给出整理建议。
+///
+/// 它对三条 streak **透明**（和 `noop` 一样）——插一轮反思不代表"失败被解决了"，
+/// 否则 fail / fail / reflect / fail / fail 会让循环永远停不下来。
+pub const REFLECT: &str = "reflect";
+/// 重估计划的那一轮：不做 todo，只对着最终目标看剩下的任务还对不对。
+/// 和 `reflect` 一样对三条 streak 透明——插一轮重估不代表失败被解决了。
+pub const REPLAN: &str = "replan";
+
+/// streak 计数时要跳过的轮次：它们不代表干活的结果。
+fn transparent(outcome: &str) -> bool {
+    outcome == "noop" || outcome == REFLECT || outcome == REPLAN
+}
+
+/// 上一轮干活之后才到的反馈——也就是下一轮**必须先处理**的那些。
+/// 更早的反馈留在 `ticks` 和 `zloop doc` 里，不再往交接包里堆。
+pub fn pending_feedback(state: &State) -> Vec<&Tick> {
+    let last_work = state.ticks.iter().rposition(|t| t.outcome == "done" || t.outcome == "progress");
+    state
+        .ticks
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| t.outcome == FEEDBACK && last_work.is_none_or(|k| *i > k))
+        .map(|(_, t)| t)
+        .collect()
+}
+
+/// 这个目标失败 / 被挡过的地方，最近的在前。
+///
+/// 循环因为连续失败停下来是对的，但"停下来"不等于"学到"——如果失败的原因没有结构化落点，
+/// 下一轮（甚至下一个会话）会把同一个坑再踩一遍。所以把 fail / block 轮次连同它们记下的坑
+/// 一起摆进交接包。
+pub fn failures(state: &State) -> Vec<&Tick> {
+    state.ticks.iter().rev().filter(|t| t.outcome == "fail" || t.outcome == "block").collect()
+}
+
+/// 全部反馈条数（含已经被后续轮次消化掉的）。
+pub fn feedback_count(state: &State) -> usize {
+    state.ticks.iter().filter(|t| t.outcome == FEEDBACK).count()
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decision {
@@ -36,7 +81,7 @@ pub fn fail_streak(ticks: &[Tick]) -> usize {
     for t in ticks.iter().rev() {
         match t.outcome.as_str() {
             "fail" => n += 1,
-            "noop" => continue,
+            o if transparent(o) => continue,
             _ => break,
         }
     }
@@ -44,7 +89,7 @@ pub fn fail_streak(ticks: &[Tick]) -> usize {
 }
 
 pub fn noop_streak(ticks: &[Tick]) -> usize {
-    ticks.iter().rev().take_while(|t| t.outcome == "noop").count()
+    ticks.iter().rev().filter(|t| !transparent(&t.outcome) || t.outcome == "noop").take_while(|t| t.outcome == "noop").count()
 }
 
 /// Trailing consecutive `progress` ticks on `todo_id`; `noop` is transparent, anything else breaks it.
@@ -52,12 +97,54 @@ pub fn progress_streak(ticks: &[Tick], todo_id: &str) -> usize {
     let mut n = 0;
     for t in ticks.iter().rev() {
         match t.outcome.as_str() {
-            "noop" => continue,
+            o if transparent(o) => continue,
             "progress" if t.todo.as_deref() == Some(todo_id) => n += 1,
             _ => break,
         }
     }
     n
+}
+
+/// 这条活是不是**另一个会话**刚领走、还在做？
+///
+/// `next` 曾经无条件覆盖 `in_progress`，于是两个 Claude 会话会同时领到同一条 todo：
+/// 谁都以为自己拿着，两个 agent 改同一批文件，先写回的那个还把另一个的在飞状态一起清掉。
+/// 判断只在**交互式派活**（`via == "next"`）之间做：runner 自己设 `in_progress`，
+/// 不走这条路，所以无头循环不会被自己挡住。
+///
+/// `policy.stale_after_min` 决定"多久没动静就算被丢下了"——过期的派活照旧可以重派，
+/// 设成 0 等于关掉这个保护。
+/// `next` 撞上别人的派活时给出的决定：不跑，但过一会儿可以再来问——
+/// 派活会因 `stale_after_min` 过期，所以自动续跑的循环能自己恢复，不必等人。
+pub fn hold_decision(state: &State) -> Decision {
+    Decision {
+        should_run: false,
+        reason: "held_by_other".into(),
+        todo: None,
+        interval_min: Some(interval(state, 1)),
+    }
+}
+
+pub fn held_by_other(
+    state: &State,
+    who: &HostSession,
+    at: DateTime<FixedOffset>,
+) -> Option<crate::state::InProgress> {
+    let ip = state.in_progress.as_ref()?;
+    if ip.via != "next" || state.policy.stale_after_min <= 0 {
+        return None;
+    }
+    // 分不出是谁就不拦：裸 CLI 没有 session id，拦了只会把人锁在门外
+    let (Some(held), Some(mine)) = (ip.session.as_deref(), who.session.as_deref()) else {
+        return None;
+    };
+    if held == mine && ip.host.as_deref() == Some(who.host.as_str()) {
+        return None;
+    }
+    let stale = parse_iso(&ip.started_at)
+        .map(|s| (at - s).num_minutes() >= state.policy.stale_after_min)
+        .unwrap_or(true);
+    (!stale).then(|| ip.clone())
 }
 
 pub fn current_round(ticks: &[Tick]) -> u64 {
@@ -177,6 +264,7 @@ pub fn record(
         duration_ms: None,
         num_turns: None,
         documented: None,
+        pitfalls: Vec::new(),
         extra: Map::new(),
     };
     state.ticks.push(tick.clone());

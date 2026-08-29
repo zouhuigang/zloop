@@ -109,28 +109,17 @@ fn ioctl_cols() -> Option<usize> {
     None
 }
 
-/// Display width of a string, counting CJK/emoji as two columns.
+/// 一个字符串在终端里占几列。
+///
+/// 按 Unicode East_Asian_Width 算（`unicode-width`）：宽字符（汉字、大部分 emoji）2 列，
+/// 其余 1 列，ambiguous 按 1 列——和 wcwidth 一致，也就是绝大多数终端的实际行为。
+///
+/// 这里曾经是一张手写的区间表，把 `0x231A..=0x23FA` 整段当成 2 列，于是 `⏭ ⏱ ⏸ ⏹ ⏺`
+/// 这些 EAW=N 的符号（还有 `⚠` `✓`）都被多算一列。以前每行右边没有东西，看不出来；
+/// 一旦画表格的右边框，那几行就短一格。而且目标文字 / note 里可能出现任意 emoji，
+/// 手写表覆盖不了，所以换成标准实现。
 pub fn width(s: &str) -> usize {
-    s.chars()
-        .map(|c| {
-            let c = c as u32;
-            let wide = (0x1100..=0x115F).contains(&c)
-                || (0x231A..=0x23FA).contains(&c) // ⌚⌛⏩…⏳⏸⏹⏺ render two columns wide
-                || (0x2E80..=0xA4CF).contains(&c)
-                || (0xAC00..=0xD7A3).contains(&c)
-                || (0xF900..=0xFAFF).contains(&c)
-                || (0xFE30..=0xFE6F).contains(&c)
-                || (0xFF00..=0xFF60).contains(&c)
-                || (0xFFE0..=0xFFE6).contains(&c)
-                || (0x1F300..=0x1FAFF).contains(&c)
-                || (0x2600..=0x27BF).contains(&c);
-            if wide {
-                2
-            } else {
-                1
-            }
-        })
-        .sum()
+    unicode_width::UnicodeWidthStr::width(s)
 }
 
 /// Truncate to `max` display columns, adding an ellipsis when it does not fit.
@@ -163,4 +152,46 @@ pub fn bar(done: usize, total: usize, cells: usize, st: &Style) -> String {
     let empty = "░".repeat(cells - filled);
     let colored = if done == total { st.green(&full) } else { st.cyan(&full) };
     format!("{colored}{}", st.dim(&empty))
+}
+
+/// 一列怎么对齐。数字右对齐、文字左对齐，看着才像一张表。
+#[derive(Clone, Copy, PartialEq)]
+pub enum Align {
+    Left,
+    Right,
+}
+
+/// 画一张框线表：表头 + 若干行，列宽按 `width()` 算（中文和 emoji 两列）。
+///
+/// `budget` 是可用总宽度；哪一列该被压缩由 `flex` 指定（通常是文本那列），
+/// 其余列按内容取最大宽。返回逐行的字符串，调用方自己加缩进。
+pub fn table(head: &[&str], rows: &[Vec<String>], align: &[Align], flex: usize, budget: usize, c: &Style) -> Vec<String> {
+    let n = head.len();
+    let mut w: Vec<usize> = (0..n)
+        .map(|i| rows.iter().map(|r| width(&r[i])).max().unwrap_or(0).max(width(head[i])))
+        .collect();
+    // 框线开销：每列 `│ 内容 ` = 宽度 + 3，末尾再一个 `│`
+    let fixed: usize = w.iter().enumerate().filter(|(i, _)| *i != flex).map(|(_, x)| *x).sum();
+    let room = budget.saturating_sub(fixed + 3 * n + 1);
+    w[flex] = w[flex].min(room.max(8));
+
+    let rule = |l: &str, m: &str, r: &str| {
+        c.dim(&format!("{l}{}{r}", w.iter().map(|x| "─".repeat(x + 2)).collect::<Vec<_>>().join(m)))
+    };
+    let bar = c.dim("│");
+    let cell = |s: &str, i: usize| {
+        let s = truncate(s, w[i]);
+        let pad = " ".repeat(w[i].saturating_sub(width(&s)));
+        if align.get(i) == Some(&Align::Right) { format!("{pad}{s}") } else { format!("{s}{pad}") }
+    };
+    let line = |cells: Vec<String>| format!("{bar} {} {bar}", cells.join(&format!(" {bar} ")));
+
+    let mut out = vec![rule("┌", "┬", "┐")];
+    out.push(line(head.iter().enumerate().map(|(i, h)| c.dim(&cell(h, i))).collect()));
+    out.push(rule("├", "┼", "┤"));
+    for r in rows {
+        out.push(line(r.iter().enumerate().map(|(i, v)| cell(v, i)).collect()));
+    }
+    out.push(rule("└", "┴", "┘"));
+    out
 }

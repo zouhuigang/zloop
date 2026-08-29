@@ -95,6 +95,19 @@ pub struct Options {
     pub git_commit: bool,
     /// Keep the Mac awake (caffeinate + lid-close protection) while this runner lives.
     pub keep_awake: bool,
+    /// 关掉「写回之后按信号插一轮重估」（默认开）。
+    ///
+    /// 和 `reflect_every` 的固定节奏不同，重估是**信号触发**的：账本里读不出偏离信号就完全不跑
+    /// （见 `docs/ADAPTIVE-REPLAN.md` §2——每轮都重规划会制造计划抖动）。
+    /// 无头模式下没人点头，所以它**只把建议记进账本，绝不自己改 todo**。
+    pub no_replan: bool,
+    /// 每 N 个 todo 轮次插一轮「回看」；0 = 关。
+    ///
+    /// 形状照 Warp 的 scheduled agent：**按计划跑一段不同的 prompt**，不是新子系统
+    /// （见 `docs/SELF-IMPROVEMENT.md` 1.1）。回看那一轮不做 todo、不推进轮次、
+    /// 对三条 streak 透明，也不动 `.zloop/NOTES.md`——无头模式下没人点头，
+    /// 所以它只把建议记进账本，等人回来看。
+    pub reflect_every: u32,
 }
 
 const JOURNAL: &str = "runner/journal.jsonl";
@@ -497,6 +510,8 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
     }
     let _awake_guard = awake_guard;
     let mut rounds_done: u32 = 0;
+    let mut last_reflect: Option<u32> = None;
+    let mut replan_at: Option<u64> = None;
     let mut notified: Option<String> = None; // dedupe: one notification per distinct wait/limit situation
     loop {
         if stop_requested() {
@@ -522,6 +537,40 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
             }
         }
         notified = None; // a runnable round resets the dedupe window
+
+        // 攒够 N 轮就回看一次。只在两轮 todo 之间插入，所以它不占 todo 轮次，
+        // 也不会因为 `rounds_done` 没变而连着触发（`last_reflect` 记住上次是在第几轮插的）。
+        if opts.reflect_every > 0 && rounds_done > 0 && rounds_done.is_multiple_of(opts.reflect_every) && last_reflect != Some(rounds_done)
+        {
+            last_reflect = Some(rounds_done);
+            let text = format!(
+                "{}\n\n---\n\n**这一轮由 zloop runner 无头驱动，没有人在旁边点头**：所以只输出建议清单，\
+                 **不要**运行 `zloop reflect --apply`，也不要改任何代码或 todo。你的输出会原样记进账本，等人回来看。\n",
+                crate::reflect::packet(&st, root, crate::notes::WINDOW)
+            );
+            journal_append(root, &json!({"event": "reflect", "after_round": rounds_done, "at": state::now_iso()}))?;
+            println!("runner: 第 {rounds_done} 轮之后插一轮回看（不占轮次）");
+            let result = match opts.host {
+                Host::Codex => run_codex(root, &text, None, &opts, timeout)?,
+                _ => run_claude(root, &text, None, &opts, timeout)?,
+            };
+            let who = HostSession { host: opts.host, session: result.session.clone() };
+            let body = result.summary.trim().to_string();
+            let summary = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("(没有输出)");
+            let rel = crate::log::write_raw(root, "reflect", &format!("# 回看 · 第 {rounds_done} 轮之后\n\n{body}\n"))?;
+            state::transaction(&path, |st| {
+                let t = tick::record(st, tick::REFLECT, None, &crate::style::truncate(summary, 200), &who)?;
+                if let Some(last) = st.ticks.last_mut() {
+                    last.log = Some(rel.clone());
+                    last.cost_usd = result.cost_usd;
+                    last.duration_ms = result.duration_ms;
+                }
+                Ok(t)
+            })?;
+            println!("runner: 回看写进账本 · {rel}");
+            continue;
+        }
+
         let todo = d.todo.clone().expect("ready decision carries a todo");
         let round_no = tick::current_round(&st.ticks) + 1;
         let ticks_before = st.ticks.len();
@@ -685,6 +734,47 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 journal_append(root, &json!({"event": "commit", "round": round_no, "todo": todo.id, "sha": sha, "at": state::now_iso()}))?;
             }
         }
+        // 写回之后按信号插一轮重估：只在账本读得出偏离时跑，一轮活最多跟一次，
+        // 而且**只产出建议**——改 todo 要人点头，无头模式里没有人。
+        if !opts.no_replan && wrote_back && replan_at != Some(round_no) {
+            let st = state::load(&path)?;
+            let sig = crate::replan::signals(&st);
+            if !sig.is_empty() && crate::todo::remaining(&st) > 0 {
+                replan_at = Some(round_no);
+                let why: Vec<String> = sig.iter().map(|s| s.detail.clone()).collect();
+                println!("runner: 第 {round_no} 轮之后重估计划（{}）", why.join(" · "));
+                let text = format!(
+                    "{}\n\n---\n\n**这一轮由 zloop runner 无头驱动，没有人在旁边点头**：只输出建议清单，\
+                     **不要**运行任何会改 todo 的命令（plan / edit / done 一律不要），也不要改代码。\
+                     你的输出会原样记进账本，等人回来看。\n",
+                    crate::replan::packet(&st)
+                );
+                journal_append(root, &json!({"event": "replan", "round": round_no, "signals": why, "at": state::now_iso()}))?;
+                let result = match opts.host {
+                    Host::Codex => run_codex(root, &text, None, &opts, timeout)?,
+                    _ => run_claude(root, &text, None, &opts, timeout)?,
+                };
+                let who = HostSession { host: opts.host, session: result.session.clone() };
+                let body = result.summary.trim().to_string();
+                let summary = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("(没有输出)");
+                let rel = crate::log::write_raw(
+                    root,
+                    "replan",
+                    &format!("# 重估 · 第 {round_no} 轮之后\n\n信号：{}\n\n{body}\n", why.join(" · ")),
+                )?;
+                state::transaction(&path, |st| {
+                    let t = tick::record(st, tick::REPLAN, None, &crate::style::truncate(summary, 200), &who)?;
+                    if let Some(last) = st.ticks.last_mut() {
+                        last.log = Some(rel.clone());
+                        last.cost_usd = result.cost_usd;
+                        last.duration_ms = result.duration_ms;
+                    }
+                    Ok(t)
+                })?;
+                println!("runner: 重估建议写进账本 · {rel}（没有动任何 todo）");
+            }
+        }
+
         rounds_done += 1;
         if opts.max_rounds > 0 && rounds_done >= opts.max_rounds {
             println!("runner: max rounds reached");

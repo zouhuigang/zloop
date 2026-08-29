@@ -125,6 +125,14 @@ pub struct SessionRow {
     pub transcript: Option<PathBuf>,
 }
 
+/// 某个宿主**最近**用过的那个会话。
+///
+/// `summarize` 按首次出现排序，所以不能靠 `.rev().find()` 拿"最近的"——一个会话先露过面、
+/// 之后一直没动，反过来找照样会先撞上它，于是 `claude --resume` 给出的是旧会话。按 `last` 挑。
+pub fn latest<'a>(rows: &'a [SessionRow], host: Option<&str>) -> Option<&'a SessionRow> {
+    rows.iter().filter(|s| host.is_none_or(|h| s.host == h)).max_by_key(|s| s.last.clone())
+}
+
 /// Distinct (host, session) pairs seen in ticks, oldest first.
 pub fn summarize(state: &State, root: &Path) -> Vec<SessionRow> {
     let mut rows: BTreeMap<(String, String), SessionRow> = BTreeMap::new();
