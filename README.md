@@ -1741,7 +1741,8 @@ paused/done  >  unplanned / all_done  >  user_gate / blocked  >  fail_streak  > 
 ```
 .zloop/
   state.json            当前目标的唯一真源（下面的结构）
-  state.json.lock       并发锁（flock）
+  state.json.lock       并发锁（flock）；只有写命令上锁，只读命令读 state.json 本身
+  state.json.lock.holder  持锁期间才存在：谁（pid）、在干什么、什么时候拿到的；超时那句话就是读它
   goals/<id>.json       停放着的其他目标，结构和 state.json 一样（zloop goal switch 换车位）
   NOTES.md              约定（每轮都带）+ 经验（最新几条）；项目共享，不跟着目标走
   NOTES.md.bak-*        zloop reflect --apply 改写之前留的原件

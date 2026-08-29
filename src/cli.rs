@@ -368,10 +368,51 @@ fn print_json(v: &serde_json::Value) {
     println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
 }
 
+/// 进持有者记录的「操作名」：等锁超时的人靠 pid + 这个名字判断被谁挡住了（见 `state::locked`）。
+/// 带上 todo id，因为「pid 51234 · done t16」比「pid 51234 · done」更容易对上是哪一轮。
+fn cmd_label(cmd: &Cmd) -> String {
+    match cmd {
+        Cmd::Init { .. } => "init".into(),
+        Cmd::Plan { .. } => "plan".into(),
+        Cmd::Next { .. } => "next".into(),
+        Cmd::Done { id, .. } => format!("done {id}"),
+        Cmd::Edit { id, .. } => format!("edit {id}"),
+        Cmd::Notify { .. } => "notify".into(),
+        Cmd::Feedback { id, .. } => format!("feedback {id}"),
+        Cmd::Remember { .. } => "remember".into(),
+        Cmd::Pause => "pause".into(),
+        Cmd::Resume => "resume".into(),
+        Cmd::Compact { .. } => "compact".into(),
+        Cmd::Replan => "replan".into(),
+        Cmd::Reflect { .. } => "reflect".into(),
+        Cmd::Stats { .. } => "stats".into(),
+        Cmd::Status { .. } => "status".into(),
+        Cmd::Heartbeat { .. } => "heartbeat".into(),
+        Cmd::Install { .. } => "install".into(),
+        Cmd::Awake { .. } => "awake".into(),
+        Cmd::Sessions { .. } => "sessions".into(),
+        Cmd::Context { .. } => "context".into(),
+        Cmd::Doc { .. } => "doc".into(),
+        Cmd::Log { .. } => "log".into(),
+        Cmd::Doctor { .. } => "doctor".into(),
+        Cmd::Goal { cmd } => match cmd {
+            None | Some(GoalCmd::List { .. }) => "goal list".into(),
+            Some(GoalCmd::New { .. }) => "goal new".into(),
+            Some(GoalCmd::Switch { .. }) => "goal switch".into(),
+            Some(GoalCmd::Rm { .. }) => "goal rm".into(),
+        },
+        Cmd::Start(_) => "start".into(),
+        Cmd::Stop => "stop".into(),
+        Cmd::Run(_) => "run".into(),
+        Cmd::HookStop => "hook-stop".into(),
+    }
+}
+
 /// Returns the process exit code.
 pub fn run(cli: Cli) -> Result<i32> {
     let root = root_of(&cli.dir);
     let path = state::state_path(&root);
+    state::set_operation(cmd_label(&cli.cmd));
     match cli.cmd {
         Cmd::Init { goal, force } => cmd_init(&cli.dir, &goal, force),
         Cmd::Plan { add, file, replace, from_loopx } => cmd_plan(&path, add, file, replace, from_loopx),
@@ -605,7 +646,7 @@ fn cmd_init(dir: &Option<PathBuf>, goal: &str, force: bool) -> Result<i32> {
     // id 从目标文字取（多目标下目录名会让每个目标的 id 都一样）
     let id = crate::goals::fresh_id(&root, goal.trim());
     let mut st = state::default_state(goal.trim(), &id);
-    state::locked(&path, std::time::Duration::from_secs(5), || state::save(&path, &mut st))?;
+    state::locked(&path, state::LOCK_WAIT, || state::save(&path, &mut st))?;
     if let Some(a) = archived {
         println!("archived previous state → {}", a.display());
     }

@@ -8,15 +8,14 @@
 //! 归档（`.zloop/archive/`）和停放是两件事：停放的还在 `zloop goal list` 里、可以切回来；
 //! 归档的是"不打算再回去了"，只留给事后翻。
 
-use crate::state::{self, STATE_DIR};
+// `LOCK_WAIT`：搬家事务等锁的上限，和 `state::transaction` 用的是同一档——写命令彼此排队而不是各自开工。
+use crate::state::{self, LOCK_WAIT, STATE_DIR};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const GOALS_DIR: &str = "goals";
 pub const ARCHIVE_DIR: &str = "archive";
-/// 搬家事务等锁的上限；和 `state::transaction` 用的一样，写命令彼此排队而不是各自开工。
-const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct Row {

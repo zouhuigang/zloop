@@ -595,6 +595,8 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
 
         let todo = d.todo.clone().expect("ready decision carries a todo");
         let round_no = tick::current_round(&st.ticks) + 1;
+        // 持有者记录里写「run 第 N 轮」而不是光一个 run：被挡住的人一眼知道是哪一轮在写回。
+        state::set_operation(format!("run 第 {round_no} 轮"));
         let ticks_before = st.ticks.len();
         let resume_sid = pick_session(&st, opts.host, &todo.id, opts.resume);
 

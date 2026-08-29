@@ -394,6 +394,117 @@ pub fn lock_path(path: &Path) -> PathBuf {
     ))
 }
 
+/// 写命令等锁的上限。只读命令（`status` / `context` / `log` / `doctor` …）走 `load`，**根本不上锁**：
+/// `save` 是 tmp + rename，读者只会看见换过去之前或之后的完整一份，所以它们的等待是 0，
+/// 不会被一个跑着的 runner 挡住。改读路径的人请先看 `tests/lock_test.rs` 里钉这条的用例。
+pub const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// 持有者记录：谁（pid）、在干什么（操作名）、什么时候拿到的。
+///
+/// 写在锁文件**旁边**（`state.json.lock.holder`）而不是锁文件里：锁文件的内容没有锁保护，
+/// 就地覆写是「先截断再写」，等锁的人正好读在中间就只能读到半条 JSON。旁边这份走 tmp + rename，
+/// 读者要么读到完整的旧记录、要么读到完整的新记录。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockHolder {
+    pub pid: u32,
+    pub op: String,
+    pub at: String,
+}
+
+pub fn holder_path(path: &Path) -> PathBuf {
+    let lock = lock_path(path);
+    lock.with_file_name(format!(
+        "{}.holder",
+        lock.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
+    ))
+}
+
+/// 本进程正在做的事，进持有者记录用。`cli::run` 每次开头按子命令设一次，runner 每轮再细化成轮号。
+static OPERATION: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+pub fn set_operation(op: impl Into<String>) {
+    if let Ok(mut cur) = OPERATION.write() {
+        *cur = op.into();
+    }
+}
+
+pub fn operation() -> String {
+    match OPERATION.read() {
+        Ok(s) if !s.is_empty() => s.clone(),
+        _ => "zloop".into(),
+    }
+}
+
+/// 拿到锁之后写；失败不影响正事（记录只是给人看的）。
+fn write_holder(state_path: &Path) {
+    let p = holder_path(state_path);
+    let rec = LockHolder { pid: std::process::id(), op: operation(), at: now_iso() };
+    let Ok(body) = serde_json::to_string(&rec) else { return };
+    let tmp = p.with_file_name(format!(
+        "{}.tmp.{}",
+        p.file_name().map(|s| s.to_string_lossy()).unwrap_or_default(),
+        std::process::id()
+    ));
+    if fs::write(&tmp, body).is_err() || fs::rename(&tmp, &p).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+/// 必须在**释放锁之前**清掉，否则可能删掉下一个持有者刚写的那份。
+fn clear_holder(state_path: &Path) {
+    let _ = fs::remove_file(holder_path(state_path));
+}
+
+/// 出作用域就清记录——正常返回、`?` 提前返回、闭包 panic 展开都算。
+/// 它在 `locked` 里比 fd 锁的 guard **后**声明，所以先清记录、再放锁（顺序见 `clear_holder`）。
+struct HolderGuard<'a>(&'a Path);
+
+impl Drop for HolderGuard<'_> {
+    fn drop(&mut self) {
+        clear_holder(self.0);
+    }
+}
+
+pub fn read_holder(state_path: &Path) -> Option<LockHolder> {
+    serde_json::from_str(&fs::read_to_string(holder_path(state_path)).ok()?).ok()
+}
+
+/// 超时时的那句话：等谁、等多久了、那个进程还在不在，以及下一步该干什么。
+fn timeout_error(state_path: &Path, timeout: Duration) -> anyhow::Error {
+    let lock = lock_path(state_path);
+    let mut msg = format!("could not lock {} within {:.1}s", lock.display(), timeout.as_secs_f64());
+    match read_holder(state_path) {
+        Some(h) => {
+            let held = parse_iso(&h.at)
+                .ok()
+                .map(|t| format!("，拿到锁 {:.1} 秒了", (now() - t).num_milliseconds() as f64 / 1000.0))
+                .unwrap_or_default();
+            if crate::daemon::pid_alive(h.pid as i32) {
+                msg.push_str(&format!("\n持有者：pid {} · {}{held}（进程还活着）", h.pid, h.op));
+                msg.push_str(&format!(
+                    "\n下一步：先看它在干什么 `ps -p {} -o command=`；确认真卡死了再 `kill {}`；\
+                     \n        别删锁文件——内核锁才是权威，删了只会让两个进程同时写 state.json",
+                    h.pid, h.pid
+                ));
+            } else {
+                msg.push_str(&format!(
+                    "\n持有者：记录里是 pid {} · {}{held}，但这个进程已经不在了——这条是旧记录，\
+                     \n        真正持锁的是另一个进程（`lsof {}` 能看到是谁）",
+                    h.pid,
+                    h.op,
+                    lock.display()
+                ));
+            }
+        }
+        None => msg.push_str(&format!(
+            "\n持有者：没有持有者记录（旧版 zloop 持的锁，或者进程被强杀没来得及留）\
+             \n下一步：`lsof {}` 看谁开着它；别删锁文件",
+            lock.display()
+        )),
+    }
+    StateError(msg).into()
+}
+
 /// Run `f` while holding an exclusive advisory lock on the sibling `.lock` file.
 pub fn locked<T>(path: &Path, timeout: Duration, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let lock_path = lock_path(path);
@@ -413,26 +524,24 @@ pub fn locked<T>(path: &Path, timeout: Duration, f: impl FnOnce() -> Result<T>) 
             Ok(g) => break g,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {
-                    return Err(StateError(format!(
-                        "could not lock {} within {:.1}s",
-                        lock_path.display(),
-                        timeout.as_secs_f64()
-                    ))
-                    .into());
+                    return Err(timeout_error(path, timeout));
                 }
                 thread::sleep(Duration::from_millis(50));
             }
             Err(e) => return Err(e.into()),
         }
     };
+    write_holder(path);
+    let _holder = HolderGuard(path);
     let result = f();
+    drop(_holder); // 先清记录（还在锁里），再放锁
     drop(guard);
     result
 }
 
 /// Lock, load, mutate, save.
 pub fn transaction<T>(path: &Path, f: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
-    locked(path, Duration::from_secs(5), || {
+    locked(path, LOCK_WAIT, || {
         let mut state = load(path)?;
         let out = f(&mut state)?;
         save(path, &mut state)?;

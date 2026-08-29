@@ -456,8 +456,8 @@ F1–F9 全都是实现层面的疏漏，不是这个设计的必然代价——
 - ~~**F5（`zloop log` 跨目标串台）**~~ → 已修，见下面「F5 的修法」。
 - **F9（`goal rm` 靠文字片段匹配却不需要确认）**：文件搬进 `.zloop/archive/` 没有丢，优先级低。
 - ~~**L4（缺健康检查）**~~ → 已做，见下面 L4 的处置记录（`zloop doctor`）。
-- **L3（锁超时不说是谁持锁）/ L6（跨项目视图）**：都是"可以更好"，不是错。
-  L3 最值得做——`.zloop/runner/pid` 那套手法挪到锁文件上就行。L6 的处置是"写进文档而不是修"。
+- ~~**L3（锁超时不说是谁持锁）**~~ → 已做，见下面「L3 的处置（t16）」。
+- **L6（跨项目视图）**："可以更好"，不是错，处置是"写进文档而不是修"。
 
 ---
 
@@ -829,3 +829,77 @@ W2（整理经验）和 W6（`--reflect-every N`）建在 W1+W4+W5 的数据上�
 
 `cargo test` 80 passed / 0 failed；改动涉及 `cli.rs` / `style.rs` / `session.rs` / `context.rs`
 和 README 的 8 个样例块（用脚本按新排版重排，逐块校验各行等宽）。
+
+---
+
+# L3 的处置（t16）：锁超时要说清被谁挡住了
+
+## 改了什么
+
+| # | 修法 | 位置 |
+|---|---|---|
+| 1 | 拿到锁就在锁文件**旁边**写一条持有者记录：`{pid, op, at}`；释放前删掉（`HolderGuard` 的 `Drop`，panic 也算） | `state.rs write_holder/clear_holder`（`state.json.lock.holder`） |
+| 2 | 超时那句话读这条记录：谁持着、持了多久、那个进程还在不在，再给处置步骤 | `state.rs timeout_error` |
+| 3 | 操作名（`op`）由 CLI 按子命令设一次，runner 每轮细化成「run 第 N 轮」 | `cli.rs cmd_label` + `cli::run`、`runner.rs`（`state::set_operation`） |
+| 4 | 5 秒这一档收成 `state::LOCK_WAIT` 一个常量，`state.rs` / `cli.rs` / `goals.rs` 共用 | `state::LOCK_WAIT` |
+
+超时输出（实测，`/tmp` 上的一次性项目，外面用 `python3 fcntl.flock` 真持着锁）：
+
+```
+zloop: could not lock /private/tmp/ztest/.zloop/state.json.lock within 5.0s
+持有者：pid 8928 · run 第 19 轮，拿到锁 7.4 秒了（进程还活着）
+下一步：先看它在干什么 `ps -p 8928 -o command=`；确认真卡死了再 `kill 8928`；
+        别删锁文件——内核锁才是权威，删了只会让两个进程同时写 state.json
+
+# 没有持有者记录时（旧版 zloop 持的锁，或者进程被强杀）：
+持有者：没有持有者记录（旧版 zloop 持的锁，或者进程被强杀没来得及留）
+下一步：`lsof /private/tmp/ztest/.zloop/state.json.lock` 看谁开着它；别删锁文件
+```
+
+## 两个和 loopx 不一样的地方，都是故意的
+
+**1）记录写在锁文件旁边，不写进锁文件本身。** loopx 的 `_holder_record` 是 `json.dump` 进锁文件
+（`file_lock.py:157`）。锁文件的**内容**没有任何锁保护——就地覆写是"先截断再写"，等锁的那个人正好读在
+中间，就只能读到半条 JSON，于是超时提示时好时坏。旁边那份走 tmp + rename，读者要么读到完整的旧记录、
+要么读到完整的新记录。这跟 `state::save` 和 `daemon::write_pid` 是同一个理由（pid 文件那次就是被
+`fs::write` 的截断窗口坑过：`status` 把活着的 runner 报成"没有 runner 在跑"）。
+
+**2）清记录必须在**锁**里做。** `clear_holder` 放在 `drop(guard)` 之前：放到锁外面的话，
+下一个人可能已经拿到锁并写了自己那份，我们这一手 `remove_file` 正好把他的记录删掉——
+于是他持锁期间别人看到的是"没有持有者记录"。
+
+**记录过期怎么办**：进程被 `kill -9`，内核会放锁，记录却留在盘上。所以超时时先 `kill(pid, 0)` 探一下，
+死了就明说"这条是旧记录，真正持锁的是另一个进程"，并给 `lsof`——**不**替用户删文件，也不假装它有效。
+
+## "只读命令用更短的等待"这条，实测的结论不一样
+
+审计里写的是"`zloop status` / `context` / `log` 现在也要等满 5 秒"（L3 一节），
+按这个说法应该给它们配 loopx 的 `MONITOR` 那一档（1 秒）。**实际读一遍代码：zloop 的只读命令根本不上锁。**
+`status` / `context` / `log` / `doctor` / `stats` / `doc` 走的都是 `state::load`，
+而 `save` 是 tmp + rename，读者只会看见换过去之前或之后的完整一份——所以它们的等待不是"更短"，是 0。
+
+于是这一条的做法是**钉住**而不是新加一档：`tests/lock_test.rs` 里
+`write_waits_and_reports_while_reads_go_straight_through` 在真持锁的情况下跑这三条命令，
+断言各自退出 0 且耗时 < 2 秒（同一时刻 `zloop pause` 等满 5 秒并报出持有者）。
+哪天有人往读路径上加锁，这条测试先红。加一个没人用的 `LOCK_WAIT_READ` 常量只会让人以为读路径要等锁。
+
+## 没做的两件事
+
+- **超时留档**（loopx 的 `.lock.incidents.jsonl`）：zloop 已经有 `runner/journal.jsonl` 和
+  `.zloop/log/`，再开一个只在超时时才写的文件，值不回它的复杂度。真需要复盘时，超时那句话已经进了控制台日志。
+- **`SINGLE_FLIGHT`（试一次就走）那一档**：现在没有调用方需要"拿不到就立刻放弃"。等真有了再加。
+
+## 回归测试（`tests/lock_test.rs`，6 条）
+
+| 用例 | 钉的是 |
+|---|---|
+| `timeout_names_the_live_holder` | 报错里有 pid、操作名、持有时长、"进程还活着"、处置步骤 |
+| `holder_record_is_written_while_held_and_cleared_after` | 持锁期间记录在、内容对；放锁之后文件必须消失 |
+| `holder_record_is_cleared_even_if_the_closure_panics` | 闭包 panic 展开也要清记录（`HolderGuard` 的 `Drop`）——否则留下一个 pid 还活着的假持有者 |
+| `stale_holder_record_is_called_out_instead_of_believed` | pid 已经死了就明说记录是旧的，并给 `lsof`（pid 取自一个真的跑完退出的进程） |
+| `missing_holder_record_still_says_what_to_do` | 没有记录时也得给下一步 |
+| `write_waits_and_reports_while_reads_go_straight_through` | 端到端：真持锁时写命令等满 5 秒并报出持有者，只读三条命令 < 2 秒退出 0 |
+
+`state::set_operation` 是进程级的，所以这几条用例用一把 `Mutex` 串起来跑——并行跑会互相改掉操作名。
+
+`cargo test` 118 passed / 0 failed。
