@@ -196,3 +196,38 @@ fn write_waits_and_reports_while_reads_go_straight_through() {
     holder.join().unwrap();
     assert_eq!(zloop(d, &["pause"]).0, 0, "锁放掉之后写命令应该恢复正常");
 }
+
+#[test]
+fn concurrent_notes_writers_do_not_lose_entries() {
+    // NOTES.md 以前一把锁都没有：追加是原子的（O_APPEND），但 `--rule` 是读-改-写，
+    // 整份读进来改完再整个写回，读到写之间别人追加的会被一起吞掉。
+    // 实测过：20 并发 --rule 只落 12 条；10 追加 + 10 --rule 混合 20 条只剩 16。
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().to_path_buf();
+    zloop(&d, &["init", "并发写 NOTES"]);
+
+    let mut hs = Vec::new();
+    for i in 0..10 {
+        for kind in ["lesson", "rule"] {
+            let d = d.clone();
+            hs.push(std::thread::spawn(move || {
+                let text = format!("{kind}{i}");
+                if kind == "rule" {
+                    zloop(&d, &["remember", "--rule", &text]);
+                } else {
+                    zloop(&d, &["remember", &text]);
+                }
+            }));
+        }
+    }
+    for h in hs {
+        h.join().unwrap();
+    }
+
+    let raw = std::fs::read_to_string(d.join(".zloop/NOTES.md")).unwrap();
+    let items = raw.lines().filter(|l| l.trim_start().starts_with("- ")).count();
+    assert_eq!(items, 20, "20 个并发写手一条都不该丢，实际 {items} 条:\n{raw}");
+    let n = zloop::notes::read(&d);
+    assert_eq!(n.rules.len(), 10, "约定 10 条: {:?}", n.rules);
+    assert_eq!(n.lessons.len(), 10, "经验 10 条: {:?}", n.lessons);
+}

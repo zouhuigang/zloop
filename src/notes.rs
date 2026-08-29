@@ -102,19 +102,34 @@ pub fn parse(raw: &str) -> Notes {
     n
 }
 
+/// NOTES 自己的一把锁。
+///
+/// **不复用 `state.json` 那把**：`remember` 将来若被塞进某个 `state::transaction` 里，
+/// 同一进程再开一个 fd 去锁同一个文件会撞上自己（flock 认的是 open file description，
+/// 不认进程），于是原地空转到超时。各锁各的，没有嵌套的可能。
+fn lock_target(root: &Path) -> PathBuf {
+    path(root)
+}
+
 pub fn remember(root: &Path, text: &str) -> Result<PathBuf> {
     let p = path(root);
     if let Some(parent) = p.parent() {
         fs::create_dir_all(parent)?;
     }
-    let fresh = !p.exists();
-    let mut f = fs::OpenOptions::new().create(true).append(true).open(&p)?;
-    if fresh {
-        // 经验区放最后，所以以后每次追加都落在它下面
-        writeln!(f, "{PREAMBLE}\n{LESSONS_HEAD}\n")?;
-    }
-    let one_line = text.trim().replace('\n', " ");
-    writeln!(f, "- {} {}", now_iso(), one_line)?;
+    // 追加本身是原子的（`O_APPEND`），但**并发的 `--rule` 重写不是**：它读进整份文件、
+    // 改完再整个写回，读到写之间新追加的经验会被一起吞掉（实测 10 追加 + 10 `--rule`
+    // 并发，20 条只剩 16）。所以追加这条路也要进同一把锁。
+    crate::state::locked(&lock_target(root), crate::state::LOCK_WAIT, || {
+        let fresh = fs::metadata(&p).map(|m| m.len() == 0).unwrap_or(true);
+        let mut f = fs::OpenOptions::new().create(true).append(true).open(&p)?;
+        if fresh {
+            // 经验区放最后，所以以后每次追加都落在它下面
+            writeln!(f, "{PREAMBLE}\n{LESSONS_HEAD}\n")?;
+        }
+        let one_line = text.trim().replace('\n', " ");
+        writeln!(f, "- {} {}", now_iso(), one_line)?;
+        Ok(())
+    })?;
     Ok(p)
 }
 
@@ -167,12 +182,15 @@ fn write(root: &Path, n: &Notes) -> Result<PathBuf> {
 /// 后者会删掉东西，所以那边必须留原件。这边每次都备份只会把 `.zloop/` 塞满。
 pub fn add_rule(root: &Path, text: &str) -> Result<(PathBuf, bool)> {
     let one_line = text.trim().replace('\n', " ");
-    let mut n = read(root);
-    if n.rules.iter().any(|r| r == &one_line) {
-        return Ok((path(root), true));
-    }
-    n.rules.push(one_line);
-    Ok((write(root, &n)?, false))
+    // 读-改-写必须整个在锁里：只锁写的那一半等于没锁（实测 20 个并发 `--rule` 只落 12 条）
+    crate::state::locked(&lock_target(root), crate::state::LOCK_WAIT, || {
+        let mut n = read(root);
+        if n.rules.iter().any(|r| r == &one_line) {
+            return Ok((path(root), true));
+        }
+        n.rules.push(one_line);
+        Ok((write(root, &n)?, false))
+    })
 }
 
 /// 整理之后重写整份 NOTES.md：**先备份再写**。
@@ -184,10 +202,13 @@ pub fn add_rule(root: &Path, text: &str) -> Result<(PathBuf, bool)> {
 /// 模型新写的按今天记——否则整理一次就把"这条多老了"抹平了。
 pub fn replace(root: &Path, n: &Notes) -> Result<(PathBuf, PathBuf)> {
     let p = path(root);
-    let backup = p.with_file_name(format!("NOTES.md.bak-{}", now_iso().replace([':', '+'], "")));
-    if p.exists() {
-        fs::copy(&p, &backup)?;
-    }
-    Ok((write(root, n)?, backup))
+    // 备份 + 重写是一个事务：中间被别人追加一条，那一条会连同备份一起被覆盖掉
+    crate::state::locked(&lock_target(root), crate::state::LOCK_WAIT, || {
+        let backup = p.with_file_name(format!("NOTES.md.bak-{}", now_iso().replace([':', '+'], "")));
+        if p.exists() {
+            fs::copy(&p, &backup)?;
+        }
+        Ok((write(root, n)?, backup))
+    })
 }
 

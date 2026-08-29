@@ -129,6 +129,7 @@ pub fn check(root: &Path) -> Report {
         }
     }
     check_pid(root, &mut f);
+    check_leftovers(root, &mut f);
 
     // 先要修的，后留意的；同级保持发现顺序（大致是从目标清单到账本再到运行时）
     f.sort_by_key(|x| match x.level {
@@ -326,6 +327,37 @@ fn check_ledger(root: &Path, gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
 
 /// pid 文件指着一个已经不在的进程。`status` / `goal switch` 会顺手清掉它，
 /// 但在那之前，任何读到它的人都以为 runner 还活着。
+/// 上次写入被打断留下的半截临时文件。
+///
+/// 账本的写法是"写 `<名字>.tmp` → `sync_all` → `rename`"，所以进程被杀不会损坏正本
+/// （实测 386 次 SIGKILL 一次没坏）——但那个 `.tmp` 会**永远留着**，没人清。
+/// 它不影响正确性（下一次 `save` 用 `File::create` 覆盖它），可 `.zloop/` 里躺着一个
+/// 半截 JSON，人翻进去只会疑心账本坏了。doctor 的活就是说这一句。
+fn check_leftovers(root: &Path, f: &mut Vec<Finding>) {
+    let dirs = [root.join(state::STATE_DIR), crate::goals::goals_dir(root)];
+    let mut hits: Vec<String> = Vec::new();
+    for dir in dirs.iter() {
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            // `<x>.tmp` 和 `<x>.tmp.<pid>`（持有者记录用后者）都算
+            if name.contains(".tmp") && e.path().is_file() {
+                hits.push(name);
+            }
+        }
+    }
+    if hits.is_empty() {
+        return;
+    }
+    hits.sort();
+    let n = hits.len();
+    f.push(Finding::warn(
+        "leftover_tmp",
+        format!("有 {n} 个上次写入没写完就被打断的临时文件：{}", hits.join(" / ")),
+        "账本正本没事（写法是 tmp → rename，正本要么是旧的要么是新的）。这些残留可以直接删".into(),
+    ));
+}
+
 fn check_pid(root: &Path, f: &mut Vec<Finding>) {
     let p = crate::daemon::pid_path(root);
     let Ok(raw) = fs::read_to_string(&p) else { return };

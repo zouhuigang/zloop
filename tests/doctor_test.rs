@@ -256,3 +256,27 @@ fn compact_dumps_are_not_mistaken_for_broken_archives() {
     assert!(ks.is_empty(), "{ks:?}");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn leftover_temp_files_get_reported() {
+    // 账本的写法是 tmp → sync → rename，所以进程被杀不会损坏正本（实测 386 次 SIGKILL
+    // 一次没坏），但那个 .tmp 会永远留着没人清。doctor 以前对它完全沉默，说"没发现问题"。
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "残留检查"]);
+    assert!(zloop(d, &["doctor"]).out.contains("没发现问题"), "干净的项目不该报");
+
+    std::fs::write(d.join(".zloop/state.json.tmp"), "{\"半截").unwrap();
+    std::fs::create_dir_all(d.join(".zloop/goals")).unwrap();
+    std::fs::write(d.join(".zloop/goals/g1.json.tmp"), "{").unwrap();
+
+    let out = zloop(d, &["doctor"]).out;
+    assert!(out.contains("上次写入没写完就被打断"), "{out}");
+    assert!(out.contains("state.json.tmp") && out.contains("g1.json.tmp"), "两个都要列出来: {out}");
+    assert!(out.contains("正本没事"), "别把人吓着——正本是好的: {out}");
+    assert!(out.contains("留意"), "这是留意不是必修: {out}");
+
+    let r = zloop::doctor::check(d);
+    assert_eq!(r.errors, 0, "残留不算错误");
+    assert!(r.findings.iter().any(|f| f.kind == "leftover_tmp"), "{:?}", r.findings);
+}
