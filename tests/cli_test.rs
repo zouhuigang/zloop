@@ -313,6 +313,28 @@ fn install_keeps_your_edits_and_refuses_to_clobber_the_managed_part() {
     assert!(fs::read_to_string(&skill).unwrap().contains("fp="), "从此带上指纹");
 }
 
+/// "用户区原样保留"的另一面：模板改了**用户区自带的那段文案**时，已经装过的机器拿不到——
+/// 升级只换托管区，用户区停在你装它那天。踩到过：改了 `USER_BLOCK` 的措辞，
+/// 本机 `install` 一遍还是老话。README 第 5 节据此写的，别让它悄悄过期。
+#[test]
+fn install_never_refreshes_an_existing_user_block() {
+    let home = tempfile::tempdir().unwrap();
+    let skill = home.path().join(".claude/skills/zloop/SKILL.md");
+    let user_region = |t: &str| t[t.find(hosts::USER_MARK).unwrap()..].to_string();
+    let tpl = hosts::skill_markdown("claude");
+
+    // 装过的机器 = 当前托管区 + 老模板那段用户区
+    let old_user = "<!-- zloop:user -->\n<!-- 老模板当年写的那句 -->\n";
+    fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    fs::write(&skill, format!("{}{old_user}", &tpl[..tpl.find(hosts::USER_MARK).unwrap()])).unwrap();
+
+    let w = hosts::install_claude(home.path(), false).unwrap();
+    assert!(w[0].kept_user > 0, "{w:?}");
+    let text = fs::read_to_string(&skill).unwrap();
+    assert_eq!(user_region(&text), old_user, "老机器的用户区一个字都不该动");
+    assert_ne!(user_region(&text), user_region(&tpl), "所以模板自带的那段只有全新安装才看得到");
+}
+
 /// 「目标存在但一条 todo 都没有」必须在 skill 的决策树里有自己的一支：
 /// 它最像的是"已完成"（`next` / `context` 对空清单也报 `all_done`），
 /// 照那一支走就会 `goal new` 出一个重复目标，把刚建的那个停放掉。

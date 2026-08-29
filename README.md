@@ -130,6 +130,22 @@ rm -rf ~/.claude/skills/zloop ~/.codex/skills/zloop
 # 各项目里的 .zloop/ 是你的运行记录，留不留随你
 ```
 
+**升级只换托管区，用户区停在你装它那天。** `install` 把 `<!-- zloop:user -->` 之后的内容原样搬过去——
+这是承诺，反过来也意味着**模板自带的那段用户区文字，只有全新安装才看得到**：
+
+```
+$ zloop install --claude
+wrote  ~/.claude/skills/zloop/SKILL.md
+       保留了你的自定义段落（<!-- zloop:user --> 之后 152 字节）   ← 152 字节是老模板的原文，不是新的
+```
+
+想要新版那段：自己照着改，或者备份后删掉 `SKILL.md` 再 `install`。
+
+**runner 正在跑的时候能不能升级**：skill 那一半可以——runner 每轮的提示词来自二进制里的
+`prompt::heartbeat`（`zloop heartbeat --host claude` 打出来的就是它，一字不差），**从不读 SKILL.md**，
+所以重写 skill 影响不到在跑的这一轮。要等的是换二进制那一半：agent 每轮都在敲 `zloop context` /
+`zloop done`，跑到一半换掉等于中途换工具——那一步放到 `zloop stop` 之后。
+
 ### 6. 安装常见问题
 
 | 现象 | 原因 / 处理 |
