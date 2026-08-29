@@ -110,7 +110,24 @@ pub fn progress_streak(ticks: &[Tick], todo_id: &str) -> usize {
 /// `next` 曾经无条件覆盖 `in_progress`，于是两个 Claude 会话会同时领到同一条 todo：
 /// 谁都以为自己拿着，两个 agent 改同一批文件，先写回的那个还把另一个的在飞状态一起清掉。
 /// 判断只在**交互式派活**（`via == "next"`）之间做：runner 自己设 `in_progress`，
-/// 不走这条路，所以无头循环不会被自己挡住。
+/// 不走这条路，所以无头循环不会被自己挡住。这一条是**有意的、必须保留**——
+/// runner 设完 `in_progress` 才去起 `claude -p`，那个子进程自己会敲 `zloop next`、
+/// 带的是它自己的新 session id；`via == "runner"` 要是也算数，runner 就会把自家的
+/// 子进程挡在门外。
+///
+/// **所以这个函数挡不住 runner，别指望它去做那件事**（#14 的原话是「复用 next 的
+/// held_by_other 判断」，照抄会得到一个看起来对、实际不挡的补丁）。实测四种在场组合：
+///
+/// | `in_progress` 的持有者 | 另一个会话问 `next` |
+/// |---|---|
+/// | `via=runner` / 任意 session | 放行——就是上面这条 |
+/// | `via=next` / 别人的 session | **挡住**：这道防线唯一真正生效的情形 |
+/// | `via=next` / 没有 session   | 放行——见下面「分不出是谁就不拦」 |
+/// | `via=next` / 我自己          | 放行 |
+///
+/// 「runner 在跑的时候别催交互会话」要用另一个判据：`daemon::running()`。
+/// 那个判据不会误伤 runner 自己的子进程，因为子进程在 `cmd_hook_stop` 开头就被
+/// `ZLOOP_RUNNER` 环境变量挡下、提前返回了，走不到那一步。
 ///
 /// `policy.stale_after_min` 决定"多久没动静就算被丢下了"——过期的派活照旧可以重派，
 /// 设成 0 等于关掉这个保护。
