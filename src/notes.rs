@@ -25,6 +25,12 @@ pub const NOTES_FILE: &str = "NOTES.md";
 /// `zloop context` 每轮带的**经验**条数（约定不受这个限制）；
 /// `reflect` 的体检按同一个数判断"有多少条模型永远看不到"。
 pub const WINDOW: usize = 5;
+/// 约定**不轮换**，所以没有窗口能替它兜底：写多少条，就每轮全量占多少篇幅。
+/// 超过这个数 `reflect` 的体检会提一句（`zloop reflect --max-rules N` 可调）。
+///
+/// 为什么是 10：交接包默认预算 4000 字，十来条约定已经吃掉小一成，
+/// 而挤掉的是"待办""经验""怎么继续"这些会被从尾部裁掉的节。
+pub const RULE_LIMIT: usize = 10;
 
 pub const RULES_HEAD: &str = "## 约定（每轮都带）";
 pub const LESSONS_HEAD: &str = "## 经验（最近 5 条会带）";

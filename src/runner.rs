@@ -555,7 +555,7 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
             let text = format!(
                 "{}\n\n---\n\n**这一轮由 zloop runner 无头驱动，没有人在旁边点头**：所以只输出建议清单，\
                  **不要**运行 `zloop reflect --apply`，也不要改任何代码或 todo。你的输出会原样记进账本，等人回来看。\n",
-                crate::reflect::packet(&st, root, crate::notes::WINDOW)
+                crate::reflect::packet(&st, root, crate::notes::WINDOW, crate::notes::RULE_LIMIT)
             );
             journal_append(root, &json!({"event": "reflect", "after_round": rounds_done, "at": state::now_iso()}))?;
             println!("runner: 第 {rounds_done} 轮之后插一轮回看（不占轮次）");

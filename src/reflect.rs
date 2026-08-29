@@ -34,9 +34,22 @@ fn similar(a: &str, b: &str) -> bool {
     common * 10 >= x.len().min(y.len()) * 8
 }
 
-/// 机械体检：能用代码判断的那几条（重复、被交接包挡在窗口外的数量）。
-pub fn checks(notes: &[String], window: usize) -> Vec<String> {
+/// 机械体检：能用代码判断的那几条（约定太多、经验重复、被交接包挡在窗口外的数量）。
+///
+/// 三项都只给**候选**，判断仍旧是模型的事、落地仍旧要人点头。
+pub fn checks(n: &crate::notes::Notes, window: usize, rule_limit: usize) -> Vec<String> {
     let mut out = Vec::new();
+    // 约定这一层没有窗口兜底：它每轮全量进交接包，攒多了就是在挤别的节。
+    // 所以除了条数，把它实际占的篇幅也算出来——「11 条」听着不多，「占默认预算 8%」才是代价。
+    if n.rules.len() > rule_limit {
+        let chars: usize = n.rules.iter().map(|r| r.chars().count() + 3).sum(); // "- " + 换行
+        out.push(format!(
+            "共 {} 条约定，超过 {rule_limit} 条——约定不轮换，每轮全量进交接包（约 {chars} 字，占默认预算 {}%），挑几条降回经验或删掉",
+            n.rules.len(),
+            chars * 100 / crate::context::DEFAULT_BUDGET
+        ));
+    }
+    let notes: Vec<&str> = n.lessons.iter().map(|(_, t)| t.as_str()).collect();
     for (i, a) in notes.iter().enumerate() {
         for (j, b) in notes.iter().enumerate().skip(i + 1) {
             if similar(a, b) {
@@ -96,9 +109,8 @@ pub fn pair_feedback(state: &State, root: &Path) -> Vec<Pair> {
 }
 
 /// 反思材料包：给模型看的一整页。
-pub fn packet(state: &State, root: &Path, window: usize) -> String {
+pub fn packet(state: &State, root: &Path, window: usize, rule_limit: usize) -> String {
     let n = crate::notes::read(root);
-    let notes: Vec<String> = n.lessons.iter().map(|(_, t)| t.clone()).collect();
     let s = stats::compute(state);
     let mut out = String::new();
 
@@ -165,7 +177,7 @@ pub fn packet(state: &State, root: &Path, window: usize) -> String {
         }
     }
 
-    let checks = checks(&notes, window);
+    let checks = checks(&n, window, rule_limit);
     if !checks.is_empty() {
         out.push_str("\n## 机械体检（代码能看出来的）\n\n");
         for c in &checks {
@@ -173,13 +185,13 @@ pub fn packet(state: &State, root: &Path, window: usize) -> String {
         }
     }
 
-    out.push_str(
+    out.push_str(&format!(
         "\n## 你要做的\n\n\
          1. 逐条判断：该**升格成约定**（每轮都带、不轮换）、**留作经验**（会轮换）、**合并**，还是**删掉**。\n\
          \x20  - 升格的标准：这条是不是**每一轮都该照做**的规矩（比如「done 之前先跑测试」）。\
          只在某个阶段有用的观察，留作经验就行。\n\
          \x20  - 反复踩的坑、用户反复说过的同一件事，通常就是该升格的那种。\n\
-         \x20  - 约定要少：它每轮都占交接包的篇幅，超过十来条就该反省是不是塞了不该塞的。\n\
+         \x20  - 约定要少：它每轮都占交接包的篇幅，超过 {rule_limit} 条就该反省是不是塞了不该塞的。\n\
          2. 把整理后的**完整清单**讲给用户看，说清每条为什么升格 / 为什么留 / 为什么删。\n\
          3. **人点头之后**才落地：把下面这个形状从 stdin 交给 `zloop reflect --apply`（旧文件会自动备份）：\n\n\
          \x20  ```\n\
@@ -190,6 +202,6 @@ pub fn packet(state: &State, root: &Path, window: usize) -> String {
          \x20  ```\n\n\
          \x20  不写小标题的话，全部按经验处理。人没点头就什么都不要写。\n\
          4. 这一轮不做任何 todo，也不要改代码。\n",
-    );
+    ));
     out
 }

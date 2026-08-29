@@ -143,6 +143,9 @@ pub enum Cmd {
         /// 从 stdin 读整理后的经验清单（一行一条）重写 .zloop/NOTES.md；旧文件自动备份
         #[arg(long)]
         apply: bool,
+        /// 约定超过几条就在体检里提一句（约定每轮全量进交接包，不轮换）
+        #[arg(long = "max-rules", default_value_t = crate::notes::RULE_LIMIT)]
+        max_rules: usize,
     },
     /// 这个目标跑得顺不顺：轮次、返工率、一次过、花费（`--json` 给脚本）
     Stats {
@@ -375,7 +378,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             print!("{}", crate::replan::packet(&state::load(&path)?));
             Ok(0)
         }
-        Cmd::Reflect { apply } => cmd_reflect(&root, &path, apply, style::Style::detect(cli.no_color)),
+        Cmd::Reflect { apply, max_rules } => cmd_reflect(&root, &path, apply, max_rules, style::Style::detect(cli.no_color)),
         Cmd::Stats { json } => cmd_stats(&path, json, style::Style::detect(cli.no_color)),
         Cmd::Doc { todo, all, last, since, until, out } => cmd_doc(&root, &path, todo, all, last, since, until, out),
         Cmd::Edit { id, text, status, priority, blocked_by, acceptance } => {
@@ -1556,10 +1559,10 @@ fn cmd_log(root: &Path, todo: Option<String>, last: usize, show: Option<String>)
 ///
 /// zloop 自己不产生判断：它只汇材料 + 做几项机械体检。判断是模型的事，落地要人点头
 /// （Warp 那边人审的形态是 PR review，zloop 没有 PR，所以是 `--apply` 这一步）。
-fn cmd_reflect(root: &Path, path: &Path, apply: bool, c: style::Style) -> Result<i32> {
+fn cmd_reflect(root: &Path, path: &Path, apply: bool, max_rules: usize, c: style::Style) -> Result<i32> {
     let st = state::load(path)?;
     if !apply {
-        print!("{}", crate::reflect::packet(&st, root, crate::notes::WINDOW));
+        print!("{}", crate::reflect::packet(&st, root, crate::notes::WINDOW, max_rules));
         return Ok(0);
     }
     let mut raw = String::new();

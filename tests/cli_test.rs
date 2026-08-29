@@ -1484,6 +1484,53 @@ fn reflect_pairs_what_i_said_with_what_you_replied() {
     assert!(tail.contains("这条反馈之前没有已写回的轮次"), "{}", o.out);
 }
 
+/// 第三项机械体检：约定这一层也得有人管。
+///
+/// 经验有窗口兜底（写多了老的自己滚出去），约定**不轮换**——写多少条就每轮全量占多少篇幅，
+/// 挤掉的是交接包尾部那些会被裁掉的节。所以条数超过阈值时得提一句，阈值本身要能调。
+#[test]
+fn reflect_flags_too_many_rules_and_the_threshold_is_tunable() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "约定攒多了"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a"], None, &[]);
+    for i in 1..=10 {
+        zloop(d, &["remember", "--rule", &format!("第 {i} 条约定，随便写点什么凑够长度")], None, &[]);
+    }
+
+    // 正好卡在默认阈值（10）上：不出声
+    let o = zloop(d, &["reflect"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(!o.out.contains("条约定，超过"), "没超阈值就一声不吭: {}", o.out);
+    // 阈值可调：调低就该出声，即使条数没变
+    let o = zloop(d, &["reflect", "--max-rules", "8"], None, &[]);
+    assert!(o.out.contains("## 机械体检"), "{}", o.out);
+    assert!(o.out.contains("共 10 条约定，超过 8 条"), "{}", o.out);
+
+    // 再加一条就越过默认阈值，不给 flag 也会提
+    zloop(d, &["remember", "--rule", "第 11 条约定，随便写点什么凑够长度"], None, &[]);
+    let o = zloop(d, &["reflect"], None, &[]);
+    assert!(o.out.contains("共 11 条约定，超过 10 条"), "{}", o.out);
+    // 提示要说清代价：约定不轮换、每轮全量进交接包，占掉多少篇幅
+    assert!(o.out.contains("每轮全量进交接包"), "{}", o.out);
+    let hit = o.out.lines().find(|l| l.contains("条约定，超过")).unwrap().to_string();
+    assert!(hit.contains("约 233 字，占默认预算 5%"), "篇幅要算成真数字: {hit}");
+    // 阈值往上调也认：调到 11 就不该再提
+    let o = zloop(d, &["reflect", "--max-rules", "11"], None, &[]);
+    assert!(!o.out.contains("条约定，超过"), "阈值调高就不该再提: {}", o.out);
+    // 「你要做的」里那句劝也跟着阈值走，不再写死"十来条"
+    assert!(o.out.contains("超过 11 条就该反省"), "{}", o.out);
+
+    // 体检是只读的：提了这一句也不该动 NOTES
+    assert_eq!(zloop::notes::read(d).rules.len(), 11);
+
+    // 经验那两项体检不受影响：约定超标的同时照样认出重复的经验
+    zloop(d, &["remember", "bench.sh 要在 release 模式下跑"], None, &[]);
+    zloop(d, &["remember", "bench 脚本必须用 release 模式跑，debug 差 3 倍"], None, &[]);
+    let o = zloop(d, &["reflect"], None, &[]);
+    assert!(o.out.contains("共 11 条约定，超过 10 条") && o.out.contains("像是同一件事"), "三项体检互不干扰: {}", o.out);
+}
+
 /// `remember --rule`：不绕一整轮 reflect 也能顺手钉一条约定。
 #[test]
 fn remember_rule_pins_a_convention_without_a_reflect_cycle() {
