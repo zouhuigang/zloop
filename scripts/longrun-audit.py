@@ -6,6 +6,11 @@
 
   1. runner journal 的 begin/end 序列  —— 只有 runner 每轮才写，交互轮次不写
   2. 墙钟跨度                          —— 第一个 begin 到最后一个 end
+
+**窗口取最近一次运行，不是整个 journal**：journal 是追加的，同一个项目里 runner
+起停过很多次。拿整份来量，会把上一次运行之前的人工 tick 和提交算进这一次的窗口，
+于是「无人干预」这条必然挂掉——踩过：一次真跑了 4 小时的运行被判成 ❌，
+挂掉的是长跑**开始之前**的 6 条人工 tick。要看累计口径用 --all。
   3. 窗口内没有人工 tick               —— 有人插手就不是"无人值守"
   4. 会话 resume 链                    —— 第 2 轮起接着上一轮的会话，证明跨轮连续
   5. 宿主报的 cost / duration          —— 真的调过 claude -p 才有
@@ -38,6 +43,23 @@ def load_journal(root):
                 pass
     return out
 
+def runs(journal):
+    """把 journal 切成一次次运行：`awake_on` / `restart` 是开机标记，各起一段。
+
+    只保留跑过整轮（有 begin 也有 end）的段——没有 begin 的段是空跑，
+    比如 `zloop start` 起来发现没活可做立刻 `stop`，那种不该被当成一次运行。
+    """
+    marks = [i for i, e in enumerate(journal) if e.get("event") in ("awake_on", "restart")]
+    if not marks:
+        return [journal] if journal else []
+    if marks[0] != 0:
+        marks.insert(0, 0)
+    segs = [journal[a:b] for a, b in zip(marks, marks[1:] + [len(journal)])]
+    real = [s for s in segs
+            if any(e.get("event") == "begin" for e in s) and any(e.get("event") == "end" for e in s)]
+    return real or segs
+
+
 def load_states(root):
     """当前目标 + 停放的 + 归档的，全都算——长跑可能发生在任何一个目标上。"""
     import glob
@@ -68,10 +90,18 @@ def main():
     ap.add_argument("--dir", default=".")
     ap.add_argument("--rounds", type=int, default=6, help="至少几轮由 runner 驱动")
     ap.add_argument("--hours", type=float, default=2.0, help="至少多少小时墙钟")
+    ap.add_argument("--all", action="store_true",
+                    help="量整个 journal 的累计口径（默认只量最近一次运行）")
     args = ap.parse_args()
     root = os.path.abspath(args.dir)
 
-    journal = load_journal(root)
+    whole = load_journal(root)
+    sessions = runs(whole)
+    if args.all or not sessions:
+        journal, which = whole, ""
+    else:
+        journal = sessions[-1]
+        which = f"（第 {len(sessions)} 次运行，共 {len(sessions)} 次；--all 看累计）" if len(sessions) > 1 else ""
     begins = [e for e in journal if e.get("event") == "begin"]
     ends = [e for e in journal if e.get("event") == "end"]
     checks = []
@@ -82,7 +112,9 @@ def main():
 
     # 2) 墙钟跨度
     span_h, t0, t1 = 0.0, None, None
-    stamps = [iso(e["at"]) for e in journal if e.get("at") and iso(e["at"])]
+    # 只认 begin/end 的时刻：段尾的 sleep/awake_off/stop 都在最后一轮**之后**，
+    # 把它们算进跨度等于给自己送时间
+    stamps = [iso(e["at"]) for e in begins + ends if e.get("at") and iso(e["at"])]
     if stamps:
         t0, t1 = min(stamps), max(stamps)
         span_h = (t1 - t0).total_seconds() / 3600
@@ -125,7 +157,7 @@ def main():
     w = max(dw(c[0]) for c in checks)
     print(f"\n  长程自检 · {root}")
     if t0 and t1:
-        print(f"  窗口：{t0:%Y-%m-%d %H:%M} → {t1:%Y-%m-%d %H:%M}\n")
+        print(f"  窗口：{t0:%Y-%m-%d %H:%M} → {t1:%Y-%m-%d %H:%M} {which}\n")
     else:
         print("  窗口：没有 runner journal —— 这个项目里 runner 从没跑过\n")
     for name, ok, detail in checks:
