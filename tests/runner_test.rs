@@ -837,6 +837,99 @@ esac"#,
 }
 
 #[test]
+fn auto_replan_swaps_the_route_mid_run_and_keeps_going() {
+    // 用户要的那一幕，端到端：5 条 todo，做到第 2 条发现整条路线的前提没了，
+    // 重估那一轮**真的把清单换掉**，然后接着把新清单跑完。
+    let d = project(&["[P0] 量最慢三处 :: 有数", "[P0] 加缓存 :: 快 500ms", "[P0] 复测 :: 基准过",
+                      "[P1] 补基准 :: bench 跑得出", "[P1] 写文档 :: README 有一节"]);
+    let mark = tempfile::tempdir().unwrap().keep();
+    // 干活轮次：第 2 条写回时说「后续走不通」；重估轮次：真的调 replan --apply
+    let fake = fake_host(
+        r#"case "$2" in
+  *"重估一次"*)
+     echo "$2" > "$TMPDIR_MARK/replan-prompt"
+     if [ -f "$TMPDIR_MARK/replanned" ]; then
+       echo '{"session_id":"rp","is_error":false,"result":"不用再改了"}'; exit 0
+     fi
+     touch "$TMPDIR_MARK/replanned"
+     printf '%s\n'        '[P0] 量反序列化耗时 :: 有逐字段表'        '[P0] 换零拷贝路径 :: 快 300ms'        '[P0] 惰性加载 :: 只解析用得到的'        '[P1] 复测 :: 端到端 1 秒内'        | zloop replan --apply --why "实测瓶颈在反序列化，加缓存整条路线作废" >> "$TMPDIR_MARK/apply.log" 2>&1
+     echo '{"session_id":"rp","is_error":false,"result":"照新现状重排了"}' ;;
+  *) id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+     if [ "$id" = t2 ]; then
+       zloop done "$id" --note "只省 30ms" --approach "LRU" --no-doc          --rethink "瓶颈在反序列化，后三条前提没了" >/dev/null 2>&1
+     else
+       zloop done "$id" --note ok --approach "假宿主一轮" --no-doc >/dev/null 2>&1
+     fi
+     echo '{"session_id":"s","is_error":false,"result":"ok"}' ;;
+esac"#,
+    );
+    let (code, out, err) = run(
+        &d,
+        &["run", "--host", "claude", "--fast", "--auto-replan", "--max-rounds", "8"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    let apply_log = fs::read_to_string(mark.join("apply.log")).unwrap_or_default();
+    assert!(apply_log.contains("replan applied"), "重估那一轮该真的落地: {apply_log}");
+    assert!(out.contains("计划改了"), "runner 该看出计划动了: {out}");
+
+    let st = state::load(&state::state_path(&d)).unwrap();
+    // 做过的两条原样留着，被换掉的三条不在了，新路线跑完了
+    assert_eq!(st.todos.iter().filter(|t| t.id == "t1" || t.id == "t2").filter(|t| t.status == "done").count(), 2,
+               "做过的原样留着: {:?}", st.todos);
+    assert!(!st.todos.iter().any(|t| t.id == "t3"), "被换掉的不该还在: {:?}", st.todos);
+    assert!(st.todos.iter().any(|t| t.text.contains("零拷贝")), "新路线排上了: {:?}", st.todos);
+    assert!(st.todos.iter().all(|t| matches!(t.status.as_str(), "done" | "deferred")), "新清单也跑完了: {:?}", st.todos);
+    assert_eq!(st.goal.text, "runner test", "目标文字不许被改");
+
+    // journal 里留得下"计划在第几轮被改成几条"
+    let applied: Vec<_> = journal(&d).into_iter().filter(|e| e["event"] == "replan_applied").collect();
+    assert_eq!(applied.len(), 1, "改了一次: {applied:?}");
+    assert!(applied[0]["open_after"].as_u64().unwrap() > applied[0]["open_before"].as_u64().unwrap(),
+            "3 条换成 4 条: {applied:?}");
+
+    // 提示词里要给出落地的命令和护栏，否则模型不知道怎么落地
+    let prompt = fs::read_to_string(mark.join("replan-prompt")).unwrap();
+    assert!(prompt.contains("zloop replan --apply"), "{prompt}");
+    assert!(prompt.contains("不改是完全合格的结论"), "别为了改而改: {prompt}");
+    assert!(prompt.contains("单次运行最多"), "要让它知道有上限: {prompt}");
+}
+
+#[test]
+fn without_the_flag_a_replan_round_still_never_touches_the_plan() {
+    // 默认关：行为一字不变——哪怕宿主试图落地也不该有落地的入口被提到
+    let d = project(&["[P0] a :: 验a", "[P0] b :: 验b", "[P0] c :: 验c"]);
+    let mark = tempfile::tempdir().unwrap().keep();
+    let fake = fake_host(
+        r#"case "$2" in
+  *"重估一次"*)
+     echo "$2" > "$TMPDIR_MARK/replan-prompt"
+     printf '%s\n' '[P0] 偷偷换掉 :: 验' | zloop replan --apply --why "不守规矩" >> "$TMPDIR_MARK/apply.log" 2>&1
+     echo '{"session_id":"rp","is_error":false,"result":"建议：换个路线"}' ;;
+  *) id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+     zloop done "$id" --note ok --approach x --no-doc --rethink "后续走不通" >/dev/null 2>&1
+     echo '{"session_id":"s","is_error":false,"result":"ok"}' ;;
+esac"#,
+    );
+    let (code, out, err) = run(
+        &d,
+        &["run", "--host", "claude", "--fast", "--max-rounds", "3"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    let prompt = fs::read_to_string(mark.join("replan-prompt")).unwrap();
+    assert!(prompt.contains("不要**运行任何会改 todo 的命令"), "默认还是红线那套: {prompt}");
+    assert!(!prompt.contains("zloop replan --apply"), "默认不该告诉它怎么落地: {prompt}");
+    assert!(out.contains("没有动任何 todo"), "{out}");
+    assert!(!out.contains("计划改了"), "{out}");
+    // 宿主抗命硬跑了 --apply —— 该被**代码**挡住，不是被提示词劝住
+    let applied = fs::read_to_string(mark.join("apply.log")).unwrap_or_default();
+    assert!(applied.contains("护栏「无头默认不改计划」"), "抗命的 --apply 要被拒绝并说清原因: {applied}");
+    assert!(!applied.contains("replan applied"), "一次都不许成功: {applied}");
+    assert!(journal(&d).into_iter().all(|e| e["event"] != "replan_applied"), "默认模式不该记落地事件");
+}
+
+#[test]
 fn a_headless_replan_round_suggests_but_never_edits_the_plan() {
     let d = project(&["[P0] 会拖的一条", "[P0] 另一条", "[P1] 第三条"]);
     let mark = tempfile::tempdir().unwrap().keep();

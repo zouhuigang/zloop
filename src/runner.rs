@@ -101,6 +101,16 @@ pub struct Options {
     /// （见 `docs/ADAPTIVE-REPLAN.md` §2——每轮都重规划会制造计划抖动）。
     /// 无头模式下没人点头，所以它**只把建议记进账本，绝不自己改 todo**。
     pub no_replan: bool,
+    /// 让重估轮次**真的改计划**（默认关）。
+    ///
+    /// 关着的时候（默认）重估只把建议记进账本，等人回来看——这是 zloop 一直以来的红线。
+    /// 打开之后，重估那一轮被允许把新清单交给 `zloop replan --apply`，护栏由
+    /// `replan::apply` 在代码里强制（见 `docs/ADAPTIVE-REPLAN.md` §8）。
+    ///
+    /// 这是唯一一处 agent 无人看管地改自己的待办，所以额外压两条闸：
+    /// 单次运行最多改 `MAX_AUTO_REPLANS` 次；连着两次都把清单改长就算发散。
+    /// 两者任一触顶都**停机等人**，而不是安静地接着跑。
+    pub auto_replan: bool,
     /// 每 N 个 todo 轮次插一轮「回看」；0 = 关。
     ///
     /// 形状照 Warp 的 scheduled agent：**按计划跑一段不同的 prompt**，不是新子系统
@@ -111,6 +121,13 @@ pub struct Options {
 }
 
 const JOURNAL: &str = "runner/journal.jsonl";
+
+/// 单次运行最多自主改几次计划。
+///
+/// 文献那条"far fewer replans"说的就是这个：能改计划的循环最容易死在
+/// replan → 新 todo → replan → …… 永不收敛上。三次之后还没走上正轨，
+/// 多半不是计划的问题，该让人看一眼。
+pub const MAX_AUTO_REPLANS: u32 = 3;
 const RATE_LIMIT_MARKERS: [&str; 8] =
     ["rate limit", "rate_limit", "overloaded", "429", "capacity", "quota", "too many requests", "usage limit"];
 
@@ -177,7 +194,7 @@ fn notify(root: &Path, st: &State, kind: &str, detail: &str) {
 fn preflight(root: &Path, cmd: &str, timeout: Duration) -> std::result::Result<String, String> {
     let mut c = Command::new("sh");
     c.arg("-c").arg(cmd).current_dir(root);
-    isolate_child_env(&mut c);
+    isolate_child_env(&mut c, false);
     match run_with_timeout(c, timeout, "sh") {
         Ok(cap) => {
             let combined = format!("{}\n{}", cap.stdout, cap.stderr);
@@ -272,11 +289,22 @@ fn pick_session(state: &State, host: Host, todo_id: &str, mode: ResumeMode) -> O
 /// to find a `zloop` binary. Our own directory is *appended* to PATH as a fallback:
 /// prepending it would shadow the user's `claude` / `codex` when zloop lives next
 /// to them (e.g. all in `~/.local/bin`).
-fn isolate_child_env(cmd: &mut Command) {
+/// runner 允许这一轮改计划时，额外放行的环境变量（见 `isolate_child_env`）。
+pub const AUTO_REPLAN_ENV: &str = "ZLOOP_AUTO_REPLAN";
+
+fn isolate_child_env(cmd: &mut Command, may_replan: bool) {
     cmd.env_remove("CLAUDE_CODE_SESSION_ID").env_remove("CLAUDECODE").env_remove("CODEX_THREAD_ID");
     // `claude -p` loads the project's hooks, including our own Stop hook. Mark the child so
     // `zloop hook-stop` lets the host exit after exactly one todo instead of chaining them.
     cmd.env("ZLOOP_RUNNER", "1");
+    // 默认情况下无头轮次**不许改计划**。这条红线以前只写在提示词里——而这整个功能的前提
+    // 就是"提示词管不住模型"（回归测试里那个假宿主真的抗命跑了一次 `replan --apply`，
+    // 而且成功了）。所以改成代码闸：子进程里没有这个变量，`replan --apply` 直接拒绝。
+    if may_replan {
+        cmd.env(AUTO_REPLAN_ENV, "1");
+    } else {
+        cmd.env_remove(AUTO_REPLAN_ENV);
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let old = std::env::var("PATH").unwrap_or_default();
@@ -365,7 +393,7 @@ fn looks_rate_limited(text: &str) -> bool {
     RATE_LIMIT_MARKERS.iter().any(|m| lower.contains(m))
 }
 
-fn run_claude(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, timeout: Duration) -> Result<HostResult> {
+fn run_claude(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, timeout: Duration, may_replan: bool) -> Result<HostResult> {
     let mut cmd = Command::new("claude");
     cmd.current_dir(root).arg("-p").arg(prompt).arg("--output-format").arg("json");
     if let Some(sid) = resume {
@@ -380,7 +408,7 @@ fn run_claude(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, t
         cmd.arg("--allowedTools").arg("Bash(zloop:*),Read,Edit,Write,MultiEdit,Glob,Grep");
         cmd.arg("--permission-mode").arg("acceptEdits");
     }
-    isolate_child_env(&mut cmd);
+    isolate_child_env(&mut cmd, may_replan);
     let started = Instant::now();
     let cap = run_with_timeout(cmd, timeout, "claude")?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -405,7 +433,7 @@ fn run_claude(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, t
     })
 }
 
-fn run_codex(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, timeout: Duration) -> Result<HostResult> {
+fn run_codex(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, timeout: Duration, may_replan: bool) -> Result<HostResult> {
     let last_msg = root.join(state::STATE_DIR).join("runner").join("codex-last-message.txt");
     if let Some(p) = last_msg.parent() {
         fs::create_dir_all(p)?;
@@ -423,7 +451,7 @@ fn run_codex(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, ti
         cmd.arg("--sandbox").arg("workspace-write");
     }
     cmd.arg(prompt);
-    isolate_child_env(&mut cmd);
+    isolate_child_env(&mut cmd, may_replan);
     let started = Instant::now();
     let cap = run_with_timeout(cmd, timeout, "codex")?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -539,6 +567,10 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
     // 触发，占掉全程花费的两成多。所以对它按**边沿**处理——有新的 todo 开始等人才响。
     // 不是「只响一次」：那次实测里第 16 轮只给出判断、第 17 轮才产出重算窗口的证据表。
     let mut replan_blocked: Option<String> = None;
+    // 自主改计划的账：改过几次、上一次改完还剩几条（用来看清单是不是在越改越长）
+    let mut auto_replans: u32 = 0;
+    let mut grew_in_a_row: u32 = 0;
+    let mut stop_after_replan: Option<String> = None;
     let mut notified: Option<String> = None; // dedupe: one notification per distinct wait/limit situation
     loop {
         if stop_requested() {
@@ -578,8 +610,8 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
             journal_append(root, &json!({"event": "reflect", "after_round": rounds_done, "at": state::now_iso()}))?;
             println!("runner: 第 {rounds_done} 轮之后插一轮回看（不占轮次）");
             let result = match opts.host {
-                Host::Codex => run_codex(root, &text, None, &opts, timeout)?,
-                _ => run_claude(root, &text, None, &opts, timeout)?,
+                Host::Codex => run_codex(root, &text, None, &opts, timeout, false)?,
+                _ => run_claude(root, &text, None, &opts, timeout, false)?,
             };
             let who = HostSession { host: opts.host, session: result.session.clone() };
             // 回看不写回账本：这份全文就是它唯一的产物，一个字都不能少。
@@ -665,8 +697,8 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
         );
 
         let result = match opts.host {
-            Host::Codex => run_codex(root, &text, resume_sid.as_deref(), &opts, timeout)?,
-            _ => run_claude(root, &text, resume_sid.as_deref(), &opts, timeout)?,
+            Host::Codex => run_codex(root, &text, resume_sid.as_deref(), &opts, timeout, false)?,
+            _ => run_claude(root, &text, resume_sid.as_deref(), &opts, timeout, false)?,
         };
 
         // Settlement: did the host write back?
@@ -777,16 +809,31 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 replan_blocked = blocked_now;
                 let why: Vec<String> = sig.iter().map(|s| s.detail.clone()).collect();
                 println!("runner: 第 {round_no} 轮之后重估计划（{}）", why.join(" · "));
-                let text = format!(
-                    "{}\n\n---\n\n**这一轮由 zloop runner 无头驱动，没有人在旁边点头**：只输出建议清单，\
+                let open_before = crate::todo::remaining(&st);
+                let tail = if opts.auto_replan {
+                    format!(
+                        "\n\n---\n\n**这一轮由 zloop runner 无头驱动，`--auto-replan` 开着：你可以真的改计划。**\n\n\
+                         想好之后，把**新的待办清单**（只列还没做的，一行一条 `[P0] 文本 :: 怎么验`）\
+                         从 stdin 交给：\n\n\
+                         \x20   `printf '%s\\n' '[P0] …' '[P1] …' | zloop replan --apply --why \"<为什么这么改>\"`\n\n\
+                         做完的和等人回话的会自动留着，你不用列。护栏由代码强制，违反会整体拒绝并告诉你是哪条：\
+                         清单不能空、每条都要带 `:: 验收`、`--why` 必填、规模最多放大到三倍多一点（且 ≤ 30 条）。\n\n\
+                         **判断不用改就什么都别跑**——不改是完全合格的结论。这是第 {} 次自主改计划，\
+                         单次运行最多 {} 次，用完会停机等人。别改代码，只改计划。\n",
+                        auto_replans + 1,
+                        MAX_AUTO_REPLANS
+                    )
+                } else {
+                    "\n\n---\n\n**这一轮由 zloop runner 无头驱动，没有人在旁边点头**：只输出建议清单，\
                      **不要**运行任何会改 todo 的命令（plan / edit / done 一律不要），也不要改代码。\
-                     你的输出会原样记进账本，等人回来看。\n",
-                    crate::replan::packet(&st)
-                );
+                     你的输出会原样记进账本，等人回来看。\n"
+                        .to_string()
+                };
+                let text = format!("{}{tail}", crate::replan::packet(&st));
                 journal_append(root, &json!({"event": "replan", "round": round_no, "signals": why, "at": state::now_iso()}))?;
                 let result = match opts.host {
-                    Host::Codex => run_codex(root, &text, None, &opts, timeout)?,
-                    _ => run_claude(root, &text, None, &opts, timeout)?,
+                    Host::Codex => run_codex(root, &text, None, &opts, timeout, opts.auto_replan)?,
+                    _ => run_claude(root, &text, None, &opts, timeout, opts.auto_replan)?,
                 };
                 let who = HostSession { host: opts.host, session: result.session.clone() };
                 // 同上：重估也不写回账本，全文落盘。
@@ -806,7 +853,41 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                     }
                     Ok(t)
                 })?;
-                println!("runner: 重估建议写进账本 · {rel}（没有动任何 todo）");
+                // 计划到底动没动，不听宿主自称，看账本。
+                let after = state::load(&path)?;
+                let open_after = crate::todo::remaining(&after);
+                let changed = after.todos.iter().filter(|t| !crate::todo::is_terminal(&t.status)).any(|t| {
+                    !st.todos.iter().any(|o| o.id == t.id)
+                });
+                if !changed {
+                    println!("runner: 重估建议写进账本 · {rel}（没有动任何 todo）");
+                } else {
+                    auto_replans += 1;
+                    grew_in_a_row = if open_after > open_before { grew_in_a_row + 1 } else { 0 };
+                    println!(
+                        "runner: 计划改了 · {open_before} 条 → {open_after} 条（第 {auto_replans}/{MAX_AUTO_REPLANS} 次自主重排）· {rel}"
+                    );
+                    journal_append(
+                        root,
+                        &json!({"event": "replan_applied", "round": round_no, "open_before": open_before,
+                                "open_after": open_after, "nth": auto_replans, "at": state::now_iso()}),
+                    )?;
+                    // 两条闸，任一触顶就**停在人面前**，别安静地接着跑。
+                    if grew_in_a_row >= 2 {
+                        stop_after_replan = Some(format!(
+                            "连着 {grew_in_a_row} 次重排都把清单改长了（这次 {open_before} → {open_after}）——在发散，不是在收敛"
+                        ));
+                    } else if auto_replans >= MAX_AUTO_REPLANS {
+                        stop_after_replan =
+                            Some(format!("自主改了 {auto_replans} 次计划还没走上正轨，多半不是计划的问题"));
+                    }
+                }
+                if let Some(reason) = stop_after_replan.take() {
+                    println!("runner: 停下来等人 —— {reason}");
+                    journal_append(root, &json!({"event": "replan_giveup", "round": round_no, "why": reason, "at": state::now_iso()}))?;
+                    stop(root, "replan_diverged")?;
+                    return Ok(0);
+                }
             }
         }
 

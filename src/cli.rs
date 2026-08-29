@@ -338,6 +338,10 @@ pub struct RunArgs {
     /// 关掉「写回之后按信号重估计划」（默认开；命中信号才跑，只产出建议不改 todo）
     #[arg(long = "no-replan")]
     pub no_replan: bool,
+    /// 让重估那一轮**真的改计划**（默认关）。护栏在代码里强制；
+    /// 单次运行最多改几次、清单连着变长就停机等人
+    #[arg(long = "auto-replan")]
+    pub auto_replan: bool,
 }
 
 impl RunArgs {
@@ -355,6 +359,7 @@ impl RunArgs {
             keep_awake: !self.no_keep_awake,
             reflect_every: self.reflect_every,
             no_replan: self.no_replan,
+            auto_replan: self.auto_replan,
         }
     }
 
@@ -2021,6 +2026,17 @@ fn cmd_replan(root: &Path, path: &Path, apply: bool, why: Option<String>) -> Res
     if !apply {
         print!("{}", crate::replan::packet(&state::load(path)?));
         return Ok(0);
+    }
+    // 无头轮次里默认**不许**改计划。这条红线以前只写在提示词里，而这整个功能的前提就是
+    // "提示词管不住模型"——回归测试里那个假宿主真的抗命跑了一次 `--apply` 并且成功了。
+    // runner 只在 `--auto-replan` 打开、且正是重估那一轮时，才给子进程放行这个变量。
+    if std::env::var_os("ZLOOP_RUNNER").is_some() && std::env::var_os(crate::runner::AUTO_REPLAN_ENV).is_none() {
+        eprintln!(
+            "replan --apply 拒绝了这次改动：\n\
+             护栏「无头默认不改计划」：这一轮由 runner 驱动，但没开 --auto-replan（或这不是重估轮次）。\n\
+             把建议写进输出就行，人会看到；真要让它自己改，起 runner 时加 --auto-replan。"
+        );
+        return Ok(2);
     }
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw)?;
