@@ -28,7 +28,8 @@ pub const HOOK_COMMAND: &str = "zloop hook-stop";
 
 const USER_BLOCK: &str = r#"
 <!-- zloop:user -->
-<!-- 这行以下归你：`zloop install` 不会动它。项目特有的约定、反复要提醒模型的话，写在这里。 -->
+<!-- 这行以下归你：`zloop install` 不会动它。 -->
+<!-- 这份 skill 是全局的，所以只写跨项目都成立的话；某个仓库特有的规矩（"done 之前跑 cargo test"）该写进那个项目的 .zloop/NOTES.md 约定。 -->
 "#;
 
 /// 内容指纹：只回答"这段文字还是我写下的那段吗"，不做安全用途。

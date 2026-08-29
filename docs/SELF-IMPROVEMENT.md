@@ -427,6 +427,8 @@ Warp 的 skill 在**仓库**里（`.agents/skills/`），天然是项目级的�
   想"顺手钉一条规矩"的话还得绕一圈——一个 `remember --rule` 就能解决，没做，因为 t6 的验收没要求。
 - **跨项目不继承**：约定是项目级的（有意），全局 SKILL.md 的用户区仍然只能手改。
   Warp 那边靠 `skills-lock.json` 从 `common-skills` 仓库分发，那是团队规模的做法，zloop 不抄（§2）。
+  这条后来被当成**取舍**写进了 README（[边界：经验和约定都不跨项目](../README.md#边界经验和约定都不跨项目这是取舍不是缺陷)），
+  连"真要做的话最小形态长什么样"一起，见 [#9](https://github.com/zouhuigang/zloop/issues/9)。
 - **eval 集**依旧不做，理由见 §1.2 和 t1 的判断：单人单项目没有统计量。
 
 ## 验证
