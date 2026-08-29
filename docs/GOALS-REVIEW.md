@@ -23,7 +23,7 @@ F1 / F2 / F3 是同一条故障链的三段：怎么进去（F1、F2）、进去
 | F6 | 低 | 停放的目标在 `goal list` 里显示"进行中" | `goals.rs:93` |
 | F7 | 低 | headless 时 `goal list` 的图例说"▸ 是当前那个"，却没有任何一行带 ▸，也不给恢复指令 | `goals.rs:117` |
 | F8 | 低 | `sanitize_id` 先 trim 后截断，超长 id 可能以 `-` 结尾 | `goals.rs:50` |
-| F9 | 低 | `goal rm` 接受目标文字片段却不需要确认 | `goals.rs:258` |
+| F9 | 低 | ~~`goal rm` 接受目标文字片段却不需要确认~~ → 已做，见「F9 的处置（t17）」 | `goals.rs:258` |
 
 另有两条高危是在对照 loopx 时才找出来的，见下半篇：**L1** 写回落到错误的目标（`--force` 换目标后，
 在飞会话的 `done` 记到新目标头上，实测）、**L2** 同一条 todo 会被派给两个会话（`next` 无条件覆盖
@@ -454,7 +454,7 @@ F1–F9 全都是实现层面的疏漏，不是这个设计的必然代价——
 ## 还没修
 
 - ~~**F5（`zloop log` 跨目标串台）**~~ → 已修，见下面「F5 的修法」。
-- **F9（`goal rm` 靠文字片段匹配却不需要确认）**：文件搬进 `.zloop/archive/` 没有丢，优先级低。
+- ~~**F9（`goal rm` 靠文字片段匹配却不需要确认）**~~ → 已做，见下面「F9 的处置（t17）」。
 - ~~**L4（缺健康检查）**~~ → 已做，见下面 L4 的处置记录（`zloop doctor`）。
 - ~~**L3（锁超时不说是谁持锁）**~~ → 已做，见下面「L3 的处置（t16）」。
 - **L6（跨项目视图）**："可以更好"，不是错，处置是"写进文档而不是修"。
@@ -903,3 +903,74 @@ zloop: could not lock /private/tmp/ztest/.zloop/state.json.lock within 5.0s
 `state::set_operation` 是进程级的，所以这几条用例用一把 `Mutex` 串起来跑——并行跑会互相改掉操作名。
 
 `cargo test` 118 passed / 0 failed。
+
+---
+
+# F9 的处置（t17）：`goal rm` 猜出来的匹配要先问一句
+
+## 问题回顾
+
+`goal rm` 和 `goal switch` 共用一个 `resolve`，三档匹配：**id 精确 → id 前缀 → 目标文字包含**。
+`zloop goal rm 冷启动` 只要文字片段命中唯一，就直接把 `.zloop/goals/<id>.json` 搬进
+`.zloop/archive/`，**事后**才打印搬了谁。文件没丢，但这个动作没有 dry-run 也没有确认。
+
+真正的不对称在这里：`switch` 猜错了，再 `switch` 回去就行；`rm` 猜错了，那个目标从
+`goal list` 里消失，要去 `.zloop/archive/` 里按时间戳翻文件、手工搬回 `goals/` 才回得来。
+同一个 `resolve`，两种风险等级。
+
+## 改了什么
+
+| # | 修法 | 位置 |
+|---|---|---|
+| 1 | `resolve` 现在会说自己是靠哪一档对上的：`Match::{Id, IdPrefix, Text}`，`is_fuzzy()` = 不是精确 id | `goals.rs resolve_match`（`resolve` 退化成它的 wrapper，`switch` 不变） |
+| 2 | `archive` 改收 `&Row` 而不是 needle：对上了谁要先给用户看过，函数里再 resolve 一次就可能搬走另一个 | `goals.rs archive` |
+| 3 | "当前目标不能归档"拆成 `ensure_archivable`，在**问之前**先拒 | `goals.rs ensure_archivable` |
+| 4 | 猜出来的匹配：打印将要归档的（id、目标全文、状态、进度）+ 是按哪一档对上的 + 免问写法，然后等一句 `y` | `cli.rs cmd_goal` 的 `Rm` 分支 |
+| 5 | `--yes` / `-y` 跳过确认 | `cli.rs GoalCmd::Rm` |
+
+实测输出：
+
+```
+$ zloop goal rm 冷启动
+将要归档 [g1] 把冷启动降到 1 秒 · 进行中 0/0
+（"冷启动" 是按 目标文字片段 对上的，不是精确 id；免问：zloop goal rm g1 --yes）
+确认归档？ [y/N] n
+已取消，一个文件都没动          # 退出码 1
+
+$ zloop goal rm keep-awake      # 精确 id：一句都不问，和以前一模一样
+已归档 [keep-awake] 让 keep-awake 支持外接显示器 → …/.zloop/archive/…-keep-awake.json
+```
+
+## 三个决定，都不是默认写法
+
+**1）id 前缀也要问，不只是文字片段。** issue 的验收只点了文字片段。但"精确 id"这一档的意义是
+**用户准确说出了要动哪一个**，前缀不是——`goal rm g` 在只剩一个 `g` 开头的目标时会命中它，
+用户想的可能是"`g` 是我随手打的一半"。分界线画在"说清楚了 / 我替他猜的"，比画在"哪一档"更好解释。
+精确 id 的行为一个字节都没变，验收里"用精确 id 时保持现状不变"照旧。
+
+**2）不看 stdin 是不是终端。** 直觉写法是 `if stdin().is_terminal() { 问 } else { 直接干 }`，
+但那样等于：这条确认在所有脚本、所有 CI、所有测试里都不存在——最需要防手滑的批量场景反而全裸。
+而且这条路会变成**测不到**的路（测试进程的 stdin 是管道，永远走 else）。
+所以 `confirm` 无条件读一行 stdin，管道喂 `y\n` 和人手敲 `y` 走同一段代码。
+
+**3）EOF 不当成"默认不同意"。** stdin 直接 EOF（`</dev/null`、runner 里跑的）说明根本没人接话。
+悄悄退个非零码，调用方只会看到一个没解释的失败；所以这里 `bail` 并明说"这一步要确认，
+但 stdin 没有输入可读：用精确 id 重来，或者加 `--yes`"。三种退出码分得开：
+**0** 归档了 · **1** 用户说不 · **2** 报错（含没人接话、当前目标、匹配不到 / 匹配到多个）。
+
+## 回归测试（`tests/cli_test.rs`）
+
+`archiving_by_a_guessed_needle_asks_first_but_an_exact_id_does_not` 一条走完全部出口：
+
+| 断言 | 钉的是 |
+|---|---|
+| 文字片段 + stdin EOF | 退 2，先打印"将要归档 …"和 `--yes` 写法，`goal list` 一个不少，**连 `.zloop/archive/` 目录都不建** |
+| 答 `n` / 回车 / `别` | 三种都退 1、打印"已取消"、清单不变 |
+| 当前目标 + 片段 + `y` | 退 2 报"是当前目标"，且**没有**打印过"确认归档"——不能问完 y 再说其实不能归档 |
+| 文字片段 + `y` | 退 0，真搬走 |
+| id 前缀（`g`）| 也要问，且输出里说明是按"id 前缀"对上的 |
+| `--yes` + 片段 | 退 0 且不含"确认归档"（stdin 是空的，证明它根本没去读） |
+| 精确 id | 退 0，输出里既没有"将要归档"也没有"确认归档" |
+| 收尾 | `.zloop/archive/` 里正好 3 份 —— 三次都只是搬家，不是删除 |
+
+`cargo test`：119 passed / 0 failed。

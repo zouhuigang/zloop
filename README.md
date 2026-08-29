@@ -671,6 +671,8 @@ zloop goal list                  # 或 zloop goals：全部目标，▸ 是当�
 zloop goal switch keep-awake     # 按 id 切
 zloop goal switch 冷启动         # 也能按目标文字里的片段切（歧义时会让你说清）
 zloop goal rm keep-awake         # 归档：从 list 消失，文件搬到 .zloop/archive/
+zloop goal rm 冷启动             # 片段也能对上，但会先打出对上的是谁、等你敲 y
+zloop goal rm g1 --yes           # 脚本里免问（-y 同）
 ```
 
 ```
@@ -685,6 +687,7 @@ zloop goal rm keep-awake         # 归档：从 list 消失，文件搬到 .zloo
 
 - **id 怎么来**：从目标文字里的英文词拼（`让 keep-awake 支持外接显示器` → `keep-awake`），纯中文目标退到 `g1` / `g2`；也可以 `zloop goal new "…" --id my-slug` 自己指定。
 - **停放 ≠ 归档**：停放的还在 `goal list` 里、`goal switch` 可切回；归档的（`.zloop/archive/`）不在 list 里，只留给事后翻。`zloop init --force` 是归档式覆盖，**换目标别用它**。
+- **`goal rm` 猜出来的匹配要先问一句**：`switch` 和 `rm` 认的都是"id → id 前缀 → 目标文字片段"，但切错了再切回来就行，搬走一个目标不是。所以只有**精确 id** 免问；按前缀或文字片段对上时，先打印将要归档的是哪一个（id、目标全文、进度），再等一句 `y`——回车、`n`、别的都算不同意，退 1 且一个文件都不动。`--yes` / `-y` 跳过。stdin 读到 EOF（`</dev/null`、runner 里跑的）不当成"不同意"悄悄退，而是明说这一步要确认并给出 `--yes`。
 - **切换前会挡你**：runner 在跑（会让它中途换活），或有会话拿着 todo 还没写回（切走那一轮就悬空了）——两种情况都拒绝并告诉你出路，确实要硬来加 `--force`。
 - **`--force` 之后写回不会串目标**：硬切时会当场提醒"某条还在别的会话手里"；那个会话再 `zloop done` 会被拦下，并告诉它先切回原目标。确实要记在当前目标：`zloop done <id> --force`。
 - **一条 todo 不会同时派给两个会话**：`zloop next` 发现这一轮已经派给别的会话且还没超过 `policy.stale_after_min`（默认 120 分钟），就报 `held_by_other` 并说清在谁手里，不抢占、不记 tick。超时后自动可以重派；把 `stale_after_min` 设成 0 关掉这个保护。

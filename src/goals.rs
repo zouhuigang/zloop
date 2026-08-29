@@ -147,8 +147,42 @@ pub fn list(root: &Path) -> Vec<Row> {
     rows
 }
 
+/// `resolve` 是靠哪一档对上的。
+///
+/// 只有 `Id` 是用户**准确说出了**要动哪一个；另外两档是这里替他猜的——猜对了也只是猜对了。
+/// 会搬文件的动作（`goal rm`）拿这个区分要不要先让人看一眼，`switch` 不用（切错了再切回来就行）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Match {
+    /// id 一字不差
+    Id,
+    /// id 前缀
+    IdPrefix,
+    /// 目标文字里包含这个片段
+    Text,
+}
+
+impl Match {
+    /// 除了精确 id 都算"猜的"。
+    pub fn is_fuzzy(self) -> bool {
+        self != Match::Id
+    }
+
+    pub fn zh(self) -> &'static str {
+        match self {
+            Match::Id => "精确 id",
+            Match::IdPrefix => "id 前缀",
+            Match::Text => "目标文字片段",
+        }
+    }
+}
+
 /// id 精确 → id 前缀 → 目标文字包含。命中多个就报错，让用户说清楚。
 pub fn resolve(root: &Path, needle: &str) -> Result<Row> {
+    resolve_match(root, needle).map(|(row, _)| row)
+}
+
+/// 同 [`resolve`]，另外告诉调用方是靠哪一档对上的。
+pub fn resolve_match(root: &Path, needle: &str) -> Result<(Row, Match)> {
     let needle = needle.trim();
     if needle.is_empty() {
         bail!("要切到哪个目标？`zloop goal list` 看有哪些");
@@ -158,14 +192,14 @@ pub fn resolve(root: &Path, needle: &str) -> Result<Row> {
         bail!("这个项目还没有任何目标：`zloop init \"目标\"`");
     }
     let lower = needle.to_lowercase();
-    for pick in [
-        rows.iter().filter(|r| r.id == needle).collect::<Vec<_>>(),
-        rows.iter().filter(|r| r.id.to_lowercase().starts_with(&lower)).collect(),
-        rows.iter().filter(|r| r.text.to_lowercase().contains(&lower)).collect(),
+    for (how, pick) in [
+        (Match::Id, rows.iter().filter(|r| r.id == needle).collect::<Vec<_>>()),
+        (Match::IdPrefix, rows.iter().filter(|r| r.id.to_lowercase().starts_with(&lower)).collect()),
+        (Match::Text, rows.iter().filter(|r| r.text.to_lowercase().contains(&lower)).collect()),
     ] {
         match pick.len() {
             0 => continue,
-            1 => return Ok(pick[0].clone()),
+            1 => return Ok((pick[0].clone(), how)),
             _ => {
                 let names: Vec<String> = pick.iter().map(|r| format!("{} ({})", r.id, crate::style::truncate(&r.text, 24))).collect();
                 bail!("{needle:?} 对上了 {} 个目标：{}。用 id 说清楚", pick.len(), names.join(" / "));
@@ -377,12 +411,23 @@ pub fn parked_holder(root: &Path, todo_id: &str, who: &crate::session::HostSessi
     None
 }
 
-/// 归档一个停着的目标：搬到 `.zloop/archive/`，从 `goal list` 里消失，但文件还在。
-pub fn archive(root: &Path, needle: &str) -> Result<(Row, PathBuf)> {
-    let row = resolve(root, needle)?;
+/// 归档之前要拒的：当前目标不能就地归档。
+///
+/// 单独拎出来是为了让调用方能在**问用户之前**先把这种拒掉——先弹一句"确认归档？"、
+/// 等人敲完 y 再说"其实这个不能归档"是最难受的顺序。
+pub fn ensure_archivable(row: &Row) -> Result<()> {
     if row.current {
         bail!("{} 是当前目标：先 `zloop goal switch <别的>` 再归档它", row.id);
     }
+    Ok(())
+}
+
+/// 归档一个停着的目标：搬到 `.zloop/archive/`，从 `goal list` 里消失，但文件还在。
+///
+/// 收 `&Row` 而不是 needle，是因为"对上了谁"要先给用户看过（见 `cmd_goal` 的 `Rm` 分支）：
+/// 这里再 resolve 一次就有可能搬走另一个（两次 resolve 之间目标清单可能变了）。
+pub fn archive(root: &Path, row: &Row) -> Result<PathBuf> {
+    ensure_archivable(row)?;
     let dir = root.join(STATE_DIR).join(ARCHIVE_DIR);
     fs::create_dir_all(&dir)?;
     // 读不出来的目标也要能归档掉，否则 `goal list` 里那行"损坏"永远清不掉
@@ -395,5 +440,5 @@ pub fn archive(root: &Path, needle: &str) -> Result<(Row, PathBuf)> {
         target = dir.join(format!("{stamp}-{}-{n}.json", row.id));
     }
     fs::rename(&row.path, &target)?;
-    Ok((row, target))
+    Ok(target)
 }

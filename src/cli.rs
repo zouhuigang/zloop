@@ -4,7 +4,7 @@
 use crate::session::{self, Host};
 use crate::state::{self, StateError};
 use crate::{context, daemon, hosts, log, notify, phase, prompt, runner, style, tick, todo};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -281,7 +281,12 @@ pub enum GoalCmd {
     },
     /// 归档一个停着的目标：搬到 .zloop/archive/，不删文件
     #[command(visible_alias = "archive")]
-    Rm { needle: String },
+    Rm {
+        needle: String,
+        /// 别问了直接归档（不加时，只有精确 id 才免问）
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -1044,6 +1049,22 @@ fn short_time(iso: &str) -> String {
     state::parse_iso(iso).map(|dt| dt.format("%m-%d %H:%M").to_string()).unwrap_or_else(|_| iso.chars().take(11).collect())
 }
 
+/// 问一句 y/N。答 `y` / `yes` 才算同意，别的（含直接回车）都算不同意。
+///
+/// **故意不看 stdin 是不是终端**：测试和脚本给的都是管道，一旦按 TTY 分叉，这条路就只剩
+/// 人手能走、测不到。stdin 读到 EOF 说明根本没人接话（`</dev/null` 起的、runner 里跑的），
+/// 这时候不能当成"默认不同意"悄悄退——那样脚本只会看到一个没解释的非零码，所以直接报错
+/// 并把免问的写法给出来。
+fn confirm(question: &str) -> Result<bool> {
+    print!("{question} [y/N] ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut line = String::new();
+    if std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)? == 0 {
+        bail!("这一步要确认，但 stdin 没有输入可读：用精确 id 重来，或者加 --yes");
+    }
+    Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
 /// `--force` 把带着在飞派活的目标停走了：那个会话再写回会被 `done` 拦下，先说清楚。
 fn warn_parked_handout(p: &crate::goals::Row, c: style::Style) {
     let Ok(st) = state::load(&p.path) else { return };
@@ -1202,8 +1223,26 @@ fn cmd_goal(root: &Path, cmd: GoalCmd, c: style::Style) -> Result<i32> {
             );
             Ok(0)
         }
-        GoalCmd::Rm { needle } => {
-            let (row, target) = crate::goals::archive(root, &needle)?;
+        GoalCmd::Rm { needle, yes } => {
+            let (row, how) = crate::goals::resolve_match(root, &needle)?;
+            // 能不能归档要在问之前定：等人敲完 y 再说"其实不能"是最难受的顺序
+            crate::goals::ensure_archivable(&row)?;
+            if how.is_fuzzy() && !yes {
+                println!(
+                    "将要归档 [{}] {} · {} {}/{}",
+                    row.id,
+                    row.text,
+                    goal_status_zh(&row.status),
+                    row.done,
+                    row.total
+                );
+                println!("（{needle:?} 是按 {} 对上的，不是精确 id；免问：{}）", how.zh(), c.bold(&format!("zloop goal rm {} --yes", row.id)));
+                if !confirm("确认归档？")? {
+                    println!("已取消，一个文件都没动");
+                    return Ok(1);
+                }
+            }
+            let target = crate::goals::archive(root, &row)?;
             println!("已归档 [{}] {} → {}", row.id, style::truncate(&row.text, 40), target.display());
             println!("（文件还在，只是不再出现在 `zloop goal list` 里）");
             Ok(0)

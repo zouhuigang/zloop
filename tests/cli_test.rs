@@ -1019,6 +1019,82 @@ fn a_rejected_goal_new_leaves_the_current_goal_in_place() {
     assert_eq!(zloop(d, &["goal", "list"], None, &[]).out.matches("共 1 个目标").count(), 1);
 }
 
+/// 目标 id 的清单，`goal list --json` 里的顺序（当前目标在最前）。
+fn goal_ids(d: &Path) -> Vec<String> {
+    let o = zloop(d, &["goal", "list", "--json"], None, &[]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&o.out).unwrap_or_default();
+    rows.iter().map(|r| r["id"].as_str().unwrap_or_default().to_string()).collect()
+}
+
+/// F9：`goal rm` 靠"目标文字里包含这个片段"就能对上一个目标，然后直接搬走。
+/// 精确 id 是用户说清楚了要动谁，免问；猜出来的（文字片段 / id 前缀）要先把对上的那个
+/// 打出来、等一句 y。
+#[test]
+fn archiving_by_a_guessed_needle_asks_first_but_an_exact_id_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "把冷启动降到 1 秒"], None, &[]);
+    zloop(d, &["goal", "new", "让 keep-awake 支持外接显示器"], None, &[]);
+    assert_eq!(goal_ids(d), vec!["keep-awake", "g1"]);
+
+    // 没人接话（stdin 直接 EOF，比如 runner 用 /dev/null 起的）：不能默默当"不同意"退个
+    // 光秃秃的非零码，要说清楚这一步要确认、以及怎么免问
+    let o = zloop(d, &["goal", "rm", "冷启动"], None, &[]);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(o.out.contains("将要归档") && o.out.contains("把冷启动降到 1 秒"), "问之前要先把对上的那个打出来: {}", o.out);
+    assert!(o.out.contains("zloop goal rm g1 --yes"), "要给出免问的写法: {}", o.out);
+    assert!(o.err.contains("要确认") && o.err.contains("--yes"), "{}", o.err);
+    assert_eq!(goal_ids(d), vec!["keep-awake", "g1"], "没同意就一个文件都不该动");
+    assert!(!d.join(".zloop/archive").exists(), "连 archive/ 目录都不该建出来");
+
+    // 明确说不 / 直接回车：都算不同意，退非零但不是报错
+    for answer in ["n\n", "\n", "别\n"] {
+        let o = zloop(d, &["goal", "rm", "冷启动"], Some(answer), &[]);
+        assert_eq!(o.code, 1, "答 {answer:?}: {}{}", o.out, o.err);
+        assert!(o.out.contains("已取消"), "答 {answer:?}: {}", o.out);
+        assert_eq!(goal_ids(d), vec!["keep-awake", "g1"], "答 {answer:?} 之后清单不该变");
+    }
+
+    // 当前目标不能归档：这一条要在**问之前**就拒掉
+    let o = zloop(d, &["goal", "rm", "keep-awake 支持"], Some("y\n"), &[]);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(o.err.contains("是当前目标"), "{}", o.err);
+    assert!(!o.out.contains("确认归档"), "不能先问完 y 再说其实不能归档: {}", o.out);
+
+    // 答 y 才真搬
+    let o = zloop(d, &["goal", "rm", "冷启动"], Some("y\n"), &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("已归档"), "{}", o.out);
+    assert_eq!(goal_ids(d), vec!["keep-awake"]);
+
+    // id 前缀也是猜的，同样要问
+    zloop(d, &["goal", "new", "第二个目标"], None, &[]);
+    zloop(d, &["goal", "switch", "keep-awake"], None, &[]);
+    let o = zloop(d, &["goal", "rm", "g"], None, &[]);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(o.out.contains("id 前缀"), "要说清是按哪一档对上的: {}", o.out);
+    assert_eq!(goal_ids(d), vec!["keep-awake", "g1"]);
+
+    // --yes 跳过（stdin 依然是空的，证明它根本没去读）
+    let o = zloop(d, &["goal", "rm", "第二个", "--yes"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(!o.out.contains("确认归档"), "{}", o.out);
+    assert_eq!(goal_ids(d), vec!["keep-awake"]);
+
+    // 精确 id：现状不变，一句都不问
+    zloop(d, &["goal", "new", "第三个目标"], None, &[]);
+    zloop(d, &["goal", "switch", "keep-awake"], None, &[]);
+    let ids = goal_ids(d);
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    let parked = ids[1].clone();
+    let o = zloop(d, &["goal", "rm", &parked], None, &[]);
+    assert_eq!(o.code, 0, "精确 id 不该被新的确认挡住: {}{}", o.out, o.err);
+    assert!(!o.out.contains("确认归档") && !o.out.contains("将要归档"), "{}", o.out);
+    assert!(o.out.contains("已归档"), "{}", o.out);
+    assert_eq!(goal_ids(d), vec!["keep-awake"]);
+    assert_eq!(fs::read_dir(d.join(".zloop/archive")).unwrap().count(), 3, "三次都只是搬家");
+}
+
 /// 读不出来的目标不能被静默隐藏，也不能挡住"把坏的停到一边，开个干净的"这条路。
 #[test]
 fn a_broken_current_goal_can_be_parked_listed_and_archived() {
