@@ -813,7 +813,7 @@ zloop plan --from-loopx .codex/goals/<goal>/ACTIVE_GOAL_STATE.md
 
 ### 命令一览
 
-23 条命令，按用途分七组。**谁常敲**一列很重要：有些命令是给模型和 runner 用的，你平时不用碰。
+24 条命令，按用途分七组。**谁常敲**一列很重要：有些命令是给模型和 runner 用的，你平时不用碰。
 
 | 命令 | 一句话 | 谁常敲 |
 |---|---|---|
@@ -840,6 +840,7 @@ zloop plan --from-loopx .codex/goals/<goal>/ACTIVE_GOAL_STATE.md
 | [`doc`](#zloop-doc-id) | 把多轮日志合成一份完整文档 | 你 |
 | [`sessions`](#zloop-sessions) | 出现过的宿主会话 + resume 命令 | 你 |
 | [`context`](#zloop-context) | 有界交接包（换宿主 / 新会话先看它） | 模型 |
+| [`doctor`](#zloop-doctor) | 只读体检：`.zloop` 里有没有对不上的地方，逐条给建议动作 | 你 |
 | **后台长跑** | | |
 | [`start`](#zloop-start--zloop-stop) / [`stop`](#zloop-start--zloop-stop) | 后台 runner 开 / 停 | 你 |
 | [`run`](#zloop-run) | 前台 runner（看得见每一轮） | 你 |
@@ -1529,6 +1530,52 @@ claude 11111111-2222-3333-4444-555555555555  ticks 7   2026-08-28T20:15:11+08:00
 | `--for claude\|codex\|cli` | 调整最后"怎么继续"那一行的措辞 |
 
 `status` 里的 `阶段` 是压缩版；**完整那句英文 `phase` 在 `context` 和 `next --json` 里**——脚本认这个，不认人类视图。
+
+##### `zloop doctor`
+
+**干什么**：只读体检 `.zloop/`——逐条报出"问题 + 下一步该敲什么"。它找的是**不报错的不一致**：这些毛病平时一声不吭，只让某条命令在某一天突然不听话。
+
+**什么时候敲**：`goal switch` 说"对上了 2 个目标"、某条 todo 永远排不上、`zloop doc` 少了一节、或者手工改过 `.zloop/` 之后。健康的项目输出一行 `没发现问题`。
+
+| 参数 | 说明 |
+|---|---|
+| `--json` | 机器可读：`{goals, archived, errors, warnings, findings[{kind, level, what, fix}]}` |
+
+查这些（`kind` 是稳定标识，可以用来在脚本里挑）：
+
+| kind | 级别 | 什么情况 |
+|---|---|---|
+| `headless` | 要修 | 没有当前目标（搬家中断 / 归档掉了当前那个），目标其实都还在 `goals/` |
+| `broken_goal` | 要修 | 目标文件读不出来（`goal list` 只显示"损坏"，不告诉你怎么办） |
+| `id_filename_mismatch` | 要修 | `goals/<文件名>.json` 里的 id 和文件名对不上——下一次停放会按 id 再造一个同名文件 |
+| `duplicate_goal_id` | 要修 | 两个文件抢同一个 id，这个 id 从此 `switch` / `rm` 都点不动 |
+| `dangling_in_progress` | 要修 | 在飞的派活指着一条已经不存在的 todo，`done` 认不出它 |
+| `dangling_blocked_by` | 要修 | 依赖指向不存在的 todo（`compact` 把被依赖的那条搬走就会这样）——这条 todo 永远轮不到 |
+| `duplicate_todo_id` | 要修 | 同一个 todo id 有多条，`done` / `edit` 只改得到第一条 |
+| `next_id_reuse` | 要修 | `next_id` 已经被用过，下一条 `plan` 会造出重复 id |
+| `missing_log` | 留意 | tick 记着的日志文件被删了（信息没了，循环照跑） |
+| `broken_archive` / `archive_id_collision` | 留意 | 归档文件读不出 / 归档里多份同名，只影响翻旧账 |
+| `stale_pid` / `bad_pid_file` | 留意 | `runner/pid` 指着一个不在的进程（`status` / `stop` 会顺手清） |
+
+```
+$ zloop doctor
+
+  体检 /path/to/proj/.zloop · 目标 2 个 · 归档 0 份
+
+  ✗ .zloop/goals/renamed.json 里的 id 是 "alpha"，和文件名对不上
+    → mv .zloop/goals/renamed.json .zloop/goals/alpha.json
+  ✗ [alpha] t2 依赖 t1，但没有这条 todo——它永远轮不到
+    → zloop edit t2 --blocked-by ''   # 或改成真实存在的 id
+  ! .zloop/runner/pid 指着 pid 999999，这个进程已经不在了
+    → `zloop status` 或 `zloop stop` 会顺手清掉它（doctor 只读，不动文件）
+
+  3 个问题：2 个要修、1 个留意（doctor 只读，一个字都没改）
+```
+
+两条设计约定：
+
+1. **只读是硬约束**。doctor 不修、不删、不动任何文件——连 `daemon::running()` 都不调用（它会顺手删掉过期的 pid 文件）。体检和治疗分开，你才敢在任何状态下敲它，包括 runner 正在跑的时候。
+2. **退出码只认"要修"**：有 `要修` 级别才退 `1`，只有 `留意` 照样退 `0`。否则 CI 里一个被删掉的旧日志就能让流水线红一片。
 
 #### 后台长跑
 

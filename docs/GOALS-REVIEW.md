@@ -346,6 +346,26 @@ message=f"current registry excludes {len(missing_from_current)} global goal(s)"
 zloop 不需要 health 子系统，需要的是三行：读不出来的目标文件在 `goal list` 里打一行"损坏（文件路径）"；
 没有当前目标时明说"当前没有目标，N 个停着，`zloop goal switch <id>`"。
 
+**处置（2026-08-29，[#4](https://github.com/zouhuigang/zloop/issues/4)）**：那"三行"F4/F7 早就补进 `goal list` 了，
+但补完才看清 `goal list` 治不了的那一半——**不报错的不一致**。所以另加了一条只读命令
+`zloop doctor`（`src/doctor.rs`，约 260 行，11 个回归测试）：照抄 `collect_global_registry_health` 的
+**形状**（逐条 finding + 每条带"下一步跑什么"），但不引入 health 子系统，就是一个函数扫一遍文件。
+
+11 类检查，分两档：`headless` / `broken_goal` / `id_filename_mismatch` / `duplicate_goal_id`（= loopx 的
+`route_collision`，F2 最坏交错的产物）/ `dangling_in_progress` / `dangling_blocked_by` / `duplicate_todo_id` /
+`next_id_reuse` 算"要修"（退出码 1）；`missing_log` / `broken_archive` / `archive_id_collision` /
+`stale_pid` 算"留意"（退出码 0，免得 CI 里一个被删掉的旧日志就红一片）。
+
+两个当时没想到、写测试才落定的点：
+
+1. **`dangling_blocked_by` 是 `zloop compact` 自己造出来的**，不是只有手改文件才会有：compact 把做完的
+   todo 搬进 `archive/compact-*.json`，而依赖它的那条 todo 的 `blocked_by` 还指着它，`is_executable`
+   要求依赖"存在且 done"（`todo.rs:161`）——于是这条 todo 从此永远排不上，一声不吭。回归测试就是
+   照这条真实路径走的（`tests/doctor_test.rs::compacted_dependency_leaves_a_todo_that_can_never_run`）。
+2. **只读得是硬约束，而且要用测试钉住**：doctor 不能调 `daemon::running()`——它会顺手删掉过期的 pid
+   文件。`stale_pid_is_reported_and_doctor_changes_nothing` 同时验两件事：doctor 跑完 pid 文件还在、
+   `state.json` 字节不变；再跑一次 `zloop status` 证明"会清它的是 status，不是 doctor"。
+
 ## L5（关键手法可以直接抄）mutate = 锁内 load + 备份 + 写
 
 loopx 的全局 registry 事务（`global_registry.py:57`）：
@@ -435,8 +455,9 @@ F1–F9 全都是实现层面的疏漏，不是这个设计的必然代价——
 
 - ~~**F5（`zloop log` 跨目标串台）**~~ → 已修，见下面「F5 的修法」。
 - **F9（`goal rm` 靠文字片段匹配却不需要确认）**：文件搬进 `.zloop/archive/` 没有丢，优先级低。
-- **L3（锁超时不说是谁持锁）/ L4（缺健康检查）/ L6（跨项目视图）**：都是"可以更好"，不是错。
-  L3 最值得做——`.zloop/runner/pid` 那套手法挪到锁文件上就行。
+- ~~**L4（缺健康检查）**~~ → 已做，见下面 L4 的处置记录（`zloop doctor`）。
+- **L3（锁超时不说是谁持锁）/ L6（跨项目视图）**：都是"可以更好"，不是错。
+  L3 最值得做——`.zloop/runner/pid` 那套手法挪到锁文件上就行。L6 的处置是"写进文档而不是修"。
 
 ---
 

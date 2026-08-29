@@ -234,6 +234,11 @@ pub enum Cmd {
         #[arg(long, value_name = "FILE")]
         show: Option<String>,
     },
+    /// 只读体检：.zloop 里有没有对不上的地方（目标清单 / 账本 / 日志 / pid），逐条给建议动作
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
     /// 多目标：列出 / 新建 / 切换 / 归档（当前目标在 .zloop/state.json，其余停在 .zloop/goals/）
     #[command(visible_alias = "goals")]
     Goal {
@@ -494,6 +499,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Log { todo, last, show } => cmd_log(&root, todo, last, show),
+        Cmd::Doctor { json } => cmd_doctor(&root, json, style::Style::detect(cli.no_color)),
         Cmd::Goal { cmd } => cmd_goal(&root, cmd.unwrap_or(GoalCmd::List { json: false }), style::Style::detect(cli.no_color)),
         Cmd::Run(args) => runner::run(&root, args.options()),
         Cmd::Start(args) => {
@@ -1008,6 +1014,47 @@ fn warn_parked_handout(p: &crate::goals::Row, c: style::Style) {
         ip.round,
         p.id
     );
+}
+
+/// `zloop doctor`：只读，什么都不动。退出码 1 只在有"要修"的问题时给出，
+/// "留意"级别照样退 0——否则 CI 里挂一个删掉的旧日志就红一片。
+fn cmd_doctor(root: &Path, json: bool, c: style::Style) -> Result<i32> {
+    if !crate::doctor::is_project(root) {
+        // 和其他命令同一个口径：不是 zloop 项目就按 StateError 退 1
+        return Err(state::StateError(format!(
+            "no zloop state at {} (run `zloop init \"<goal>\"` first)",
+            state::state_path(root).display()
+        ))
+        .into());
+    }
+    let report = crate::doctor::check(root);
+    if json {
+        print_json(&serde_json::to_value(&report)?);
+        return Ok(if report.errors > 0 { 1 } else { 0 });
+    }
+    println!();
+    println!("  {}", c.dim(&format!("体检 {} · 目标 {} 个 · 归档 {} 份", root.join(state::STATE_DIR).display(), report.goals, report.archived)));
+    if report.ok() {
+        println!("  {}", c.green("没发现问题"));
+        println!();
+        return Ok(0);
+    }
+    println!();
+    for f in &report.findings {
+        let (mark, head) = match f.level {
+            crate::doctor::Level::Error => ("✗", c.red(&f.what)),
+            crate::doctor::Level::Warn => ("!", c.yellow(&f.what)),
+        };
+        println!("  {mark} {head}");
+        println!("    {} {}", c.dim("→"), c.bold(&f.fix));
+    }
+    println!();
+    println!(
+        "  {}",
+        c.dim(&format!("{} 个问题：{} 个要修、{} 个留意（doctor 只读，一个字都没改）", report.findings.len(), report.errors, report.warnings))
+    );
+    println!();
+    Ok(if report.errors > 0 { 1 } else { 0 })
 }
 
 fn cmd_goal(root: &Path, cmd: GoalCmd, c: style::Style) -> Result<i32> {

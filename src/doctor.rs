@@ -1,0 +1,347 @@
+//! `zloop doctor`：只读体检——回答「这个项目的 `.zloop` 有没有问题」。
+//!
+//! 为什么值得单开一条命令：`goal list` 只显示得出"损坏"这一种毛病（见
+//! `docs/GOALS-REVIEW.md` 的 F4 / L4），而真正会把人卡住的是**不报错的不一致**——
+//! `goals/` 里 id 和文件名对不上、两个文件抢同一个 id、tick 指着的日志文件被删了。
+//! 它们平时一声不吭，只是让某条命令有一天突然不听话（`goal switch` 说"对上了 2 个目标"、
+//! `zloop doc` 少了一节）。loopx 在这一层写了 `collect_global_registry_health`，
+//! 每条 finding 都带"下一步跑什么"；这里照抄那个**形状**，但不引入 health 子系统：
+//! 一个函数扫一遍文件，逐条报"问题 + 建议动作"。
+//!
+//! **只读是硬约束**：doctor 不修、不删、不动任何文件——连 `daemon::running` 都不能调
+//! （它会顺手删掉过期的 pid 文件）。体检和治疗分开，人才敢在任何时候、任何状态下跑它。
+
+use crate::goals;
+use crate::state::{self, State, STATE_DIR};
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    /// 已经坏了或马上会坏：有命令因此不工作
+    Error,
+    /// 还能跑，但迟早咬人 / 信息已经丢了
+    Warn,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Finding {
+    /// 稳定的类别标识，给脚本用（人看的在 `what`）
+    pub kind: &'static str,
+    pub level: Level,
+    /// 一句话说清楚问题在哪
+    pub what: String,
+    /// 下一步该做什么（一条能敲的命令，或一句处置说明）
+    pub fix: String,
+}
+
+impl Finding {
+    fn err(kind: &'static str, what: String, fix: String) -> Finding {
+        Finding { kind, level: Level::Error, what, fix }
+    }
+    fn warn(kind: &'static str, what: String, fix: String) -> Finding {
+        Finding { kind, level: Level::Warn, what, fix }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Report {
+    /// 体检过的目标文件数（当前 + 停放）
+    pub goals: usize,
+    /// 归档里的目标文件数（`compact-*.json` 不算，它不是一份目标）
+    pub archived: usize,
+    pub errors: usize,
+    pub warnings: usize,
+    pub findings: Vec<Finding>,
+}
+
+impl Report {
+    pub fn ok(&self) -> bool {
+        self.findings.is_empty()
+    }
+}
+
+/// 一份目标文件：读得出就带上 state，读不出留 `None`（那本身就是一条 finding）。
+struct GoalFile {
+    path: PathBuf,
+    /// `goals/<stem>.json` 的 stem；当前目标是 `state`
+    stem: String,
+    current: bool,
+    state: Option<State>,
+}
+
+impl GoalFile {
+    /// 报告里怎么称呼它：读得出用目标 id，读不出只能用文件名
+    fn label(&self) -> String {
+        match &self.state {
+            Some(st) => st.goal.id.clone(),
+            None => self.stem.clone(),
+        }
+    }
+}
+
+/// `.zloop/goals/a.json` 这样的相对路径：报告里贴绝对路径没人想看
+fn rel(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root).unwrap_or(path).display().to_string()
+}
+
+/// 目录里排好序的 `*.json`；目录不存在就是空的（不是错误）
+fn json_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = fs::read_dir(dir) else { return Vec::new() };
+    let mut paths: Vec<PathBuf> =
+        rd.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().map(|e| e == "json").unwrap_or(false)).collect();
+    paths.sort();
+    paths
+}
+
+fn goal_files(root: &Path) -> Vec<GoalFile> {
+    let mut out = Vec::new();
+    let cur = state::state_path(root);
+    if cur.is_file() {
+        out.push(GoalFile { stem: "state".into(), current: true, state: state::load(&cur).ok(), path: cur });
+    }
+    for p in json_files(&goals::goals_dir(root)) {
+        let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        out.push(GoalFile { state: state::load(&p).ok(), stem, current: false, path: p });
+    }
+    out
+}
+
+/// 这个目录像不像一个 zloop 项目：有当前目标，或者目标全停着（headless）都算。
+pub fn is_project(root: &Path) -> bool {
+    state::state_path(root).is_file() || goals::goals_dir(root).is_dir()
+}
+
+pub fn check(root: &Path) -> Report {
+    let mut f: Vec<Finding> = Vec::new();
+    let files = goal_files(root);
+
+    check_headless(root, &files, &mut f);
+    check_goal_files(root, &files, &mut f);
+    check_duplicate_ids(root, &files, &mut f);
+    let archived = check_archive(root, &mut f);
+    for gf in &files {
+        if let Some(st) = &gf.state {
+            check_ledger(root, gf, st, &mut f);
+        }
+    }
+    check_pid(root, &mut f);
+
+    // 先要修的，后留意的；同级保持发现顺序（大致是从目标清单到账本再到运行时）
+    f.sort_by_key(|x| match x.level {
+        Level::Error => 0,
+        Level::Warn => 1,
+    });
+    Report {
+        goals: files.len(),
+        archived,
+        errors: f.iter().filter(|x| x.level == Level::Error).count(),
+        warnings: f.iter().filter(|x| x.level == Level::Warn).count(),
+        findings: f,
+    }
+}
+
+/// 没有当前目标：搬家中断，或刚归档掉了当前那个。除了 `goal list` / `goal switch`，
+/// 其余命令全部报"没有目标"，而目标其实一份没丢——这条最值得第一时间说清楚。
+fn check_headless(root: &Path, files: &[GoalFile], f: &mut Vec<Finding>) {
+    if state::state_path(root).is_file() {
+        return;
+    }
+    let parked = files.len();
+    if parked == 0 {
+        return; // 干净的空项目，不是病
+    }
+    let hint = files.first().map(|gf| gf.label()).unwrap_or_default();
+    f.push(Finding::err(
+        "headless",
+        format!("当前没有目标在开着（.zloop/state.json 不在），{parked} 个目标停在 .zloop/goals/"),
+        format!("zloop goal switch {hint}"),
+    ));
+}
+
+fn check_goal_files(root: &Path, files: &[GoalFile], f: &mut Vec<Finding>) {
+    for gf in files {
+        let Some(st) = &gf.state else {
+            // 读不出来的目标文件：`goal list` 会显示成"损坏"，但不会告诉你怎么办
+            let fix = if gf.current {
+                "看一眼文件（是不是被手改坏了）；要把它挪开就 `zloop goal new \"新目标\"`，它会被停到 .zloop/goals/".to_string()
+            } else {
+                format!("看一眼文件；确认不要了就 `zloop goal rm {}`（只搬到 .zloop/archive/，不删）", gf.stem)
+            };
+            f.push(Finding::err("broken_goal", format!("目标文件读不出来：{}", rel(root, &gf.path)), fix));
+            continue;
+        };
+        if gf.current {
+            continue;
+        }
+        // id 和文件名对不上：`park` 是按 id 取文件名的，于是下一次停放会在同一个 id 上
+        // 再造一个文件——两份目标一个 id，`goal switch` 从此说"对上了 2 个目标"。
+        if st.goal.id != gf.stem {
+            f.push(Finding::err(
+                "id_filename_mismatch",
+                format!("{} 里的 id 是 {:?}，和文件名对不上", rel(root, &gf.path), st.goal.id),
+                format!("mv {} {}/{}/{}.json", rel(root, &gf.path), STATE_DIR, goals::GOALS_DIR, st.goal.id),
+            ));
+        }
+    }
+}
+
+/// 两个文件同一个 id：loopx 那边叫 route_collision。zloop 的 `resolve` 命中多个就 bail，
+/// 于是 `goal switch <id>` / `goal rm <id>` 全都点不动这个 id。
+fn check_duplicate_ids(root: &Path, files: &[GoalFile], f: &mut Vec<Finding>) {
+    let mut by_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for gf in files {
+        if let Some(st) = &gf.state {
+            by_id.entry(st.goal.id.clone()).or_default().push(rel(root, &gf.path));
+        }
+    }
+    for (id, paths) in by_id {
+        if paths.len() > 1 {
+            f.push(Finding::err(
+                "duplicate_goal_id",
+                format!("id {id:?} 有 {} 份：{}", paths.len(), paths.join(" / ")),
+                format!("`zloop goal switch {id}` 会因此拒绝执行；打开其中一份把 goal.id 改掉，文件名跟着改成一样的"),
+            ));
+        }
+    }
+}
+
+/// 归档目录。`compact-*.json` 不是目标（`zloop compact` 搬出去的老 tick），跳过。
+fn check_archive(root: &Path, f: &mut Vec<Finding>) -> usize {
+    let dir = root.join(STATE_DIR).join(goals::ARCHIVE_DIR);
+    let mut count = 0;
+    let mut by_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for p in json_files(&dir) {
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if name.starts_with("compact-") {
+            continue;
+        }
+        count += 1;
+        match state::load(&p) {
+            Ok(st) => by_id.entry(st.goal.id).or_default().push(name),
+            Err(_) => f.push(Finding::warn(
+                "broken_archive",
+                format!("归档文件读不出来：{}", rel(root, &p)),
+                // 归档也参与"这份日志属于谁"的判定（log.rs 的 logs_of_other_goals），
+                // 读不出就等于它名下的日志全部无主，会被当成当前目标的历史列出来
+                "只影响翻旧账和 `zloop log` 的归属判断；确认不要了直接删掉这一个文件".into(),
+            )),
+        }
+    }
+    for (id, names) in by_id {
+        if names.len() > 1 {
+            f.push(Finding::warn(
+                "archive_id_collision",
+                format!("归档里有 {} 份都叫 {id:?}：{}", names.len(), names.join(" / ")),
+                "不影响当前运行（归档不参与 goal 解析）；翻旧账时按文件名开头的时间戳区分".into(),
+            ));
+        }
+    }
+    count
+}
+
+/// 一份目标账本内部对不对得上。这些都不会让命令报错，只会让它**默默少做一件事**。
+fn check_ledger(root: &Path, gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
+    let who = gf.label();
+    let ids: Vec<&str> = st.todos.iter().map(|t| t.id.as_str()).collect();
+    // 停放中的目标：`zloop edit` / `zloop done` 只认当前目标，照抄建议动作会改错账本
+    let scope = if gf.current { String::new() } else { format!("（这条 todo 在停放的 {who} 里：先 `zloop goal switch {who}`）") };
+
+    // 1. tick 指着的日志文件不在了：`zloop doc` / `zloop log` 会静默跳过那几轮
+    let mut missing: Vec<(&str, &str)> = Vec::new();
+    for t in &st.ticks {
+        if let Some(relpath) = &t.log {
+            if !root.join(STATE_DIR).join(relpath).is_file() {
+                missing.push((t.todo.as_deref().unwrap_or("-"), relpath.as_str()));
+            }
+        }
+    }
+    if !missing.is_empty() {
+        let (todo_id, first) = missing[0];
+        f.push(Finding::warn(
+            "missing_log",
+            format!("[{who}] {} 轮的日志文件不在了（最早 {todo_id} → {first}）", missing.len()),
+            "误删就从 git / 备份恢复；不恢复也能跑，只是 `zloop doc` 少了这几轮".into(),
+        ));
+    }
+
+    // 2. 在飞的派活指着一条不存在的 todo：`zloop done` 认不出这个 id，它会一直挂在那儿，
+    //    `goal switch` 也会因为"有轮次没写回"拒绝换目标
+    if let Some(ip) = &st.in_progress {
+        if !ids.contains(&ip.todo.as_str()) {
+            f.push(Finding::err(
+                "dangling_in_progress",
+                format!("[{who}] 第 {} 轮派出去的 {} 已经不在待办里了", ip.round, ip.todo),
+                format!("`zloop done` 认不出这个 id；手工把 state.json 里的 in_progress 删掉，或 `zloop goal switch --force` 绕开{scope}"),
+            ));
+        }
+    }
+
+    // 3. 依赖指向不存在的 todo：这条永远等不到，`next` 会一直跳过它
+    for t in &st.todos {
+        if crate::todo::is_terminal(&t.status) {
+            continue;
+        }
+        let dead: Vec<&str> =
+            t.blocked_by.iter().map(|s| s.as_str()).filter(|d| *d != crate::todo::USER && !ids.contains(d)).collect();
+        if !dead.is_empty() {
+            f.push(Finding::err(
+                "dangling_blocked_by",
+                format!("[{who}] {} 依赖 {}，但没有这条 todo——它永远轮不到", t.id, dead.join(" / ")),
+                format!("zloop edit {} --blocked-by ''   # 或改成真实存在的 id{scope}", t.id),
+            ));
+        }
+    }
+
+    // 4. todo id 重复：`done` / `edit` 只会改到第一条
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for id in &ids {
+        *seen.entry(id).or_insert(0) += 1;
+    }
+    for (id, n) in seen {
+        if n > 1 {
+            f.push(Finding::err(
+                "duplicate_todo_id",
+                format!("[{who}] todo id {id} 有 {n} 条"),
+                format!("`zloop done {id}` / `zloop edit {id}` 只会改到第一条；手工把 state.json 里重复的那条改个 id"),
+            ));
+        }
+    }
+
+    // 5. next_id 已经被用过：下一次 `zloop plan` 会造出一个重复 id
+    let used_max = st.todos.iter().filter_map(|t| t.id.strip_prefix('t')).filter_map(|n| n.parse::<u64>().ok()).max();
+    if let Some(max) = used_max {
+        if st.next_id <= max {
+            f.push(Finding::err(
+                "next_id_reuse",
+                format!("[{who}] next_id={} 但已经有 t{max}——下一条 plan 会撞上现成的 id", st.next_id),
+                format!("把 state.json 的 next_id 改成 {}", max + 1),
+            ));
+        }
+    }
+}
+
+/// pid 文件指着一个已经不在的进程。`status` / `goal switch` 会顺手清掉它，
+/// 但在那之前，任何读到它的人都以为 runner 还活着。
+fn check_pid(root: &Path, f: &mut Vec<Finding>) {
+    let p = crate::daemon::pid_path(root);
+    let Ok(raw) = fs::read_to_string(&p) else { return };
+    let Ok(pid) = raw.trim().parse::<i32>() else {
+        f.push(Finding::warn(
+            "bad_pid_file",
+            format!("{} 里不是一个 pid：{:?}", rel(root, &p), raw.trim()),
+            "删掉这个文件；`zloop start` 会重新写".into(),
+        ));
+        return;
+    };
+    if !crate::daemon::pid_alive(pid) {
+        f.push(Finding::warn(
+            "stale_pid",
+            format!("{} 指着 pid {pid}，这个进程已经不在了", rel(root, &p)),
+            "`zloop status` 或 `zloop stop` 会顺手清掉它（doctor 只读，不动文件）".into(),
+        ));
+    }
+}
