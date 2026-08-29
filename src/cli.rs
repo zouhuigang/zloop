@@ -140,7 +140,15 @@ pub enum Cmd {
         keep_days: i64,
     },
     /// 重估一次：对着最终目标看剩下的任务还对不对，提最小改动（改不改由你点头）
-    Replan,
+    Replan {
+        /// 从 stdin 读新的待办清单（一行一条，`[P0] 文本 :: 验收`）落地；
+        /// 已完成的和等你回话的原样保留，旧账本自动备份
+        #[arg(long)]
+        apply: bool,
+        /// 为什么要这么改（`--apply` 时必填，会记进账本）
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        why: Option<String>,
+    },
     /// 回看一次：把账本 + 经验 + 用户反馈摆齐，让模型给出整理建议（`--apply` 从 stdin 落地）
     Reflect {
         /// 从 stdin 读整理后的经验清单（一行一条）重写 .zloop/NOTES.md；旧文件自动备份
@@ -391,7 +399,7 @@ fn cmd_label(cmd: &Cmd) -> String {
         Cmd::Pause => "pause".into(),
         Cmd::Resume => "resume".into(),
         Cmd::Compact { .. } => "compact".into(),
-        Cmd::Replan => "replan".into(),
+        Cmd::Replan { .. } => "replan".into(),
         Cmd::Reflect { .. } => "reflect".into(),
         Cmd::Stats { .. } => "stats".into(),
         Cmd::Status { .. } => "status".into(),
@@ -428,10 +436,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Done { id, note, outcome, block, next, evidence, approach, decision, pitfall, rethink, no_doc, force } => {
             cmd_done(&root, &path, &id, note, &outcome, block, next, DoneDoc { evidence, approach, decision, pitfall, rethink, no_doc }, force, style::Style::detect(cli.no_color))
         }
-        Cmd::Replan => {
-            print!("{}", crate::replan::packet(&state::load(&path)?));
-            Ok(0)
-        }
+        Cmd::Replan { apply, why } => cmd_replan(&root, &path, apply, why),
         Cmd::Reflect { apply, max_rules } => cmd_reflect(&root, &path, apply, max_rules, style::Style::detect(cli.no_color)),
         Cmd::Stats { json } => cmd_stats(&path, json, style::Style::detect(cli.no_color)),
         Cmd::Doc { todo, all, last, since, until, out } => cmd_doc(&root, &path, todo, all, last, since, until, out),
@@ -2007,6 +2012,57 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64) -> Result<i32> {
     match archive {
         Some(p) => println!("compacted {moved_todos} todos and {moved_ticks} ticks → {}", p.display()),
         None => println!("nothing to compact (no done/deferred todos older than {keep_days} days)"),
+    }
+    Ok(0)
+}
+
+/// `zloop replan`：默认只把材料摆出来（只读）；`--apply` 才真的改计划。
+fn cmd_replan(root: &Path, path: &Path, apply: bool, why: Option<String>) -> Result<i32> {
+    if !apply {
+        print!("{}", crate::replan::packet(&state::load(path)?));
+        return Ok(0);
+    }
+    let mut raw = String::new();
+    std::io::stdin().read_to_string(&mut raw)?;
+    let items = todo::parse_plan(&raw, todo::DEFAULT_PRIORITY);
+    let why = why.unwrap_or_default();
+    let out = state::transaction(path, |st| {
+        Ok(match crate::replan::apply(st, path, &items, &why) {
+            Ok(a) => {
+                let note = format!(
+                    "重排：换掉 {} 条、新排 {} 条、保留 {} 条 · {why}",
+                    a.dropped.len(),
+                    a.added.len(),
+                    a.kept.len()
+                );
+                let who = session::detect();
+                let _ = tick::record(st, tick::REPLAN, None, &style::truncate(&note, 300), &who);
+                Ok(a)
+            }
+            Err(e) => Err(e),
+        })
+    })?;
+    let a = match out {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("replan --apply 拒绝了这次改动：\n{e}");
+            return Ok(2);
+        }
+    };
+    println!(
+        "replan applied: 换掉 {} 条、新排 {} 条、保留 {} 条（已完成和等你回话的没动）",
+        a.dropped.len(),
+        a.added.len(),
+        a.kept.len()
+    );
+    if !a.dropped.is_empty() {
+        println!("  换掉：{}", a.dropped.join(" "));
+    }
+    println!("  新排：{}", a.added.join(" "));
+    println!("  旧账本备份在 {}", a.backup.display());
+    let _ = root;
+    if let Some(h) = crate::replan::hint(&state::load(path)?) {
+        println!("\n⚠ 还有信号没消：{h}");
     }
     Ok(0)
 }

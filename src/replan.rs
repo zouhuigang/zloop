@@ -224,3 +224,106 @@ pub fn packet(state: &State) -> String {
     out.push_str("6. 这一轮不做任何 todo，也不要改代码。\n");
     out
 }
+
+// ── 落地：`zloop replan --apply` ────────────────────────────────────────────
+//
+// 这是这个项目里**第一个让 agent 改自己待办**的能力。护栏必须在代码里强制，不能只写进
+// 提示词——提示词管不住模型（`a_headless_replan_round_suggests_but_never_edits_the_plan`
+// 那条回归测试就专门演一个"不守规矩的模型"）。每条护栏为什么存在，见
+// `docs/ADAPTIVE-REPLAN.md` §8「不加会怎样」。
+
+/// 重排之后未完成条数的绝对上限。防"一次重规划炸出两百条 todo，跑到天荒地老"。
+pub const MAX_OPEN: usize = 30;
+
+/// 单次重排的相对上限：最多放大到现在的三倍多一点。
+///
+/// 绝对上限单独不够——清单只有 2 条时，一次跳到 30 条同样是失控；相对上限单独也不够——
+/// 从 20 条翻到 60 条每一步都"只是三倍"。两条都要。
+pub fn cap(open_now: usize) -> usize {
+    (open_now * 3 + 5).min(MAX_OPEN)
+}
+
+/// 哪些 todo **不许**被重排动。
+///
+/// - 终态（done / deferred）：动了就等于抹历史，`zloop doc` 和长程审计全部失真；
+/// - 等人回话的（`blocked_by` 含 `user`）：它身上挂着一个**给人的问题**，
+///   agent 没资格替人把问题删掉。
+fn is_pinned(t: &crate::state::Todo) -> bool {
+    todo::is_terminal(&t.status) || t.blocked_by.iter().any(|b| b == todo::USER)
+}
+
+#[derive(Debug)]
+pub struct Applied {
+    /// 原样留下的（终态 + 等人回话）
+    pub kept: Vec<String>,
+    /// 被这次重排换掉的
+    pub dropped: Vec<String>,
+    /// 新建的
+    pub added: Vec<String>,
+    pub backup: std::path::PathBuf,
+}
+
+/// 把新清单落到账本上。**只换未完成且没在等人的那部分**，其余原样保留。
+///
+/// 违反护栏就整体拒绝并指名是哪一条——半途改一半的计划比不改更糟。
+pub fn apply(
+    state: &mut State,
+    path: &std::path::Path,
+    items: &[(u8, String)],
+    why: &str,
+) -> anyhow::Result<Applied> {
+    // 护栏：得有理由。审计的时候要能看出这次改动想解决什么。
+    if why.trim().is_empty() {
+        anyhow::bail!("护栏「说清为什么」：--why 不能是空的——事后没人看得出这次重排想解决什么");
+    }
+    // 护栏：有轮次在飞就不改。那个 agent 手上拿着的 todo 可能正要被换掉。
+    if let Some(ip) = &state.in_progress {
+        anyhow::bail!(
+            "护栏「不动在飞的轮次」：{} 正在被执行（{} 起，via {}）。等它写回再重排",
+            ip.todo,
+            ip.started_at,
+            ip.via
+        );
+    }
+    if items.is_empty() {
+        anyhow::bail!("护栏「清单不能空」：重排后一条待办都没有，等于悄悄放弃目标。真要收工就把 todo 逐条 done 或 defer");
+    }
+    // 护栏：每条都要可验证。这是这个仓库里"为什么这条通向目标"的既有表达方式——
+    // 说不出怎么验，就是没想清楚它凭什么算一步。
+    let naked: Vec<String> = items
+        .iter()
+        .filter(|(_, raw)| todo::split_acceptance(raw).1.is_none())
+        .map(|(_, raw)| crate::style::truncate(raw, 40))
+        .collect();
+    if !naked.is_empty() {
+        anyhow::bail!(
+            "护栏「每条都要可验证」：这 {} 条没写验收标准（用 `文本 :: 怎么验`）：\n  - {}",
+            naked.len(),
+            naked.join("\n  - ")
+        );
+    }
+    // 护栏：规模上限。
+    let open_now = state.todos.iter().filter(|t| !is_pinned(t)).count();
+    let limit = cap(open_now);
+    if items.len() > limit {
+        anyhow::bail!(
+            "护栏「规模上限」：现在 {open_now} 条未完成，一次最多排到 {limit} 条（三倍多一点，且总数不超过 {MAX_OPEN}），这次给了 {} 条。\n\
+             真要这么多，分两次重排，中间跑几轮看看方向对不对",
+            items.len()
+        );
+    }
+
+    // 改之前先留一份。这是账本里唯一一处"批量丢弃用户可见内容"的操作。
+    let backup = path.with_file_name(format!(
+        "state.json.bak-{}",
+        crate::state::now_iso().replace([':', '+'], "")
+    ));
+    std::fs::copy(path, &backup)?;
+
+    let kept: Vec<String> = state.todos.iter().filter(|t| is_pinned(t)).map(|t| t.id.clone()).collect();
+    let dropped: Vec<String> = state.todos.iter().filter(|t| !is_pinned(t)).map(|t| t.id.clone()).collect();
+    state.todos.retain(is_pinned);
+    // id 从 `next_id` 继续发，**不复用**——复用会让老 tick 挂到新 todo 上，账本当场对不上。
+    let added: Vec<String> = todo::add(state, items, false).into_iter().map(|t| t.id).collect();
+    Ok(Applied { kept, dropped, added, backup })
+}

@@ -1824,6 +1824,93 @@ fn done_only_nudges_a_replan_when_the_ledger_says_something_is_off() {
 }
 
 #[test]
+fn replan_apply_swaps_the_route_without_touching_history() {
+    // 用户要的那一幕：5 条 todo，做到第 2 条发现整条路线的前提没了，
+    // 于是照新现状重排，做过的一条不丢。
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "把冷启动降到 1 秒"], None, &[]);
+    zloop(
+        d,
+        &["plan", "--add", "[P0] 量最慢三处 :: 有数", "--add", "[P0] 加缓存 :: 快 500ms",
+          "--add", "[P0] 复测 :: 基准过", "--add", "[P1] 补基准 :: bench 跑得出", "--add", "[P1] 写文档 :: README 有一节"],
+        None, &[],
+    );
+    zloop(d, &["done", "t1", "--note", "慢在同步读配置", "--approach", "打点", "--no-doc"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "只省 30ms", "--approach", "LRU", "--no-doc",
+               "--rethink", "瓶颈在反序列化，后三条前提没了"], None, &[]);
+
+    let plan = "[P0] 量反序列化耗时 :: 有逐字段耗时表
+                [P0] 换零拷贝路径 :: 快 300ms 以上
+                [P0] 惰性加载大配置 :: 只解析用得到的
+                [P0] 复测冷启动 :: 端到端 1 秒内
+                [P1] 补基准 :: bench.sh 跑得出数
+                [P1] 写文档 :: README 记下为什么弃用缓存
+";
+    let o = zloop(d, &["replan", "--apply", "--why", "实测瓶颈在反序列化，加缓存整条路线作废"], Some(plan), &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("换掉 3 条、新排 6 条、保留 2 条"), "{}", o.out);
+    assert!(o.out.contains("旧账本备份在"), "改前必须备份: {}", o.out);
+
+    let st = state::load(&state::state_path(d)).unwrap();
+    // 历史一条不丢，而且 id 不复用
+    let done: Vec<&str> = st.todos.iter().filter(|t| t.status == "done").map(|t| t.id.as_str()).collect();
+    assert_eq!(done, vec!["t1", "t2"], "做过的原样留着");
+    assert_eq!(st.goal.text, "把冷启动降到 1 秒", "目标文字不许被重排改掉");
+    let open: Vec<&str> = st.todos.iter().filter(|t| t.status == "open").map(|t| t.id.as_str()).collect();
+    assert_eq!(open, vec!["t6", "t7", "t8", "t9", "t10", "t11"], "新 id 从 next_id 往后发，不复用 t3-t5");
+    assert_eq!(st.ticks.iter().filter(|t| t.outcome == "done").count(), 2, "老 tick 一条不丢");
+    assert!(st.ticks.iter().any(|t| t.outcome == "replan" && t.note.contains("换掉 3 条")), "改了什么要记进账本");
+    assert!(st.ticks.iter().any(|t| t.rethink.is_some()), "那句 rethink 是历史，留着");
+    // 重排之后信号消了（边沿）
+    assert!(!zloop(d, &["replan"], None, &[]).out.contains("[rethink]"), "重排过就不该再响");
+}
+
+#[test]
+fn replan_apply_refuses_rather_than_half_changing_the_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a :: 验a", "--add", "[P0] b :: 验b", "--add", "[P0] c :: 验c"], None, &[]);
+    let b = fs::read_to_string(state::state_path(d)).unwrap();
+    // 快照当参数传，别让闭包捕获——`before` 后面会被 shadow，闭包捕获的还是定义时那个（踩过）
+    let refused = |o: &Out, guard: &str, before: &str| {
+        assert_eq!(o.code, 2, "该拒绝: {}{}", o.out, o.err);
+        assert!(o.err.contains(guard), "要指名是哪条护栏（期望「{guard}」）: {}", o.err);
+        assert_eq!(fs::read_to_string(state::state_path(d)).unwrap(), before, "拒绝了就一个字都不能动");
+    };
+    refused(&zloop(d, &["replan", "--apply", "--why", "收工"], Some(""), &[]), "清单不能空", &b);
+    refused(&zloop(d, &["replan", "--apply", "--why", "换路"], Some("[P0] 没验收标准的一条\n"), &[]), "每条都要可验证", &b);
+    refused(&zloop(d, &["replan", "--apply", "--why", ""], Some("[P0] a :: b\n"), &[]), "说清为什么", &b);
+    let many: String = (1..=20).map(|i| format!("[P0] 第{i}条 :: 验{i}\n")).collect();
+    refused(&zloop(d, &["replan", "--apply", "--why", "炸开"], Some(&many), &[]), "规模上限", &b);
+
+    // 有轮次在飞：那个 agent 手上拿的 todo 可能正要被换掉
+    zloop(d, &["next", "--json"], None, &[("CLAUDE_CODE_SESSION_ID", "A")]);
+    let b = fs::read_to_string(state::state_path(d)).unwrap();
+    refused(&zloop(d, &["replan", "--apply", "--why", "抢改"], Some("[P0] x :: y\n"), &[]), "不动在飞的轮次", &b);
+}
+
+#[test]
+fn replan_apply_never_deletes_a_question_that_is_waiting_on_you() {
+    // 等人回话的 todo 身上挂着一个**给人的问题**，agent 没资格替人把问题删掉。
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a :: 验a", "--add", "[P0] b :: 验b"], None, &[]);
+    zloop(d, &["done", "t1", "--outcome", "progress", "--block", "用 A 方案还是 B 方案？", "--note", "等人"], None, &[]);
+
+    let o = zloop(d, &["replan", "--apply", "--why", "换个路线"], Some("[P0] 新路线 :: 验新
+"), &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    let st = state::load(&state::state_path(d)).unwrap();
+    let t1 = st.todos.iter().find(|t| t.id == "t1").unwrap();
+    assert!(t1.blocked_by.contains(&"user".to_string()), "等人回话的那条要原样留着: {:?}", t1);
+    assert!(st.todos.iter().any(|t| t.id == "t3"), "新的排上了");
+    assert!(!st.todos.iter().any(|t| t.id == "t2"), "普通的 open 该被换掉");
+}
+
+#[test]
 fn a_successful_round_can_still_say_the_rest_of_the_plan_is_dead() {
     // 最该重规划的那种场景**不偏离**：那一轮顺利完成，可它的结论把剩下几条的前提推翻了。
     // 五个偏离信号（feedback/stalled/fail_streak/rework/blocked）一个都不会响。
