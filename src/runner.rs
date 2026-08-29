@@ -469,7 +469,7 @@ fn slowest_interval(state: &State) -> u32 {
 }
 
 /// Decide how long to sleep for a non-running decision, or `None` to stop the runner.
-fn wait_plan(state: &State, d: &tick::Decision, opts: &Options) -> Option<(u32, String)> {
+pub fn wait_plan(state: &State, d: &tick::Decision, opts: &Options) -> Option<(u32, String)> {
     match d.interval_min {
         Some(m) => Some((m, d.reason.clone())),
         None => {
@@ -481,6 +481,18 @@ fn wait_plan(state: &State, d: &tick::Decision, opts: &Options) -> Option<(u32, 
             }
         }
     }
+}
+
+/// 启动前体检：如果 runner 第一轮就会直接退出，返回那个 reason。
+///
+/// 走的是 `run` 循环里一模一样的两步（`tick::decide` → `wait_plan`），不另立一套规则：
+/// 另写一份判断迟早会和调度器漂开，那时 `start` 要么拦错、要么又开始秒退。
+pub fn immediate_stop_reason(state: &State, opts: &Options, at: chrono::DateTime<chrono::FixedOffset>) -> Option<String> {
+    let d = tick::decide(state, at);
+    if d.should_run {
+        return None;
+    }
+    wait_plan(state, &d, opts).is_none().then_some(d.reason)
 }
 
 pub fn run(root: &Path, opts: Options) -> Result<i32> {

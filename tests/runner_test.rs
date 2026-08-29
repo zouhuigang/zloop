@@ -275,6 +275,49 @@ echo '{"session_id":"bg","is_error":false,"result":"ok"}'"#,
     assert_eq!((last["event"].as_str(), last["reason"].as_str()), (Some("stop"), Some("sigterm")), "{j:?}");
 }
 
+/// 0 待办时 `start` 曾经照常报告「runner started in the background」，然后 runner 第一次
+/// `decide` 就 stop(all_done) 秒退——看着像起来了，控制台里只有一句 reason。现在 `start` 走
+/// 一遍和 runner 第一轮一样的判断（decide + wait_plan），会秒退就当场拒绝并说下一步。(#6)
+#[test]
+fn start_refuses_to_launch_a_runner_that_would_exit_immediately() {
+    let d = tempfile::tempdir().unwrap().keep();
+    run(&d, &["init", "start precheck"], &[]);
+
+    // 一条待办都没有：拒绝、退出码 1、不留 pid 和控制台日志，也不许说 started
+    let (code, out, err) = run(&d, &["start", "--fast"], &[]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(err.contains("没启动") && err.contains("一条待办都没有") && err.contains("zloop plan"), "{err}");
+    assert!(!out.contains("started"), "拒绝了就不能再报告启动成功: {out}");
+    assert!(!d.join(".zloop/runner/pid").exists(), "没有 runner 被拉起来");
+    assert!(!d.join(".zloop/runner/console.log").exists());
+
+    // 有待办：行为不变，照常起来（假 host 只睡觉，起来就够了）
+    let slow = fake_host(r#"sleep 60; echo '{"session_id":"s","is_error":false,"result":"late"}'"#);
+    let tools = fake_power_tools(true);
+    let path = format!("{}:{}", tools.display(), with_fake_path(&slow));
+    let e = awake_env();
+    let vars = awake_vars(&e, &path);
+    run(&d, &["plan", "--add", "[P0] a"], &[]);
+    let (code, out, err) = run(&d, &["start", "--fast", "--timeout-min", "120"], &vars);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("runner started in the background (pid"), "{out}");
+    run(&d, &["stop"], &vars);
+
+    // 别拦过头：唯一的待办被人挡着，但 runner 是挂着轮询等人（不是秒退），这种照常起
+    run(&d, &["edit", "t1", "--blocked-by", "user"], &[]);
+    let (code, out, err) = run(&d, &["start", "--fast", "--timeout-min", "120"], &vars);
+    assert_eq!(code, 0, "等人是轮询不是秒退，这种就该照常起来: {out}{err}");
+    assert!(out.contains("runner started in the background (pid"), "{out}");
+    run(&d, &["stop"], &vars);
+
+    // 全做完之后：也拦，但说的是「目标结束了」，不是「去 plan」
+    run(&d, &["edit", "t1", "--blocked-by", ""], &[]);
+    run(&d, &["done", "t1", "--note", "ok", "--approach", "fake"], &[]);
+    let (code, _, err) = run(&d, &["start", "--fast"], &vars);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("目标已经结束") && err.contains("zloop goal new"), "{err}");
+}
+
 #[test]
 fn runner_records_cost_and_marks_child_env() {
     let fake = fake_host(

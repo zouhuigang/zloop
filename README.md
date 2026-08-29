@@ -762,6 +762,7 @@ for d in ~/work/*/; do [ -d "$d/.zloop" ] && (cd "$d" && echo "== $(basename "$d
 | `waiting (throttled) · retry in N min` | 24 小时内已跑满 `max_runs`（默认 480） | 确实需要更快就调大 policy 的 `max_runs`，或设 `0` 不限 |
 | runner 日志 `host rate-limited · not counted · sleeping 30 min` | 宿主返回 429 / rate limit / overloaded | 不用管，30 分钟后自动重试，不计失败 |
 | runner 日志 `TIMED OUT (recorded fail)` | 某轮宿主超过 `--timeout-min` 被 kill | 偶发不用管；频繁出现就调大 `--timeout-min` 或把 todo 拆小 |
+| `start: 没启动——runner 起来第一轮就会退出（…）` | `start` 的启动前体检：这一轮起来也是秒退，所以没起（退出码 1） | 照它第二、三行说的做（0 待办就 `zloop plan`，做完了就 `zloop goal new`，等等），再 `start` |
 
 ### 8. 调参
 
@@ -1537,6 +1538,15 @@ claude 11111111-2222-3333-4444-555555555555  ticks 7   2026-08-28T20:15:11+08:00
 **什么时候敲**：想让它自己跑几个小时的时候。这是长程任务的常规用法。
 
 `start` 接受 [`run`](#zloop-run) 的全部参数。已经有 runner 在跑时再 `start` 会被拒（退出码 2）。
+
+**起来就会秒退的，`start` 直接不起**（退出码 1）：启动前先跑一遍和 runner 第一轮一模一样的判断（`decide` + 等待策略），会立刻 `stop(...)` 的情况当场拒绝，并说清楚原因和下一步——比报告「started」再让 runner 在 console.log 里留一句 reason 强。等人（`user_gate` / `blocked`）是挂着轮询、不是秒退，照常起。
+
+```bash
+$ zloop start                     # 还没规划过
+start: 没启动——runner 起来第一轮就会退出（all_done）。
+原因：这个目标一条待办都没有。
+下一步：zloop plan --add "[P0] 第一件事"（或在 Claude Code 里 `/zloop <目标>` 让它规划）
+```
 
 ```bash
 $ zloop start --max-budget-usd 2.00

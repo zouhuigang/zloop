@@ -497,7 +497,12 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Goal { cmd } => cmd_goal(&root, cmd.unwrap_or(GoalCmd::List { json: false }), style::Style::detect(cli.no_color)),
         Cmd::Run(args) => runner::run(&root, args.options()),
         Cmd::Start(args) => {
-            state::load(&path)?; // fail early with the usual "no zloop state" message
+            let st = state::load(&path)?; // fail early with the usual "no zloop state" message
+            // 起来就秒退比不起来更糟：控制台只留一句 reason，`start` 却报告「started」。
+            if let Some(reason) = runner::immediate_stop_reason(&st, &args.options(), state::now()) {
+                eprintln!("{}", start_refusal(&st, &reason));
+                return Ok(1);
+            }
             let _ = crate::awake::reconcile(); // clean up anything a previous run left behind
             let pid = daemon::start(&root, &args.to_argv())?;
             println!(
@@ -521,6 +526,48 @@ pub fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::HookStop => cmd_hook_stop(&root, &path),
     }
+}
+
+/// `zloop start` 拒绝启动时说的话：一句原因 + 一条能直接敲的下一步。
+///
+/// `reason` 就是 runner 停下来时打印的那个词（`tick::decide` 给的），这里只负责翻译成人话，
+/// 不重新判断一遍——两套判断迟早会漂开。
+fn start_refusal(st: &state::State, reason: &str) -> String {
+    let p = &st.policy;
+    let (why, next) = match reason {
+        "all_done" if st.todos.is_empty() => (
+            "这个目标一条待办都没有".to_string(),
+            "zloop plan --add \"[P0] 第一件事\"（或在 Claude Code 里 `/zloop <目标>` 让它规划）".to_string(),
+        ),
+        "all_done" => (
+            format!("{} 条待办全做完了", st.todos.len()),
+            "zloop plan --add \"[P0] 下一件事\" 续上，或 zloop goal new \"<新目标>\" 开一个新的".to_string(),
+        ),
+        "paused" => ("当前目标是暂停着的".to_string(), "zloop resume 继续，或 zloop goal switch <id> 换一个".to_string()),
+        "done" => ("当前目标已经结束了".to_string(), "zloop goal new \"<新目标>\"".to_string()),
+        "fail_streak" => (
+            format!("连着 {} 轮失败，到了 policy.max_fail_streak 上限", tick::fail_streak(&st.ticks)),
+            "zloop log 看失败原因，zloop edit 改掉那条 todo（或 zloop feedback 留一句），再 start".to_string(),
+        ),
+        "progress_streak" => (
+            "同一条 todo 连着 progress 太多轮，到了 policy.max_progress_streak 上限".to_string(),
+            "zloop edit 把它拆小，再 start".to_string(),
+        ),
+        "budget" => (
+            format!("已花 ${:.2}，到了 policy.max_total_usd（${:.2}）上限", tick::spent_usd(&st.ticks), p.max_total_usd),
+            format!("改大 {}/{} 里的 policy.max_total_usd，再 start", state::STATE_DIR, state::STATE_FILE),
+        ),
+        "user_gate" | "blocked" => (
+            "能跑的待办一条都没有（都在等人或被挡着），而 --exit-on-wait 让 runner 等不了".to_string(),
+            "去掉 --exit-on-wait 就会挂着轮询等你；或者 zloop edit <id> --blocked-by \"\" 解开再 start".to_string(),
+        ),
+        "throttled" => (
+            format!("{} 小时窗口里已经跑满 policy.max_runs（{}）轮", p.window_hours, p.max_runs),
+            "等窗口滑过去，或改大 policy.max_runs，再 start".to_string(),
+        ),
+        other => (format!("调度器说 {other}"), "zloop next 看当前判断".to_string()),
+    };
+    format!("start: 没启动——runner 起来第一轮就会退出（{reason}）。\n原因：{why}。\n下一步：{next}")
 }
 
 fn cmd_init(dir: &Option<PathBuf>, goal: &str, force: bool) -> Result<i32> {
