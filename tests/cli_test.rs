@@ -313,6 +313,38 @@ fn install_keeps_your_edits_and_refuses_to_clobber_the_managed_part() {
     assert!(fs::read_to_string(&skill).unwrap().contains("fp="), "从此带上指纹");
 }
 
+/// 「目标存在但一条 todo 都没有」必须在 skill 的决策树里有自己的一支：
+/// 它最像的是"已完成"（`next` / `context` 对空清单也报 `all_done`），
+/// 照那一支走就会 `goal new` 出一个重复目标，把刚建的那个停放掉。
+#[test]
+fn skill_tells_you_to_plan_when_the_goal_has_no_todos() {
+    // 0 待办时三条命令各自说什么——决策树里写的分辨方法必须跟实际输出对得上
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "还没规划的目标"], None, &[]);
+    let status = zloop(d, &["status"], None, &[]).out;
+    assert!(status.contains("待规划") && status.contains("还没有待办"), "{status}");
+    let next: serde_json::Value = serde_json::from_str(&zloop(d, &["next", "--json"], None, &[]).out).unwrap();
+    assert_eq!(next["reason"], "all_done", "空清单今天复用 all_done，所以 skill 才需要这条提醒");
+    assert_eq!(next["remaining"], 0);
+
+    for host in ["claude", "codex-app"] {
+        let text = hosts::skill_markdown(host);
+        let branch = text.find("一条 todo 都没有").unwrap_or_else(|| panic!("{host} 模板缺「没有待办」这一支:\n{text}"));
+        assert!(text.contains("待规划") && text.contains("不要 `goal new`"), "{text}");
+        assert!(text.contains("all_done"), "得点破 all_done 这个歧义，否则读到它还是会当成已完成");
+        let trap = text.find(r#"`zloop goal new "$ARGUMENTS"`"#).expect("goal new 那一支还在");
+        assert!(branch < trap, "新分支要排在「已完成 → goal new」前面，先读到的才管用");
+    }
+
+    // 验收要求的是"install 之后新模板里能看到"，所以照 install 的路径再验一遍
+    let home = tempfile::tempdir().unwrap();
+    hosts::install(true, true, false, home.path(), false).unwrap();
+    for p in [".claude/skills/zloop/SKILL.md", ".codex/skills/zloop/SKILL.md"] {
+        assert!(fs::read_to_string(home.path().join(p)).unwrap().contains("一条 todo 都没有"), "{p}");
+    }
+}
+
 #[test]
 fn hook_stop_blocks_only_when_runnable() {
     let dir = tempfile::tempdir().unwrap();

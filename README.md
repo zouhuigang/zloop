@@ -679,6 +679,8 @@ zloop goal rm keep-awake         # 归档：从 list 消失，文件搬到 .zloo
 - 刚开的目标还没有待办时，`status` 是 `◦ 待规划`，不是"全部完成"。
 
 `/zloop 新目标` 也走这条路：skill 看到当前目标已完成、或新输入明显是另一件事，就 `zloop goal new`；如果当前目标还有没做完的 todo，它会先告诉你现状再问你要接着做还是开新目标。
+**刚 `goal new` 完、一条待办都没有的目标是单独一支**：skill 直接给它 `zloop plan`，不会再 `goal new` 出一个重名的把它停放掉——
+因为 `next` / `context` 对空清单也报 `all_done`，跟"全部完成"是同一个词，光看那个会判错（`status` 的 `◦ 待规划` 才分得清）。
 
 #### 边界：goals 只看得见当前项目（这是取舍，不是缺陷）
 
@@ -1584,7 +1586,7 @@ name: "zloop"
 …
 ---
 
-<!-- zloop-managed:v1 fp=951d4b55f04640e8 -->      ← 托管区从这里开始，指纹钉住内容
+<!-- zloop-managed:v1 fp=18b64d5b1c389b09 -->      ← 托管区从这里开始，指纹钉住内容
 # zloop /zloop
 …（每轮协议、决策规则，升级时由 install 更新）
 
@@ -1601,7 +1603,7 @@ name: "zloop"
 
 ```
 $ zloop install --claude
-zloop: …/SKILL.md 的托管区被改过（指纹 951d4b55f04640e8 → 72d72766099da9e7），install 不会悄悄盖掉它。
+zloop: …/SKILL.md 的托管区被改过（指纹 18b64d5b1c389b09 → 72d72766099da9e7），install 不会悄悄盖掉它。
 把你的改动移到 `<!-- zloop:user -->` 之后（那一段永远保留），或者加 --force 用模板覆盖。
 ```
 

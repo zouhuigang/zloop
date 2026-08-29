@@ -100,7 +100,9 @@ const BODY: &str = r#"
 
 1. 定目标：
    - 未初始化 → `zloop init "$ARGUMENTS"`
-   - 当前目标已完成，或新输入明显是**另一件事** → `zloop goal new "$ARGUMENTS"`：当前目标原地停放，`zloop goal switch <id>` 随时切回，什么都不丢。**别把新活挂到旧目标名下**，那会让目标文字和实际做的事对不上。
+   - 当前目标**存在但一条 todo 都没有**（`zloop status` 显示 `◦ 待规划` / "还没有待办"）→ **不要 `goal new`**，直接进第 2 步给它规划；只有新输入明显是另一件事时才 `goal new`。
+     注意 `zloop context` / `next --json` 会把"还没规划"也说成 `all_done`（跟"全部完成"同一个词），别据此判成已完成——**0 轮 + 0 条待办 = 没规划过**，`zloop status` 分得清。
+   - 当前目标**已完成**（跑过轮次、todo 全部 done），或新输入明显是**另一件事** → `zloop goal new "$ARGUMENTS"`：当前目标原地停放，`zloop goal switch <id>` 随时切回，什么都不丢。**别把新活挂到旧目标名下**，那会让目标文字和实际做的事对不上。
    - 当前目标还有没做完的 todo，而新输入像是它的延伸 → 先告知当前目标 + 剩余步骤，问用户"接着做"还是"开新目标"；说开新的就 `zloop goal new`。
    - 不要用 `zloop init --force`：它归档旧目标且切不回来。
 2. 把目标拆成 2–5 条**可验证**的 todo，每行 `[P0]`/`[P1]`/`[P2]` + 文本，按执行顺序通过 stdin 交给 `zloop plan`。
