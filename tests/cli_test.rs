@@ -198,6 +198,66 @@ fn context_respects_budget_and_names_next() {
     assert!(o.out.contains("## 目标"));
 }
 
+/// 预算小到连保护区都放不下时的行为（#13）。
+/// 三条不变量：不崩、不留半个章节、丢的顺序永远是"保护区最后走"。
+#[test]
+fn context_survives_absurdly_small_budgets() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "Long goal text for the context packet"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] first thing", "--add", "[P1] second thing"], None, &[]);
+    zloop(d, &["remember", "done 之前一定要跑 cargo test", "--rule"], None, &[]);
+    zloop(d, &["remember", "一条留给下一轮的经验"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "done first", "--no-doc"], None, &[("CLAUDE_CODE_SESSION_ID", "sess-1")]);
+
+    let full = zloop(d, &["context"], None, &[]).out;
+    // 保护区（到「下一条」为止）和它后面可裁的那几节，都得先在默认预算下真的出现过，
+    // 不然下面的"谁先被丢"根本没在测东西
+    for head in ["## 目标", "## 本项目的约定", "## 当前判断", "## 下一条"] {
+        assert!(full.contains(head), "默认预算下应有 {head}：{full}");
+    }
+    for head in ["## 待办", "## 会话", "## 经验", "## 怎么继续"] {
+        assert!(full.contains(head), "默认预算下应有 {head}：{full}");
+    }
+
+    // 0 也是合法预算：不能 panic，也不能吐出任何字符
+    for budget in [0usize, 1, 3, 5, 7, 8, 20, 60, 120, 200, 300, 500, 700, 1000, 4000] {
+        let o = zloop(d, &["context", "--budget", &budget.to_string()], None, &[]);
+        assert_eq!(o.code, 0, "budget={budget} 不该失败：{}{}", o.out, o.err);
+        let text = o.out.trim_end_matches('\n');
+        let len = text.chars().count();
+        assert!(len <= budget, "budget={budget} 却输出了 {len} 个字符：{text:?}");
+
+        // 不产生半个章节：留下的每一行要么是完整小标题，要么是某个小标题下面的内容
+        for line in text.lines() {
+            assert!(!line.starts_with("##") || line.starts_with("## "), "budget={budget} 出现了被切断的标题 {line:?}");
+        }
+        // 光有标题没内容的尾巴也算半个章节
+        assert!(!text.trim_end().ends_with("## 目标"), "budget={budget} 只剩一个光标题：{text:?}");
+        // 老实现会把最后一段截在半个字上（"…"），现在只整节整行地丢
+        assert!(!text.contains('…'), "budget={budget} 仍在半路截断：{text:?}");
+
+        // 保护区优先：外层的节只要还在，说明里层的节一定也还在
+        let has = |h: &str| text.contains(h);
+        if has("## 怎么继续") {
+            assert!(has("## 下一条"), "budget={budget}「怎么继续」活着而「下一条」被丢了：{text:?}");
+        }
+        if has("## 待办") || has("## 会话") || has("## 经验") {
+            assert!(has("## 下一条") && has("## 怎么继续"), "budget={budget} 先丢了保护区/收尾：{text:?}");
+        }
+        if has("## 下一条") {
+            assert!(has("## 当前判断") && has("## 本项目的约定") && has("## 目标"), "budget={budget} 保护区被穿了：{text:?}");
+        }
+        if has("## 当前判断") {
+            assert!(has("## 本项目的约定") && has("## 目标"), "budget={budget} 保护区被穿了：{text:?}");
+        }
+    }
+
+    // 预算大到装得下全部时，一节都不该少
+    let o = zloop(d, &["context", "--budget", "100000"], None, &[]);
+    assert_eq!(o.out, full, "预算足够时输出应与默认一致");
+}
+
 #[test]
 fn install_is_idempotent_and_refuses_unmanaged() {
     let home = tempfile::tempdir().unwrap();

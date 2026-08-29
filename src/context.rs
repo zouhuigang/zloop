@@ -164,15 +164,43 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
     sections.push(format!("## 怎么继续\n{}", resume_hint(for_host)));
 
     // Trim from the tail (keep 目标 / 当前判断 / 下一条 as long as possible).
+    // 丢的顺序：先保护区之外的（"怎么继续"是其中最后一个丢的），实在放不下才从
+    // 保护区尾部往前丢，"## 目标"永远留着。整节整节地丢，不留半节。
     let render = |secs: &[String]| secs.join("\n\n");
     let mut kept = sections.clone();
-    while kept.len() > protected && render(&kept).chars().count() > budget {
-        let drop_idx = kept.len() - 2; // keep the last "怎么继续" line, drop the one before it
+    while kept.len() > 1 && render(&kept).chars().count() > budget {
+        // 保护区之外还剩两节以上时留住末尾的"怎么继续"；否则就丢最后一节
+        let drop_idx = if kept.len() >= protected + 2 { kept.len() - 2 } else { kept.len() - 1 };
         kept.remove(drop_idx);
     }
-    let mut out = render(&kept);
-    if out.chars().count() > budget {
-        out = out.chars().take(budget.saturating_sub(1)).collect::<String>() + "…";
+    let out = render(&kept);
+    // 连"## 目标"一节都放不下（预算小到几十个字符）：按整行截，
+    // 宁可少一行也不留半行或者一个被切断的"##"标题。
+    if out.chars().count() > budget { head_lines(&out, budget) } else { out }
+}
+
+/// `text` 里能放进 `budget` 个字符的前若干**完整**行，一行都放不下就返回空串。
+fn head_lines(text: &str, budget: usize) -> String {
+    let mut used = 0usize;
+    let mut end = 0usize; // 已接受的部分在 text 里的字节长度
+    for line in text.split_inclusive('\n') {
+        let n = line.chars().count();
+        if used + n > budget {
+            // 末尾那个换行符本身可以不算：整行正好卡在预算边界上时仍然收下
+            let bare = line.strip_suffix('\n');
+            match bare {
+                Some(b) if used + b.chars().count() <= budget => end += b.len(),
+                _ => {}
+            }
+            break;
+        }
+        used += n;
+        end += line.len();
     }
-    out
+    let mut out = text[..end].trim_end();
+    // 光剩一个小标题、底下一行内容都没有，那就连标题一起丢：宁可空着，也不给半个章节
+    while out.rsplit('\n').next().is_some_and(|l| l.starts_with("## ")) {
+        out = out.rsplit_once('\n').map_or("", |(head, _)| head).trim_end();
+    }
+    out.to_string()
 }
