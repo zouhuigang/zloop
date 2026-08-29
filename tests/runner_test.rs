@@ -722,6 +722,53 @@ esac"#,
 /// 无头模式下按信号插一轮重估：**只产出建议，绝不自己改 todo**。
 /// 计划是人和 agent 共同定稿的东西——没人点头的时候，runner 最多只能提议。
 #[test]
+fn a_standing_block_only_triggers_one_replan_until_someone_else_gets_stuck() {
+    // `blocked` 是这几个信号里唯一的**锁存**：其余四个从近期活动推出来、会自然衰减，
+    // 而它一旦挂上，无头模式下没人能来解，于是每一轮都会放炮。踩过：一次 4 小时的
+    // 长跑里 5 次重估全由同一条「t21 在等你回话」触发。所以按**边沿**处理。
+    let d = project(&["[P0] 要人拍板的一条", "[P0] 第二条", "[P0] 第三条", "[P0] 第四条"]);
+    let mark = tempfile::tempdir().unwrap().keep();
+    // 干活的轮次一律写回 done：progress 会把返工率推上去，`rework` 一响就成了另一个信号，
+    // 那时重估是**该**跑的，测不出锁存这一条。第一轮把 t1 挂到人身上，
+    // 之后每一轮 `blocked` 都成立，但等的始终是同一个人。
+    let fake = fake_host(
+        r#"case "$2" in
+  *"重估一次"*)
+     echo x >> "$TMPDIR_MARK/replan-count"
+     echo '{"session_id":"rp","is_error":false,"result":"建议：先等人回话"}' ;;
+  *) id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+     if [ ! -f "$TMPDIR_MARK/blocked" ]; then
+       touch "$TMPDIR_MARK/blocked"
+       zloop done "$id" --outcome progress --block "这条要你拍板" --note "挂起" >/dev/null 2>&1
+     else
+       zloop done "$id" --note "做完了" --approach "假宿主一轮" --no-doc >/dev/null 2>&1
+     fi
+     echo '{"session_id":"s","is_error":false,"result":"ok"}' ;;
+esac"#,
+    );
+    let (code, out, _) = run(
+        &d,
+        &["run", "--host", "claude", "--fast", "--max-rounds", "4"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "{out}");
+
+    let st = state::load(&state::state_path(&d)).unwrap();
+    let work = st.ticks.iter().filter(|t| t.outcome == "done").count();
+    let replans = st.ticks.iter().filter(|t| t.outcome == "replan").count();
+    assert!(work >= 3, "得真跑几轮才测得出重复: {:?}", st.ticks.iter().map(|t| &t.outcome).collect::<Vec<_>>());
+    assert!(st.todos[0].blocked_by.contains(&"user".to_string()), "t1 全程挂在人身上");
+    // 挂起那一轮响一次；后面几轮等的还是同一个人，不该再烧模型轮次
+    assert_eq!(
+        replans, 1,
+        "同一批人一直在被等，只该重估一次（实到 {replans} 次 / {work} 轮活）: {:?}",
+        st.ticks.iter().map(|t| &t.outcome).collect::<Vec<_>>()
+    );
+    let fired = fs::read_to_string(mark.join("replan-count")).unwrap_or_default().lines().count();
+    assert_eq!(fired, 1, "宿主也只该被叫去重估一次");
+}
+
+#[test]
 fn a_headless_replan_round_suggests_but_never_edits_the_plan() {
     let d = project(&["[P0] 会拖的一条", "[P0] 另一条", "[P1] 第三条"]);
     let mark = tempfile::tempdir().unwrap().keep();

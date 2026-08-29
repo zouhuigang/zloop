@@ -1790,3 +1790,30 @@ fn done_only_nudges_a_replan_when_the_ledger_says_something_is_off() {
     let o = zloop(d, &["done", "t3", "--note", "好了", "--no-doc"], None, &[]);
     assert!(!o.out.contains("计划可能要调整"), "{}", o.out);
 }
+
+#[test]
+fn a_finished_todo_no_longer_counts_as_waiting_on_you() {
+    // `blocked_by` 是履历不是现状：todo 做完之后这一栏原样留着，用来记「这条当初卡过人」。
+    // 信号要是不排除终态，一条早就 done 的 todo 会让「在等你回话」永远响下去。
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "升级本机工具链"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 换二进制", "--add", "[P1] 收尾验收"], None, &[]);
+
+    // t1 卡在人身上：该响
+    let o = zloop(d, &["done", "t1", "--outcome", "progress", "--block", "现在装还是跑完再装？", "--note", "等人"], None, &[]);
+    assert!(o.out.contains("t1 在等你回话"), "挂起时要提醒: {}", o.out);
+    assert!(zloop(d, &["replan"], None, &[]).out.contains("[blocked]"), "材料包里也要有");
+
+    // 人回话、t1 做完了：blocked_by 还留着 user，但它不再等任何人
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert!(st.todos[0].blocked_by.contains(&"user".to_string()), "履历要留着");
+    zloop(d, &["done", "t1", "--note", "装好了", "--approach", "cargo install", "--no-doc"], None, &[]);
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert_eq!(st.todos[0].status, "done");
+    assert!(st.todos[0].blocked_by.contains(&"user".to_string()), "done 之后 blocked_by 原样保留（这正是坑的来源）");
+
+    let o = zloop(d, &["done", "t2", "--outcome", "progress", "--note", "在做"], None, &[]);
+    assert!(!o.out.contains("t1 在等你回话"), "t1 已经做完了，别再说它在等人: {}", o.out);
+    assert!(!zloop(d, &["replan"], None, &[]).out.contains("t1 在等你回话"), "材料包同理");
+}

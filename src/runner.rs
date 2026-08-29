@@ -533,6 +533,12 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
     let mut rounds_done: u32 = 0;
     let mut last_reflect: Option<u32> = None;
     let mut replan_at: Option<u64> = None;
+    // 上一次重估时「在等人回话」的那批 todo。`blocked` 是这几个信号里唯一的**锁存**：
+    // 其余四个都从近期活动推出来、会自然衰减，而它一旦挂上，在无头模式下没人能来解，
+    // 于是每一轮都会放炮。踩过：一次 4 小时的长跑里 5 次重估全由同一条 `t21 在等你回话`
+    // 触发，占掉全程花费的两成多。所以对它按**边沿**处理——有新的 todo 开始等人才响。
+    // 不是「只响一次」：那次实测里第 16 轮只给出判断、第 17 轮才产出重算窗口的证据表。
+    let mut replan_blocked: Option<String> = None;
     let mut notified: Option<String> = None; // dedupe: one notification per distinct wait/limit situation
     loop {
         if stop_requested() {
@@ -763,8 +769,12 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
         if !opts.no_replan && wrote_back && replan_at != Some(round_no) {
             let st = state::load(&path)?;
             let sig = crate::replan::signals(&st);
-            if !sig.is_empty() && crate::todo::remaining(&st) > 0 {
+            // 全部信号都是 blocked、而且等的还是上次那批人——不重复烧一轮模型
+            let blocked_now = sig.iter().find(|s| s.kind == "blocked").map(|s| s.detail.clone());
+            let latched = sig.iter().all(|s| s.kind == "blocked") && blocked_now.is_some() && blocked_now == replan_blocked;
+            if !sig.is_empty() && !latched && crate::todo::remaining(&st) > 0 {
                 replan_at = Some(round_no);
+                replan_blocked = blocked_now;
                 let why: Vec<String> = sig.iter().map(|s| s.detail.clone()).collect();
                 println!("runner: 第 {round_no} 轮之后重估计划（{}）", why.join(" · "));
                 let text = format!(

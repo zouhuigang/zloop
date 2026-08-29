@@ -100,9 +100,17 @@ pub fn signals(state: &State) -> Vec<Signal> {
         });
     }
 
-    // 被挡：计划里有需要人决定却没拆出来的分叉
-    let blocked: Vec<&str> =
-        state.todos.iter().filter(|t| t.blocked_by.iter().any(|b| b == todo::USER)).map(|t| t.id.as_str()).collect();
+    // 被挡：计划里有需要人决定却没拆出来的分叉。
+    //
+    // **只看还没了结的**：`blocked_by` 是履历不是现状——todo 做完之后这一栏原样留着，
+    // 用来记「这条当初卡过人」。不排除终态的话，一条早就 done 的 todo 会让这个信号
+    // 永远响下去（踩过：t21 完成后每次写回都还在提示「t21 在等你回话」）。
+    let blocked: Vec<&str> = state
+        .todos
+        .iter()
+        .filter(|t| !todo::is_terminal(&t.status) && t.blocked_by.iter().any(|b| b == todo::USER))
+        .map(|t| t.id.as_str())
+        .collect();
     if !blocked.is_empty() {
         out.push(Signal { kind: "blocked", detail: format!("{} 在等你回话", blocked.join("、")) });
     }
