@@ -50,7 +50,8 @@ $ warpctrl run list / run get <run-id>
 zloop 已经有 runner + `intervals_min`，`--reflect-every N` 就是"每 N 轮把 prompt 换一份跑一轮"。
 两个字段值得照抄：**`enabled`（能单独关掉，不必停整个 runner）** 和
 **`last_spawn_error`（记下上一次为什么没跑起来，而不是静默不跑）**——后者正是 zloop 现在缺的那类可观测性
-（对比：空目标 `zloop start` 会启动后立刻 `stop (all_done)`，没人告诉你原因是"还没规划"）。
+（当时的对比：空目标 `zloop start` 会启动后立刻 `stop (all_done)`，没人告诉你原因是"还没规划"。
+后来 #6 让 `start` 当场拒绝并说下一步，#5 又把这种情况的 reason 从 `all_done` 分出来叫 `unplanned`。）
 
 ### 1.2 「改进 skill」在 Warp 那边是一条 eval 回路，不是一次聪明的改写
 

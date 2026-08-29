@@ -1,7 +1,7 @@
 //! The scheduler: `decide()` answers "should we run now, and on which todo?".
 //!
 //! State ladder (highest wins):
-//!     paused/done > all_done > user_gate/blocked > fail_streak > throttled > ready
+//!     paused/done > unplanned/all_done > user_gate/blocked > fail_streak > throttled > ready
 
 use crate::session::HostSession;
 use crate::state::{format_iso, now, parse_iso, State, Tick, Todo};
@@ -195,7 +195,10 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
     }
     let open = todo::open_ordered(state);
     if open.is_empty() {
-        return Decision::stop("all_done");
+        // 「一条都还没规划」和「全部做完了」是两件事，出口动作正好相反：前者要 `zloop plan`，
+        // 后者才该开新目标。共用 `all_done` 这一个词时，skill 的「已完成 → goal new」那一支
+        // 会把刚 `goal new` 出来的空目标当成做完的，再新建一个重名目标把它停放掉（#5）。
+        return Decision::stop(if state.todos.is_empty() { "unplanned" } else { "all_done" });
     }
     let noops = noop_streak(ticks);
     let exhausted = noops >= policy.max_noop_streak;

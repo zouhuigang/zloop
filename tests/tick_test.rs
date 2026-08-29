@@ -22,6 +22,21 @@ fn paused_goal_stops() {
     assert_eq!((d.should_run, d.reason.as_str(), d.interval_min), (false, "paused", None));
 }
 
+/// 空清单 ≠ 全部完成：前者是"还没规划"（去 plan），后者是"活干完了"（去开新目标）。
+/// 共用 `all_done` 时读的人会照"已完成"那一支走，把刚建的目标 goal new 成重名的（#5）。
+#[test]
+fn empty_plan_says_unplanned_not_all_done() {
+    let st = fresh(&[]);
+    let d = tick::decide(&st, now_utc());
+    assert_eq!((d.should_run, d.reason.as_str(), d.interval_min), (false, "unplanned", None));
+
+    // 有过 todo、只是都了结了：还是 all_done，这条路不受影响
+    let mut st = fresh(&["[P0] a"]);
+    done(&mut st, "t1");
+    st.goal.status = "active".into(); // apply_done 会顺手把目标标成 done，这里只看清单那一层
+    assert_eq!(tick::decide(&st, now_utc()).reason, "all_done");
+}
+
 #[test]
 fn all_done_marks_goal_done() {
     let mut st = fresh(&["[P0] a"]);

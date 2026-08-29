@@ -217,7 +217,7 @@ loop {
 ```
 
 - **幂等 / 崩溃恢复**：journal 每轮两行（begin / end）。启动时若最后一行是 begin 无 end → 上次进程在宿主执行中被杀；不重放（模型可能已 `done`），只在 tick 里记一条 `edit` 类型注释"runner restarted"，然后正常 `decide`（若模型已 done，next 自然指向下一条；若没写回，本轮会算 fail）。这比 loopx 的 6 阶段 checkpoint 粗，但满足"不重复 tick、能续"。
-- **停机条件**全部来自 `decide()`：all_done / user_gate / fail_streak / noop_streak / throttled(interval=None)，runner 不另设一套。
+- **停机条件**全部来自 `decide()`：unplanned（一条 todo 都没有）/ all_done（有过 todo 全了结）/ user_gate / fail_streak / noop_streak / throttled(interval=None)，runner 不另设一套。
 - **权限**默认最小：只放行 `Bash(zloop:*)` + 读写编辑；`--allow-all` 才 `--dangerously-skip-permissions` / `danger-full-access`。
 
 ## 10. 与 loopx 的对应关系（照搬清单）

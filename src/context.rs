@@ -110,6 +110,9 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
     let decision = tick::decide(state, at);
     let next = match &decision.todo {
         Some(t) => format!("{} [P{}] {}", t.id, t.priority, t.text),
+        // `unplanned` 是唯一一个"读者该做的事跟停机词字面意思相反"的 reason：
+        // 不是没活了，是活还没写下来。直说下一步，省得被当成"目标已完成"（#5）。
+        None if decision.reason == "unplanned" => "（unplanned：还没有待办，先 zloop plan 规划几条，别新建目标）".to_string(),
         None => format!("（{}）", decision.reason),
     };
     sections.push(format!("## 下一条\n{next}"));
@@ -131,7 +134,13 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
     sections.push(format!(
         "## 待办（前 5 条，共 {} 条未完成）\n{}",
         todo::remaining(state),
-        if open.is_empty() { "- 全部完成".to_string() } else { open.join("\n") }
+        match () {
+            // 空清单有两种：还没规划过（去 plan）和全做完了（去开新目标）。写死"全部完成"
+            // 会让刚建的空目标看着像收工了，读的人就去 goal new 一个重名的（#5）。
+            _ if !open.is_empty() => open.join("\n"),
+            _ if state.todos.is_empty() => "- 还没有待办：先 zloop plan".to_string(),
+            _ => "- 全部完成".to_string(),
+        }
     ));
 
     let sessions = session::summarize(state, root);

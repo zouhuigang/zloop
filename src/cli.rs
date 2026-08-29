@@ -535,7 +535,7 @@ pub fn run(cli: Cli) -> Result<i32> {
 fn start_refusal(st: &state::State, reason: &str) -> String {
     let p = &st.policy;
     let (why, next) = match reason {
-        "all_done" if st.todos.is_empty() => (
+        "unplanned" => (
             "这个目标一条待办都没有".to_string(),
             "zloop plan --add \"[P0] 第一件事\"（或在 Claude Code 里 `/zloop <目标>` 让它规划）".to_string(),
         ),

@@ -695,8 +695,9 @@ zloop goal rm keep-awake         # 归档：从 list 消失，文件搬到 .zloo
 - 刚开的目标还没有待办时，`status` 是 `◦ 待规划`，不是"全部完成"。
 
 `/zloop 新目标` 也走这条路：skill 看到当前目标已完成、或新输入明显是另一件事，就 `zloop goal new`；如果当前目标还有没做完的 todo，它会先告诉你现状再问你要接着做还是开新目标。
-**刚 `goal new` 完、一条待办都没有的目标是单独一支**：skill 直接给它 `zloop plan`，不会再 `goal new` 出一个重名的把它停放掉——
-因为 `next` / `context` 对空清单也报 `all_done`，跟"全部完成"是同一个词，光看那个会判错（`status` 的 `◦ 待规划` 才分得清）。
+**刚 `goal new` 完、一条待办都没有的目标是单独一支**：skill 直接给它 `zloop plan`，不会再 `goal new` 出一个重名的把它停放掉。
+这一支在三个出口上都认得出来：`next --json` / `context` 报的 reason 是 **`unplanned`**（不是 `all_done`），`context` 的待办节写"还没有待办：先 zloop plan"，`status` 是 `◦ 待规划`。
+`all_done` 只留给"有过 todo、现在全了结了"——那才该开新目标。两件事出口动作相反，所以不共用一个词（#5）。
 
 #### 边界：goals 只看得见当前项目（这是取舍，不是缺陷）
 
@@ -1543,7 +1544,7 @@ claude 11111111-2222-3333-4444-555555555555  ticks 7   2026-08-28T20:15:11+08:00
 
 ```bash
 $ zloop start                     # 还没规划过
-start: 没启动——runner 起来第一轮就会退出（all_done）。
+start: 没启动——runner 起来第一轮就会退出（unplanned）。
 原因：这个目标一条待办都没有。
 下一步：zloop plan --add "[P0] 第一件事"（或在 Claude Code 里 `/zloop <目标>` 让它规划）
 ```
@@ -1679,10 +1680,11 @@ $ zloop notify "试一下"
 ### `next` 怎么决定
 
 ```
-paused/done  >  all_done  >  user_gate / blocked  >  fail_streak  >  progress_streak  >  throttled  >  ready
+paused/done  >  unplanned / all_done  >  user_gate / blocked  >  fail_streak  >  progress_streak  >  throttled  >  ready
 ```
 
 - 有可执行 todo（`open` 且 `blocked_by` 全部 done）→ `ready`，选 `(priority, 写入顺序)` 最靠前的一条，`interval_min = 3`。
+- 一条 todo 都没有 → `unplanned`（去 `zloop plan`）；有过 todo 但全了结了 → `all_done`（去开新目标）。两者都是 `interval_min = null`，但下一步不一样，所以不共用一个词。
 - 全部 blocked 且有人在等 → `user_gate`；纯依赖未满足 → `blocked`。退避 10 → 30 分钟，交互式连续 3 次 noop 后 `interval_min = null`。
 - 最近连续 3 次 `fail` → `fail_streak`；同一 todo 连续 8 次 `progress` → `progress_streak`；两者都停下等人，`edit` 重置。
 - 24 小时窗口内记账满 `max_runs` → `throttled`，给出几分钟后释放。
