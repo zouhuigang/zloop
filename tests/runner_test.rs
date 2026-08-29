@@ -590,10 +590,14 @@ fn reflect_every_inserts_a_round_that_does_not_consume_a_todo() {
     let d = project(&["[P0] a", "[P0] b", "[P0] c"]);
     // 回看那一轮的 prompt 里有「回看一次」；todo 轮次的 prompt 里有「本轮由 zloop runner」。
     // 假宿主据此分辨自己被叫来干嘛：回看只回话，todo 轮次才写回。
+    // 回看那一轮的输出**故意超过 300 字**：无头回看不写回账本，这份全文是它唯一的产物，
+    // 曾经 runner 在 300 字处截断，建议清单的后半截就此消失。
     let fake = fake_host(
         r#"case "$2" in
   *"回看一次"*) echo "$2" > "$TMPDIR_MARK/reflect-prompt"
-     echo '{"session_id":"r","is_error":false,"result":"建议：第 1、2 条合并"}' ;;
+     body="建议：第 1、2 条合并"
+     i=1; while [ $i -le 40 ]; do body="$body ·第 $i 条要点写清楚"; i=$((i+1)); done
+     printf '{"session_id":"r","is_error":false,"result":"%s 最后一条：TAIL-MARKER-END"}\n' "$body" ;;
   *) id=$(zloop next --json | sed -n 's/.*"id": "\([^"]*\)".*/\1/p' | head -1)
      zloop done "$id" --note "done by fake" --approach "fake host round" >/dev/null 2>&1
      echo '{"session_id":"s","is_error":false,"result":"ok"}' ;;
@@ -614,12 +618,26 @@ esac"#,
     let r = reflects[0];
     assert!(r.todo.is_none(), "回看不挂在任何 todo 上");
     assert!(r.note.contains("建议"), "宿主的输出要记进账本: {}", r.note);
-    assert!(r.log.as_ref().is_some_and(|l| l.contains("reflect")), "完整输出留在日志里: {r:?}");
+    assert!(!r.note.contains("TAIL-MARKER-END"), "账本里只留摘要，不塞全文: {}", r.note);
+
+    // 全文落盘：日志里一个字都不能少（截断过的版本到不了 TAIL-MARKER-END）
+    let rel = r.log.as_ref().expect("回看要留日志");
+    assert!(rel.contains("reflect"), "{rel}");
+    let body = fs::read_to_string(d.join(".zloop").join(rel)).unwrap();
+    assert!(body.contains("TAIL-MARKER-END"), "回看全文被截断了，尾巴没落盘：{body}");
+    assert!(body.contains("·第 40 条要点写清楚"), "中间也不能缺：{body}");
+    assert!(body.chars().count() > 400, "只有 {} 字，像是被截过", body.chars().count());
 
     // 不占 todo 轮次：三条 todo 该做完的照样做完
     assert_eq!(st.todos.iter().filter(|t| t.status == "done").count(), 3, "{:?}", st.todos);
     // 回看那一轮不推进轮次编号
     assert_eq!(zloop::tick::current_round(&st.ticks), 3);
+    // 「跑了几轮」只有一个定义：status 和 stats 报同一个数，回看不算一轮
+    assert_eq!(zloop::tick::rounds(&st.ticks), 3, "{:?}", st.ticks.iter().map(|t| &t.outcome).collect::<Vec<_>>());
+    let status = run(&d, &["status"], &[]).1;
+    assert!(status.contains("跑了 3 轮"), "status 把回看也算成一轮了：{status}");
+    let stats = run(&d, &["stats", "--json"], &[]).1;
+    assert!(stats.contains("\"rounds\": 3"), "{stats}");
     // 它也没动经验文件
     assert!(!d.join(".zloop/NOTES.md").exists(), "无头回看不该自己落地");
     // 材料包确实是回看用的那一份

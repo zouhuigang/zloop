@@ -345,10 +345,19 @@ struct HostResult {
     timed_out: bool,
     interrupted: bool,
     rate_limited: bool,
-    summary: String,
+    /// 宿主这一轮说的话，**全文**（拿不到 result 就退回 stderr）。
+    ///
+    /// 别在这里截断：回看 / 重估那两种轮次不写回账本，宿主的输出就是它们**唯一**的产物，
+    /// 截在 300 字会把建议清单砍掉大半。要摘要的地方（tick.note、控制台）自己截。
+    output: String,
     cost_usd: Option<f64>,
     num_turns: Option<u64>,
     duration_ms: Option<u64>,
+}
+
+/// 落进 tick.note 的那一句：账本只存摘要，全文在 `.zloop/log/` 里。
+fn ledger_note(output: &str, max: usize) -> String {
+    crate::style::truncate(&output.replace('\n', " "), max)
 }
 
 fn looks_rate_limited(text: &str) -> bool {
@@ -381,15 +390,15 @@ fn run_claude(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, t
     let ok_status = cap.status.map(|s| s.success()).unwrap_or(false);
     let is_error = get("is_error").and_then(|v| v.as_bool()).unwrap_or(!ok_status);
     let result_text = get("result").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    let summary: String = if !result_text.is_empty() { result_text.chars().take(300).collect() } else { cap.stderr.chars().take(300).collect() };
     let rate_limited = (is_error || !ok_status) && looks_rate_limited(&format!("{result_text}\n{}", cap.stderr));
+    let output = if !result_text.is_empty() { result_text } else { cap.stderr };
     Ok(HostResult {
         session,
         exit_ok: ok_status && !is_error,
         timed_out: cap.timed_out,
         interrupted: cap.interrupted,
         rate_limited,
-        summary,
+        output,
         cost_usd: get("total_cost_usd").and_then(|v| v.as_f64()),
         num_turns: get("num_turns").and_then(|v| v.as_u64()),
         duration_ms: get("duration_ms").and_then(|v| v.as_u64()).or(Some(elapsed_ms)),
@@ -429,16 +438,16 @@ fn run_codex(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, ti
         }
     }
     let last = fs::read_to_string(&last_msg).unwrap_or_default();
-    let summary: String = if !last.trim().is_empty() { last.chars().take(300).collect() } else { cap.stderr.chars().take(300).collect() };
     let ok_status = cap.status.map(|s| s.success()).unwrap_or(false);
     let rate_limited = !ok_status && looks_rate_limited(&format!("{}\n{}", cap.stderr, cap.stdout));
+    let output = if !last.trim().is_empty() { last } else { cap.stderr };
     Ok(HostResult {
         session,
         exit_ok: ok_status,
         timed_out: cap.timed_out,
         interrupted: cap.interrupted,
         rate_limited,
-        summary,
+        output,
         cost_usd: None,
         num_turns: None,
         duration_ms: Some(elapsed_ms),
@@ -555,7 +564,8 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 _ => run_claude(root, &text, None, &opts, timeout)?,
             };
             let who = HostSession { host: opts.host, session: result.session.clone() };
-            let body = result.summary.trim().to_string();
+            // 回看不写回账本：这份全文就是它唯一的产物，一个字都不能少。
+            let body = result.output.trim().to_string();
             let summary = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("(没有输出)");
             let rel = crate::log::write_raw(root, "reflect", &format!("# 回看 · 第 {rounds_done} 轮之后\n\n{body}\n"))?;
             state::transaction(&path, |st| {
@@ -660,7 +670,7 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 } else if result.exit_ok {
                     "runner: host finished without writing back".to_string()
                 } else {
-                    format!("runner: host failed: {}", result.summary.replace('\n', " "))
+                    format!("runner: host failed: {}", ledger_note(&result.output, 300))
                 };
                 tick::record(st, "fail", Some(&todo.id), &note, &who)?;
             }
@@ -704,10 +714,10 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
             let st = state::load(&path)?;
             let m = slowest_interval(&st);
             println!("runner: round {round_no} host rate-limited · not counted · sleeping {} {} · {}", m,
-                     if opts.fast { "s" } else { "min" }, result.summary.lines().next().unwrap_or("").chars().take(100).collect::<String>());
+                     if opts.fast { "s" } else { "min" }, result.output.lines().next().unwrap_or("").chars().take(100).collect::<String>());
             if notified.as_deref() != Some("rate_limited") {
                 notify(root, &st, "rate_limited", &format!("{} {} 后重试：{}", m, if opts.fast { "秒" } else { "分钟" },
-                    result.summary.lines().next().unwrap_or("").chars().take(120).collect::<String>()));
+                    result.output.lines().next().unwrap_or("").chars().take(120).collect::<String>()));
                 notified = Some("rate_limited".into());
             }
             journal_sleep(root, m, opts.fast, "host_rate_limited")?;
@@ -719,7 +729,7 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
         println!(
             "runner: round {round_no} {} · {}",
             if wrote_back { "written back" } else if result.timed_out { "TIMED OUT (recorded fail)" } else { "NO WRITEBACK (recorded fail)" },
-            result.summary.lines().next().unwrap_or("").chars().take(120).collect::<String>()
+            result.output.lines().next().unwrap_or("").chars().take(120).collect::<String>()
         );
         if let Some(sid) = &result.session {
             if let Some(cmd) = session::resume_command(opts.host, sid) {
@@ -755,7 +765,8 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                     _ => run_claude(root, &text, None, &opts, timeout)?,
                 };
                 let who = HostSession { host: opts.host, session: result.session.clone() };
-                let body = result.summary.trim().to_string();
+                // 同上：重估也不写回账本，全文落盘。
+                let body = result.output.trim().to_string();
                 let summary = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("(没有输出)");
                 let rel = crate::log::write_raw(
                     root,

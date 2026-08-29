@@ -87,7 +87,7 @@ pub fn compute(state: &State) -> Stats {
     }
 
     let counted = |o: &str| state.ticks.iter().filter(|k| k.outcome == o).count();
-    let rounds = state.ticks.iter().filter(|k| tick::COUNTED.contains(&k.outcome.as_str())).count();
+    let rounds = tick::rounds(&state.ticks);
     let rework = counted("progress") + counted("fail");
     let done = state.todos.iter().filter(|t| t.status == "done").count();
     Stats {

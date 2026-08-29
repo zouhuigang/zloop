@@ -1032,7 +1032,7 @@ goal is now active
 
 | 数字 | 怎么算的 |
 |---|---|
-| 轮次 | `done` + `progress` + `fail` 的 tick 数（`noop` / `edit` / `feedback` / `reflect` / `replan` 都不算） |
+| 轮次 | `done` + `progress` + `fail` 的 tick 数（`block` / `noop` / `edit` / `feedback` / `reflect` / `replan` 都不算）；`zloop status` 标题上的「跑了 N 轮」用的是同一个定义 |
 | 返工 | `progress` + `fail` 的轮数；括号里是它占轮次的比例 |
 | 一次过 | 一轮做完、中间没返工过的 todo 数 ÷ 已完成的 todo 数 |
 | 无文档 | `documented == false` 的轮次（`zloop log` 里带 ⚠ 的那些） |
@@ -1146,16 +1146,16 @@ EOF
 ```console
 $ zloop run --host claude --fast --timeout-min 240 --reflect-every 2 --max-rounds 3 --no-keep-awake --no-color
 runner: round 1 → t1 [claude]
-runner: round 1 written back · 本轮完成 t1：新建 `hello.py`，打印逻辑放在 `main()` 里、用标准 `__main__` 入口，为 t2 接 argparse 留好位置。
-runner: session → claude --resume 89092f46-b484-43cf-9603-34ccc0a333c2
+runner: round 1 written back · 本轮完成 t1：新建了 `hello.py`（模块 docstring + `main()` + `__main__` 守卫，首行带 shebang），无参数运行精确输出 `Hello, world!`，退出码 0。
+runner: session → claude --resume 6fe679d6-3956-48f8-a951-a7ee614e653a
 runner: round 2 → t2 [claude]
-runner: round 2 written back · 写回成功，输出里没有「计划可能要调整」，不需要 replan。
-runner: session → claude --resume 70d51423-f3d1-48d0-b13f-31a48efc9e8d
+runner: round 2 written back · 本轮做了 t2：用 argparse 给 `hello.py` 加了 `--name` 参数，default 设成 `world`，输出统一走 `f"Hello, {args.name}!"` 一条分支。
+runner: session → claude --resume 1065ab08-d106-475d-822c-855e9777bc2b
 runner: 第 2 轮之后插一轮回看（不占轮次）                    ← 回看那一轮，就这两行
-runner: 回看写进账本 · log/20260829-093023-reflect.md        ←
+runner: 回看写进账本 · log/20260829-095120-reflect.md        ←
 runner: round 3 → t3 [claude]
-runner: round 3 written back · 这轮做完了 t3：写了 `README.md`（一句话说明 + 两条用法示例 + 参数表），示例是先跑真实命令抓 stdout 再照抄的，不是凭记忆写的。
-runner: session → claude --resume 11f0f15c-b33d-4677-b2c9-1f1b45077f5f
+runner: round 3 written back · 本轮完成 t3：写了 `README.md`——一句话说明 + 两条用法示例（`python3 hello.py` → `Hello, world!`，`python3 hello.py --name Ada` → `Hello, Ada!
+runner: session → claude --resume 3b73637c-f642-444b-a5a9-82cadaac493c
 runner: max rounds reached
 runner: stop (max_rounds)
 ```
@@ -1164,42 +1164,60 @@ runner: stop (max_rounds)
 ——轮次编号没被它推进。`.zloop/runner/journal.jsonl` 里也只多一条不带轮次的事件：
 
 ```json
-{"event":"reflect","after_round":2,"at":"2026-08-29T09:28:46+08:00"}
+{"event":"reflect","after_round":2,"at":"2026-08-29T09:49:20+08:00"}
 ```
 
-账本里它是一条**不挂在任何 todo 上**的 `reflect` tick，`stats` 单独给它一个计数，三条 todo 该做完的照样做完：
+账本里它是一条**不挂在任何 todo 上**的 `reflect` tick，`stats` 单独给它一个计数，三条 todo 该做完的照样做完
+（`轮次` 只数 `done`/`progress`/`fail`，回看不在其中；`zloop status` 标题上的「跑了 N 轮」和这个数一致）：
 
 ```console
 $ zloop stats
   轮次    3 轮 · 返工 0（0%）· 失败 0
   质量    一次过 3/3 条 · 无文档 0 轮 · 被挡 0 次 · 用户反馈 0 条 · 回看 1 次
-  花费    $1.78 · 宿主累计 3m
+  花费    $1.90 · 宿主累计 4m
 ```
 
-建议本身落在 `zloop log` 列出的那份 `-reflect.md` 里，等你回来看：
+建议本身落在 `zloop log` 列出的那份 `-reflect.md` 里，**全文**，等你回来看：
 
 ```console
 $ zloop log
-  .zloop/log/20260829-093111-t3-done.md  t3 · done · 2026-08-29T09:31:11+08:00
-  .zloop/log/20260829-093023-reflect.md  回看 · 第 2 轮之后
-  .zloop/log/20260829-092834-t2-done.md  t2 · done · 2026-08-29T09:28:34+08:00
-  .zloop/log/20260829-092733-t1-done.md  t1 · done · 2026-08-29T09:27:33+08:00
+  .zloop/log/20260829-095223-t3-done.md  t3 · done · 2026-08-29T09:52:23+08:00
+  .zloop/log/20260829-095120-reflect.md  回看 · 第 2 轮之后
+  .zloop/log/20260829-094909-t2-done.md  t2 · done · 2026-08-29T09:49:09+08:00
+  .zloop/log/20260829-094826-t1-done.md  t1 · done · 2026-08-29T09:48:26+08:00
 
-$ zloop log --show 20260829-093023-reflect.md
+$ zloop log --show 20260829-095120-reflect.md
 # 回看 · 第 2 轮之后
 
-看完了 `.zloop/NOTES.md`、`state.json`（2 轮 tick，t1/t2 done，t3 README 还开着）和 `hello.py` 现状。下面是逐条判断，**这一轮没有执行 `zloop reflect --apply`，也没碰代码和 todo**。
+看完了两轮的全部账本（`state.json`、两份 round log、runner journal、`hello.py`、console log）。现状：2 轮全 done、全 documented、0 返工 0 失败 0 反馈，`NOTES.md` 还不存在，约定和经验都是 0 条。
 
-## 逐条判断
+顺带一个事实先说清楚：**仓库到现在一个 commit 都没有**（`git log` 报 no commits yet），`hello.py` / `.zloop/` / `runner-console.log` 全是未跟踪文件。
 
-| # | 经验 | 结论 | 理由 |
-|---|---|---|---|
-| 1 | hello.py 用 argparse，别自己解析 sys.argv | **删** | 已经落地了——`hello.py:4,8` 就是 argparse。这条现在只是在复述代码能看出来的事，谁改这个文件
+## 建议清单
+
+### 升格成约定（1 条）
+
+**A. `done` 之前必须实跑验证并把证据写进日志：新行为 + 前面轮次已交付行为的回归，贴精确输出串和退出码；跑不通就不写 done。**
+
+（…中间 40 行略：4 条留作经验的、3 条主动丢掉的，各自附了为什么…）
+
+## 落地载荷（本轮不执行）
+
+这一轮是 runner 无头驱动、没人点头，所以我没有运行 `zloop reflect --apply`，也没动任何代码和 todo。等你回来认可后，把下面这段从 stdin 交给它即可：
+
+```
+## 约定
+- done 之前必须实跑验证并把证据写进日志：新行为 + 前面轮次已交付行为的回归，贴精确输出串和退出码；跑不通就不写 done。
+...
+```
 ```
 
-最后那句是断的，不是贴漏了：**这份文件现在只存宿主输出的前 300 字**，回看的全文到此为止（干活轮次不受影响，
-它们的技术文档是 agent 自己用 `zloop done --approach` 写的，不走这条路）。所以现在这个回看更像是"提醒你该整理了"，
-真要整理还是回来敲一次 `zloop reflect`。
+**只有"中间 40 行略"那一句是我加的**，其余逐字来自那份 55 行、4556 字节的文件——**宿主说了什么就存什么，不截断**。
+回看不写回账本，这份全文是它唯一的产物（`tick.note` 上那 200 字只是账本里的一句摘要）；干活轮次不走这条路，
+它们的技术文档是 agent 自己用 `zloop done --approach` 写的。
+
+> 早先的版本在 300 字处截断，这份文件只剩个开头——建议清单的后半截连同「落地载荷」一起丢了。
+> 现在全文落盘，`tests/runner_test.rs` 里那条回看测试用一段超过 300 字的宿主输出盯着它。
 
 这套形状是照 Warp 抄的：他们的 improver 是**按计划跑的观察者**，数据模型只有 cron + prompt + enabled +
 last_spawn_error 六个字段——反思不需要新子系统，它就是"隔一阵子换一段 prompt 跑一轮"

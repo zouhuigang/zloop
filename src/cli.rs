@@ -1127,10 +1127,10 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     println!(
         "  {icon} {head}{bar}{}  {}",
         c.bold(&format!("{pct}%")),
-        // Every recorded round, failures included — `tick::current_round` counts only the
-        // productive ones, which reads as "0 轮" right after three failures.
+        // 干活的轮次，失败也算 —— `tick::current_round` 只数成事的那些，
+        // 连着失败三轮之后会读成"0 轮"。和 `zloop stats` 共用 `tick::rounds` 的定义。
         // 「几条待办」交给下面的步骤清单说，标题只留轮数和花费。
-        c.dim(&format!("跑了 {} 轮{money}", st.ticks.iter().filter(|t| t.outcome != "noop").count()))
+        c.dim(&format!("跑了 {} 轮{money}", tick::rounds(&st.ticks)))
     );
     println!("  {}    {}", c.dim("目标"), style::truncate(&st.goal.text, text.saturating_sub(8)));
 

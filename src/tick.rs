@@ -151,6 +151,15 @@ pub fn current_round(ticks: &[Tick]) -> u64 {
     ticks.iter().filter(|t| t.outcome == "done" || t.outcome == "progress").count() as u64
 }
 
+/// 「跑了几轮」：干活的轮次（`COUNTED`：done / progress / fail），失败也算跑过。
+///
+/// `status` 和 `stats` 必须共用这一个定义，否则同一份账本会报出两个数——
+/// 曾经 `status` 只排除 `noop`，于是 3 条 todo + 1 次回看被它算成 4 轮，而 `stats` 报 3 轮。
+/// reflect / replan / feedback / edit / block 都不是"跑了一轮活"，不进这个数。
+pub fn rounds(ticks: &[Tick]) -> usize {
+    ticks.iter().filter(|t| COUNTED.contains(&t.outcome.as_str())).count()
+}
+
 /// Total host-reported spend recorded on ticks (USD).
 pub fn spent_usd(ticks: &[Tick]) -> f64 {
     ticks.iter().filter_map(|t| t.cost_usd).sum()
