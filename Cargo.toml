@@ -1,6 +1,6 @@
 [package]
 name = "zloop"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Minimal goal-loop scheduler for Claude Code and Codex: one JSON file, a dozen commands, one static binary."
 license = "MIT"

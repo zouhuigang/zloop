@@ -1,7 +1,7 @@
 # zloop
 
 **让 Claude Code / Codex 围着一个目标持续干活的最小调度器。**
-一个 JSON 状态文件、一个 1.5 MB 的静态 Rust 二进制，不需要任何解释器、服务或后台守护。你给它一个目标和几条 todo，它一轮做一条、做完写回、该停就停、能接着跑就接着跑——跑多久都行。
+一个 JSON 状态文件、一个 1.6 MB 的静态 Rust 二进制，不需要任何解释器、服务或后台守护。你给它一个目标和几条 todo，它一轮做一条、做完写回、该停就停、能接着跑就接着跑——跑多久都行。
 
 它专门解决四件事（设计见 [docs/RUST-DESIGN.md](docs/RUST-DESIGN.md)，长程运行加固见 [docs/LONG-RUN-AUDIT.md](docs/LONG-RUN-AUDIT.md)）：
 
@@ -66,7 +66,7 @@ zloop 是对 [loopx](https://github.com/huangruiteng/loopx) 里"Claude Code / Co
 
 ```bash
 git clone https://github.com/zouhuigang/zloop.git && cd zloop
-cargo build --release                                   # 产物 target/release/zloop（约 1.2 MB，静态单文件）
+cargo build --release                                   # 产物 target/release/zloop（约 1.6 MB，静态单文件）
 install -m755 target/release/zloop ~/.local/bin/zloop   # 放到 PATH 里任意目录都行
 ```
 
@@ -92,7 +92,7 @@ zloop install --claude-stop-hook   # 往 ~/.claude/settings.json 的 hooks.Stop 
 ### 4. 验证安装
 
 ```bash
-zloop --version                              # zloop 0.2.0
+zloop --version                              # zloop 0.3.0
 ls ~/.claude/skills/zloop/SKILL.md           # Claude Code skill 在位
 ls ~/.codex/skills/zloop/agents/openai.yaml  # Codex skill 在位（如果装了）
 
@@ -1500,7 +1500,7 @@ paused/done  >  all_done  >  user_gate / blocked  >  fail_streak  >  progress_st
 
 | 维度 | loopx 0.5.2 | zloop 0.2 |
 |---|---|---|
-| 源码文件 / 行数 | 819 / 317,699（Python） | 19 / ≈4921（Rust） |
+| 源码文件 / 行数 | 819 / 317,699（Python） | 22 / ≈6,727（Rust） |
 | 顶层子命令 | 113（叶命令 307） | 22（+1 内部 `hook-stop`）——每条的用途见[命令详解](#命令详解) |
 | 单命令最多 flag | 75（`todo`） | 10（`run`） |
 | `next` 一次调用 | 20–30 KB JSON，数百 ms | 10 个字段，12 ms |
