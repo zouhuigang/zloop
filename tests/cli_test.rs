@@ -1522,6 +1522,139 @@ fn compact_keeps_a_todo_that_others_still_wait_on() {
     assert!(o.out.contains("zloop edit t1 --status open"), "捡回来这条路得还在: {}", o.out);
 }
 
+/// T40-①：例行 `compact` 把人还没读到的那句话一起吃掉。
+///
+/// 挑 tick 的判据是「它挂在哪条 todo 上」，**不看这条 tick 自己多老**。于是一条五秒钟前
+/// 写下的 `feedback`，只要挂在一条 40 天前完成的 todo 上，就跟着进 `.zloop/archive/`：
+/// 不需要 `--force`（`ensure_idle` 一道闸都不响，这是能进 cron 的例行整理），回显只说
+/// 「2 ticks」，`doctor` 前后都退 0——而丢的正是 `zloop context` 里排在最前面的那个输入，
+/// 下一轮的 agent 一个字都看不到，也没人会知道少了一条。
+///
+/// 两道闸缺一不可：「这条 tick 自己也得够老」管不到**老的**未读反馈（循环停着的那些天
+/// 没人读过它，`pending_feedback` 仍然把它排在下一轮第一位），所以还要「待读的反馈
+/// 一条都不许动」。
+#[test]
+fn compact_keeps_feedback_nobody_has_read_yet() {
+    const LONG_AGO: &str = "2026-01-01T00:00:00+08:00";
+    // ① 今天刚留的话，挂在一条 40 天前完成的 todo 上
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "alpha"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 老活", "--add", "[P1] 还没做的活"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "老活做完", "--no-doc"], None, &[]);
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.todos[0].done_at = Some(LONG_AGO.into());
+    st.ticks[0].at = LONG_AGO.into();
+    state::save(&p, &mut st).unwrap();
+    zloop(d, &["feedback", "t1", "方向错了，下一轮先停下来问我"], None, &[]);
+    assert!(zloop(d, &["context"], None, &[]).out.contains("方向错了"), "前提：交接包里带着这句话");
+
+    // 最普通的一次例行整理（没有 --force）
+    let o = zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    // 修复前：`compacted 1 todos and 2 ticks`，从此谁也读不到这句话
+    assert!(zloop(d, &["context"], None, &[]).out.contains("方向错了"), "人还没读到的话被整理走了：{}", o.out);
+    assert!(o.out.contains("还没人读过的反馈"), "留下了就要说清是哪一道闸：{}", o.out);
+    assert!(o.out.contains("t1 ← 1 条反馈还没人读"), "要点名是哪条：{}", o.out);
+    // todo 也得留着：只留 tick 的话，反馈自己印的那句 `edit t1 --status open` 会退 2
+    assert!(state::load(&p).unwrap().todos.iter().any(|t| t.id == "t1"), "话留下了，能做的事被整理掉了");
+    assert_eq!(zloop(d, &["edit", "t1", "--status", "open"], None, &[]).code, 0, "出口得真的还能用");
+
+    // ② 反馈自己也过了保留期：循环停着的这些天没人读过它 —— 第二道闸
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "beta"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 老活", "--add", "[P1] 还没做的活"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
+    zloop(d, &["feedback", "t1", "这条得重做"], None, &[]);
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.todos[0].done_at = Some(LONG_AGO.into());
+    for k in st.ticks.iter_mut() {
+        k.at = LONG_AGO.into();
+    }
+    state::save(&p, &mut st).unwrap();
+    assert!(zloop(d, &["context"], None, &[]).out.contains("这条得重做"), "前提：还没有哪一轮读到它");
+    let o = zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert!(zloop(d, &["context"], None, &[]).out.contains("这条得重做"), "老的未读反馈同样不许搬：{}", o.out);
+    assert!(o.out.contains("nothing compacted"), "{}", o.out);
+    assert!(!o.out.contains("nothing to compact"), "别说成没有到期的：{}", o.out);
+
+    // 读到了（下一轮 done/progress 落地）之后它就不再待读，也不再是"最近的记录"——
+    // 再整理就该照常带走。留下 ≠ 永久钉住
+    zloop(d, &["next"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "读到了", "--no-doc"], None, &[]);
+    let mut st = state::load(&p).unwrap();
+    st.todos[1].done_at = Some(LONG_AGO.into());
+    for k in st.ticks.iter_mut() {
+        k.at = LONG_AGO.into();
+    }
+    state::save(&p, &mut st).unwrap();
+    let o = zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert!(o.out.contains("compacted 2 todos"), "读过之后就该照常整理：{}", o.out);
+
+    // ③ 一般形：不是反馈也一样——今天有人 `edit` 过它，就说明这条 todo 名下还有动静
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "gamma"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 老活", "--add", "[P1] 二"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.todos[0].done_at = Some(LONG_AGO.into());
+    st.ticks[0].at = LONG_AGO.into();
+    state::save(&p, &mut st).unwrap();
+    zloop(d, &["edit", "t1", "--text", "老活（改了个名）"], None, &[]);
+    let o = zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert!(o.out.contains("名下最近还有记录"), "今天写下的 tick 不该跟着老 todo 走：{}", o.out);
+    let st = state::load(&p).unwrap();
+    assert!(st.todos.iter().any(|t| t.id == "t1"), "todo 和它的 tick 永远一起走");
+    assert_eq!(st.ticks.len(), 2, "两条记录都还在：{:?}", st.ticks);
+}
+
+/// T40-②：`compact --force` 把在飞的那一轮搬走，`ensure_idle` 给的出口从此都退 2。
+///
+/// 前提两步都在正常用法里：`zloop edit` 从头到尾不碰 `in_progress`，所以把在飞的那条改成
+/// 终态，`in_progress` 就留在一条 `deferred` 的 todo 上；这时 `compact` 会被闸拦住，而它
+/// 给的两条出口人不想走（`done` 会记一条假的完成），于是加 `--force`。
+///
+/// 修复前：`compacted 1 todos and 1 ticks` → `in_progress` 指着一个不存在的 id，
+/// `done t1` / `edit t1 --status open` 双双退 2「unknown todo id」，`status` 还照旧印着
+/// 「写回 zloop done t1」这条保证失败的命令，`doctor` 退 1 而唯一的修法是**手改
+/// state.json**——`--force` 的语义是「我知道有人在跑，账我认」，不是「把那一轮删掉」。
+#[test]
+fn compact_leaves_the_round_that_is_still_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "alpha"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 一", "--add", "[P1] 二"], None, &[]);
+    zloop(d, &["next"], None, &[]);
+    zloop(d, &["edit", "t1", "--status", "deferred"], None, &[]);
+    let p = state::state_path(d);
+    assert_eq!(state::load(&p).unwrap().in_progress.unwrap().todo, "t1", "前提：edit 不碰 in_progress");
+    let o = zloop(d, &["compact", "--keep-days", "0"], None, &[]);
+    assert_ne!(o.code, 0, "前提：闸先拦一道 {}{}", o.out, o.err);
+
+    let o = zloop(d, &["compact", "--keep-days", "0", "--force"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    // 核心不变量：`--force` 也不许造出一个只能手改文件才收拾得了的状态
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 0, "整理留下了 doctor 认定的坏状态：{}", o.out);
+    assert!(o.out.contains("留下 t1 没搬"), "留下了就要说：{}", o.out);
+    assert!(o.out.contains("--force 也不搬"), "要说清 --force 也不管用：{}", o.out);
+    assert!(state::load(&p).unwrap().todos.iter().any(|t| t.id == "t1"), "t1 得留在清单里");
+    // 回显给的出口得真的能用（`zloop done t1` 对终态的 todo 本来就退 2，所以不给那条）
+    assert!(o.out.contains("zloop edit t1 --status open"), "欠一个出口：{}", o.out);
+    assert_eq!(zloop(d, &["edit", "t1", "--status", "open"], None, &[]).code, 0);
+    let o = zloop(d, &["done", "t1", "--note", "收尾", "--no-doc"], None, &[]);
+    assert_eq!(o.code, 0, "修复前这里是 exit 2 unknown todo id：{}{}", o.out, o.err);
+    assert!(state::load(&p).unwrap().in_progress.is_none(), "收尾之后 in_progress 该清掉");
+    // 那一轮写回之后它不再在飞，下一次整理照常带走：留下 ≠ 永久钉住
+    let o = zloop(d, &["compact", "--keep-days", "0"], None, &[]);
+    assert!(o.out.contains("compacted 1 todos"), "写回之后就该搬走：{}", o.out);
+    assert!(!o.out.contains("留下"), "{}", o.out);
+}
+
 /// 做完 / 延后的那条不在等谁：给它印「等不到」是噪音，`⏳` 也该原样留着。
 #[test]
 fn a_finished_todo_is_not_waiting_on_anyone() {

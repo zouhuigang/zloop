@@ -2170,6 +2170,34 @@ fn cmd_doc(
     Ok(0)
 }
 
+/// `compact` 这一趟的账：搬走了什么、**留下了什么、为什么留下**。
+///
+/// 四种"留下"分开记，因为出口完全不一样——等它的那几条做完 / 人读到那句话 /
+/// 在飞的那一轮写回 / 干脆再等几天。合成一句"留下 N 条"等于让人不知道该敲哪条命令，
+/// 而"一条都没搬"时说错原因就是句谎话。
+#[derive(Default)]
+struct Compacted {
+    todos: usize,
+    ticks: usize,
+    carried: f64,
+    archive: Option<PathBuf>,
+    /// 还有没做完的 todo 在等它（T39）：被依赖的那条 → 等它的那几条。
+    waited_on: std::collections::BTreeMap<String, Vec<String>>,
+    /// 上面挂着还没人读过的反馈（T40-①）：todo id → 待读的反馈条数。
+    unread: std::collections::BTreeMap<String, usize>,
+    /// 名下最近还有记录，不算老账（T40-①ᐟ）：todo id → 最新那条记录的时间。
+    recent: std::collections::BTreeMap<String, String>,
+    /// 正被某一轮拿在手里（T40-②）。
+    in_flight: Option<String>,
+}
+
+impl Compacted {
+    /// 到期了却被留下的条数——"一条都没搬"时要拿它决定说哪句话。
+    fn held(&self) -> usize {
+        self.waited_on.len() + self.unread.len() + self.recent.len() + usize::from(self.in_flight.is_some())
+    }
+}
+
 /// Archive todos finished more than `keep_days` ago, together with their ticks.
 fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<i32> {
     // 参数先验，再取闸：`--keep-days 99999999999` 以前在这里 panic 退 101（A-8），
@@ -2182,7 +2210,10 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<
     // 删 tick = 改 runner 下一轮要读的四个累计量（fail_streak / progress_streak / 花费 /
     // 配额窗口），和 `goal switch` 同一类，所以走同一道闸（A-18）。
     crate::goals::ensure_idle(root, force, "整理账本会动它正在读的轮次记录")?;
-    let (moved_todos, moved_ticks, carried, archive, pinned) = state::transaction(path, |st| {
+    let c = state::transaction(path, |st| {
+        let mut out = Compacted::default();
+        // 到期的那批（只看 todo 自己的时间戳）。下面四道闸逐个从这批里往外挑，
+        // 每挑走一条都记下**为什么**——`old_ids` 剩下的才是真能搬的。
         let mut old_ids: std::collections::HashSet<String> = st
             .todos
             .iter()
@@ -2193,17 +2224,54 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<
             })
             .map(|t| t.id.clone())
             .collect();
-        // 搬走之前反向扫一遍：还有没做完的 todo 在等它，搬走就等于判它们死刑（t39）。
+        // ① 在飞的那一轮不许搬，`--force` 也不许（T40-②）：`--force` 的语义是「我知道有人
+        // 在跑，账我认」，不是「把在飞的那一轮删掉」。搬走之后 `in_progress` 指着一个不存在
+        // 的 id，而 `ensure_idle` 印的两条自救命令（`done` / `edit --status open`）双双退 2
+        // 「unknown todo id」，`doctor` 报 err 且唯一的修法是手改 state.json——
+        // zloop 自己造出一个只能手改文件才收拾得了的状态。
+        out.in_flight = st.in_progress.as_ref().map(|ip| ip.todo.clone()).filter(|id| old_ids.remove(id));
+        // ② 人还没读到的那句话，连同它指着的那条 todo 一起留下（T40-①）。
+        // 归档里的反馈 `zloop context` 读不到，而它是交接包里排第一的那个输入；
+        // 只留 tick 也不行——反馈自己印的那句「要让它重做：`zloop edit t1 --status open`」
+        // 会退 2，等于话留下了、能做的事被整理掉。
+        // 注意这一条管的是**老反馈**：循环停着的那些天没人读过它，`pending_feedback`
+        // 仍然把它排在下一轮的第一位，而它和它的 todo 一样早就过了保留期。
+        for k in tick::pending_feedback(st) {
+            if let Some(id) = k.todo.as_deref().filter(|id| old_ids.contains(*id)) {
+                *out.unread.entry(id.to_string()).or_default() += 1;
+            }
+        }
+        for id in out.unread.keys() {
+            old_ids.remove(id);
+        }
+        // ③ 名下最近还有记录的也不算老账（T40-① 的一般形）。`Tick.todo` 是指着 todo 的
+        // 第二处指针，而 tick 是**跟着 todo 走**的：判老只看 todo 的时间戳，就等于让一条
+        // 40 天前完成的 todo 把今天刚写下的 tick（`feedback` / `edit`，都是人在另一个终端
+        // 敲的）一起拖进归档。所以一条 todo 的年龄看它名下**最新**的那条记录。
+        // 这么修顺带保住了「todo 和它的 tick 永远一起走」——换成"只留下那条新 tick"
+        // 会当场造出第二种悬空指针（`tick.todo` 指着归档里的 id）。
+        for k in st.ticks.iter() {
+            let (Some(id), Ok(at)) = (k.todo.as_deref(), state::parse_iso(&k.at)) else { continue };
+            // 直接覆盖：`ticks` 是按时间追加的，最后一条命中的就是最新的那条
+            if at >= cutoff && old_ids.contains(id) {
+                out.recent.insert(id.to_string(), k.at.clone());
+            }
+        }
+        for id in out.recent.keys() {
+            old_ids.remove(id);
+        }
+        // ④ 搬走之前反向扫一遍：还有没做完的 todo 在等它，搬走就等于判它们死刑（t39）。
         // 这一处不像 `edit --status deferred` 那样只提醒——`edit` 一句 `--status open`
         // 就撤回来了，而归档里的 todo 没有命令能捡回来，剩下的唯一出路是把依赖断开，
         // 连"它当初依赖谁"也一并丢掉。所以留下那一条，剩下的照常整理：等的人一做完，
         // 下一次 compact 自然会带上它。
-        let pinned = todo::dead_if_removed(st, &old_ids);
-        for id in pinned.keys() {
+        // 排在最后一道：前三道挑走的那些本来就不搬，拿真正的搬运名单去问"谁会死"才准。
+        out.waited_on = todo::dead_if_removed(st, &old_ids);
+        for id in out.waited_on.keys() {
             old_ids.remove(id);
         }
         if old_ids.is_empty() {
-            return Ok((0usize, 0usize, 0.0f64, None, pinned));
+            return Ok(out);
         }
         let (gone_todos, kept_todos): (Vec<_>, Vec<_>) = st.todos.drain(..).partition(|t| old_ids.contains(&t.id));
         let (gone_ticks, kept_ticks): (Vec<_>, Vec<_>) =
@@ -2221,43 +2289,76 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<
         let target = dir.join(format!("compact-{}.json", state::now_iso().replace([':', '+'], "")));
         let payload = serde_json::json!({"compacted_at": state::now_iso(), "keep_days": keep_days, "cost_usd": carried, "todos": gone_todos, "ticks": gone_ticks});
         std::fs::write(&target, serde_json::to_string_pretty(&payload)? + "\n")?;
-        Ok((gone_todos.len(), gone_ticks.len(), carried, Some(target), pinned))
+        out.todos = gone_todos.len();
+        out.ticks = gone_ticks.len();
+        out.carried = carried;
+        out.archive = Some(target);
+        Ok(out)
     })?;
-    match archive {
+    match &c.archive {
         Some(p) => {
-            println!("compacted {moved_todos} todos and {moved_ticks} ticks → {}", p.display());
+            println!("compacted {} todos and {} ticks → {}", c.todos, c.ticks, p.display());
             // 说出来：不然人无从知道自己刚整理掉的是一笔钱，还是一笔钱都没有。
-            if carried > 0.0 {
+            if c.carried > 0.0 {
                 let st = state::load(path)?;
                 println!(
-                    "  归档里带走 ${carried:.2} 花费，已记进累计账（累计 ${:.2}）：policy.max_total_usd 不受整理影响",
+                    "  归档里带走 ${:.2} 花费，已记进累计账（累计 ${:.2}）：policy.max_total_usd 不受整理影响",
+                    c.carried,
                     tick::spent_total(&st)
                 );
             }
         }
         // 一条都没搬，但原因不是"没有到期的"：照旧那句话会是句谎话
-        None if !pinned.is_empty() => {
-            println!("nothing compacted：到期的 {} 条都还有人在等，留在清单里了", pinned.len())
-        }
+        None if c.held() > 0 => println!("nothing compacted：到期的 {} 条都留下了，还在清单里", c.held()),
         None => println!("nothing to compact (no done/deferred todos older than {keep_days} days)"),
     }
-    if !pinned.is_empty() {
-        // 长清单只印前几个：这几行是"说清楚为什么留下"，清单本身归 `zloop status`
-        const SHOW: usize = 8;
-        println!("  ⏸ 留下 {} 条没搬：还有没做完的 todo 在等它们", pinned.len());
-        for (dep, waiters) in pinned.iter().take(SHOW) {
+    // 长清单只印前几个：这几行是"说清楚为什么留下"，清单本身归 `zloop status`
+    const SHOW: usize = 8;
+    if !c.waited_on.is_empty() {
+        println!("  ⏸ 留下 {} 条没搬：还有没做完的 todo 在等它们", c.waited_on.len());
+        for (dep, waiters) in c.waited_on.iter().take(SHOW) {
             let ids = waiters.iter().take(SHOW).cloned().collect::<Vec<_>>().join(",");
             let tail = if waiters.len() > SHOW { "…" } else { "" };
             println!("     {dep} ← {ids}{tail}");
         }
-        if pinned.len() > SHOW {
-            println!("     …（共 {} 条）", pinned.len());
+        if c.waited_on.len() > SHOW {
+            println!("     …（共 {} 条）", c.waited_on.len());
         }
         // 出口给的是"断开等的那条"，不是"别整理了"：归档里的 todo 捡不回来，
         // 所以只有先解开依赖，这一条才有资格被搬走
-        if let Some(first) = pinned.values().flatten().next() {
+        if let Some(first) = c.waited_on.values().flatten().next() {
             println!("  ↳ 搬进归档就再也捡不回来；等它们做完，或 zloop edit {first} --blocked-by ''");
         }
+    }
+    if !c.unread.is_empty() {
+        let total: usize = c.unread.values().sum();
+        println!("  ⏸ 留下 {} 条没搬：上面挂着 {total} 条还没人读过的反馈", c.unread.len());
+        for (id, n) in c.unread.iter().take(SHOW) {
+            println!("     {id} ← {n} 条反馈还没人读");
+        }
+        if c.unread.len() > SHOW {
+            println!("     …（共 {} 条）", c.unread.len());
+        }
+        // 出口是"让下一轮读到它"，不是"别留反馈了"：归档里的反馈 `zloop context` 读不到，
+        // 而它正是交接包里排第一的那个输入
+        println!("  ↳ zloop context 会把它交给下一轮；那一轮写回（done/progress）之后再整理就会带上它");
+    }
+    if !c.recent.is_empty() {
+        println!("  ⏸ 留下 {} 条没搬：完成得早，但名下最近还有记录（不算老账）", c.recent.len());
+        for (id, at) in c.recent.iter().take(SHOW) {
+            println!("     {id} ← 最近一条记录 {at}");
+        }
+        if c.recent.len() > SHOW {
+            println!("     …（共 {} 条）", c.recent.len());
+        }
+        println!("  ↳ 那几条记录（feedback / edit）跟着 todo 走；等它们自己也满 {keep_days} 天就会一起搬走");
+    }
+    if let Some(id) = &c.in_flight {
+        println!("  ⏸ 留下 {id} 没搬：还有一轮正拿着它没写回（--force 也不搬）");
+        // 出口只给真的能用的那条：这条 todo 必然已经了结（`old_ids` 只收终态），
+        // 而 `zloop done` 对终态的 todo 退 2「is already done/deferred」——
+        // `ensure_idle` 印的两条出口在这个状态下只有 `--status open` 那条走得通。
+        println!("  ↳ 先让那一轮收尾：zloop edit {id} --status open 放回去，再 zloop done {id} …");
     }
     Ok(0)
 }

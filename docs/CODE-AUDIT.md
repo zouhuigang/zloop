@@ -2008,7 +2008,7 @@ T39 修的是 `blocked_by`。但 `dangling_in_progress` 这条 doctor 检查本�
 `Goal.id` 是目标 id、`Policy` 全是阈值，都不指 todo。所以指针一共三处，
 T39 之后还剩两处没人管——正好对应下面两条。
 
-### 15.2 T40-①（中高）例行 `compact` 吃掉人今天刚留下的、还没人读过的反馈 — 未修
+### 15.2 T40-①（中高）例行 `compact` 吃掉人今天刚留下的、还没人读过的反馈 — 已修（见 §16）
 
 `compact` 挑 tick 的判据是 `old_ids.contains(tick.todo)`（`cli.rs:2209`）——
 **只看它挂在哪条 todo 上，不看这条 tick 自己多老**。于是一条五秒钟前写下的
@@ -2038,7 +2038,7 @@ zloop context | grep 方向错了       → 0 条
 方向：搬 tick 的判据要多一条——**这条 tick 自己也得够老**，或者至少
 `pending_feedback` 里的那些不许搬；一条都不该在人还没读到之前消失。
 
-### 15.3 T40-②（中）`compact --force` 把在飞的那条搬走，`ensure_idle` 给的两条出口从此都退 2 — 未修
+### 15.3 T40-②（中）`compact --force` 把在飞的那条搬走，`ensure_idle` 给的两条出口从此都退 2 — 已修（见 §16）
 
 `cmd_compact` 先过 `goals::ensure_idle`，有 `in_progress` 就拦下。**但 `--force` 直接
 `return Ok(())`**（`goals.rs:217`），而 `old_ids` 的挑选完全不看 `st.in_progress`。
@@ -2086,3 +2086,66 @@ zloop doctor → ✗ 第 1 轮派出去的 t1 已经不在待办里了          
   `next` 派出去的那条状态是 `open`，而 `old_ids` 只收 `is_terminal` 的。
   直接把竞态的结果摆出来试（`zloop next` 之后 `compact --keep-days 0 --force`）：
   `nothing to compact`、`t1` 还在清单里、`doctor` 没发现问题。**没复现。**
+
+## 16. 第十四轮：`compact` 剩下的两处指针一起收口（T40-①/② 已修）
+
+T39 修的是三处 todo 指针里的一处（`blocked_by`）。这一轮把剩下两处
+（`Tick.todo`、`InProgress.todo`）补齐——形状和 T39 完全一样：**归档里的东西捡不回来，
+所以判断力要用在搬走之前，不是搬走之后说一声。**
+
+### 16.1 `cmd_compact` 现在是「先挑到期的，再四道闸逐个往外挑」
+
+```
+到期的（终态 + 自己的时间戳早于 cutoff）
+  ① in_progress.todo        → 在飞的那一轮，--force 也不搬        （T40-②）
+  ② pending_feedback 指着的 → 人还没读到的话，一个字都不许动      （T40-①）
+  ③ 名下最新一条 tick ≥ cutoff → 最近还有动静，不算老账            （T40-① 的一般形）
+  ④ dead_if_removed         → 还有没做完的 todo 在等它            （T39）
+剩下的才真的搬
+```
+
+每挑走一条都记下**为什么**（`struct Compacted` 的四个字段），因为四种"留下"的出口
+完全不一样：等它的那几条做完 / 人读到那句话 / 在飞的那一轮写回 / 干脆再等几天。
+合成一句「留下 N 条」等于让人不知道该敲哪条命令。
+
+`④` 排在最后一道是有意的：前三道挑走的那些本来就不搬，拿**真正的搬运名单**去问
+「搬走之后谁会死」才准（原来是拿全部到期的去问，会把已经留下的那条也报成"被等着"）。
+
+### 16.2 T40-① 为什么要两道闸（②③ 缺一不可）
+
+| 场景 | ② 待读反馈 | ③ 名下最近有记录 |
+|---|---|---|
+| 今天留的话，挂在 40 天前完成的 todo 上 | 拦住 | 也拦住 |
+| **35 天前**留的话，循环停着一直没人读 | **拦住** | 放行（反馈自己也过期了） |
+| 今天有人 `zloop edit` 改了一条老 todo 的文字 | 放行（不是反馈） | **拦住** |
+
+③ 的写法是「**一条 todo 的年龄看它名下最新的那条记录**」，不是「把那条新 tick 单独留下」。
+后者会当场造出第二种悬空指针（`tick.todo` 指着归档里的 id），而前者顺带钉死了一条不变量：
+**todo 和它的 tick 永远一起走**。
+
+### 16.3 T40-② 的出口只印真的能用的那条
+
+`ensure_idle` 印的是「先 `zloop done t1` 收尾（或 `zloop edit t1 --status open` 放回去）」。
+但 ① 拦下的这条 todo **必然已经了结**（`old_ids` 只收终态），而 `zloop done` 对终态的 todo
+退 2 `done: t1 is already deferred`——**这两条出口在这个状态下只有后一条走得通**（实测）。
+所以 `compact` 的回显只给能用的那条：
+
+```
+nothing compacted：到期的 1 条都留下了，还在清单里
+  ⏸ 留下 t1 没搬：还有一轮正拿着它没写回（--force 也不搬）
+  ↳ 先让那一轮收尾：zloop edit t1 --status open 放回去，再 zloop done t1 …
+```
+
+（`ensure_idle` / `status` 那两处也印着同一条走不通的 `zloop done`，那是**另一处**缺陷，
+入口不同、影响面更大，单独排一条，见下一轮 todo。）
+
+### 16.4 回归测试
+
+| 测试 | 钉住什么 | 撤掉后 |
+|---|---|---|
+| `cli_test::compact_keeps_feedback_nobody_has_read_yet` | ① 今天的话整理后 `context` 里还在、点名 `t1 ← 1 条反馈还没人读`、todo 也留着所以 `edit t1 --status open` 还能用；② 老的未读反馈同样不搬、`nothing compacted` 不说成 `nothing to compact`；读到之后（下一轮 done 落地）照常搬走；③ 今天 `edit` 过的老 todo 留下、两条 tick 都还在 | 删掉 ②③ 两处 `old_ids.remove` → `panicked … 人还没读到的话被整理走了：compacted 1 todos and 2 ticks`（而回显同时印着「留下 1 条没搬」——**闸和回显必须是同一个判断**）；只删 ② → `老的未读反馈同样不许搬`；只删 ③ → `todo 和它的 tick 永远一起走` |
+| `cli_test::compact_leaves_the_round_that_is_still_in_flight` | `--force` 之后 `doctor` 仍退 0；点名 `留下 t1 没搬` + `--force 也不搬`；给的出口 `edit t1 --status open` 真的能用，接着 `done t1` 退 0（修复前退 2 unknown todo id）；那一轮写回之后照常搬走 | 删掉 `out.in_flight = …filter(|id| old_ids.remove(id))` 那一行 → `panicked … 整理留下了 doctor 认定的坏状态：compacted 1 todos and 1 ticks`（doctor 退 1） |
+
+`cargo test` 187 全过（原 185）。三处老的 compact 测试一个字没改——它们用的场景里
+四道闸都不响（backdate 时把 tick 一起改老了、`--keep-days 0` 下秒级截断的时间戳严格早于
+`cutoff`），说明新增的闸没有顺手改掉正常整理的行为。
