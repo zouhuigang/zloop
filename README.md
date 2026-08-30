@@ -412,7 +412,7 @@ zloop status
 | `▶ 下一个` | 下一轮就做它（表按步骤顺序排，`next` 按优先级挑，所以"下一个"不一定是下一行） |
 | `❗ 等你回话` | 被 `--block` 了；问题在 `↳`，**解锁命令就在它下面**（窄窗口下命令会整条印在表格下面，绝不裁一半） |
 | `⏳ 等 t3` | 在等前置 todo，等哪条直接写出来。t3 还活着（`open` / `blocked`），迟早轮得到 |
-| `⛔ 等不到 t3` | **永远轮不到**：t3 已延后、状态被手改成 zloop 不认的词、或压根不在清单里（`compact` 搬走了）。依赖要 `done` 才放行，而它已经派不出去——**解开的命令就在它下面**（`↳ 解开敲 …`），和 `doctor` 的 `dead_blocked_by` / `dangling_blocked_by` 是同一条判据。多条依赖只要有一条这样就算，不管它排第几 |
+| `⛔ 等不到 t3` | **永远轮不到**：t3 已延后、状态被手改成 zloop 不认的词、或压根不在清单里（手改过 `state.json`；`compact` 不会造出这种，它会把还有人等的那条留下）。依赖要 `done` 才放行，而它已经派不出去——**解开的命令就在它下面**（`↳ 解开敲 …`），和 `doctor` 的 `dead_blocked_by` / `dangling_blocked_by` 是同一条判据。多条依赖只要有一条这样就算，不管它排第几 |
 | `○ 排队中` | 排在后面，没被挡 |
 | `⏭ 已延后` | `zloop edit t6 --status deferred` 挂起的。**不算进百分比的分母**——调度器把它当已了结，所以进度写成 `6/6 完成 · 2 条延后`，而不是 6/8 |
 
@@ -1542,6 +1542,20 @@ zloop 的 `SKILL.md` 却是**全局**的（`~/.claude/skills/zloop/`），把某
 
 技术文档（`.zloop/log/*.md`）不会被搬走，永远留在原地。
 
+**还有人等的那条不搬**：一条做完的 todo，如果还有没做完的 todo 的 `blocked_by` 指着它，
+`compact` 会把它留在清单里（其余的照常整理），并印一行说明：
+
+```
+compacted 1 todos and 1 ticks → .zloop/archive/compact-….json
+  ⏸ 留下 1 条没搬：还有没做完的 todo 在等它们
+     t1 ← t2,t3
+  ↳ 搬进归档就再也捡不回来；等它们做完，或 zloop edit t2 --blocked-by ''
+```
+
+搬走它等于把 t2 / t3 判死刑（`doctor` 会退 1 报 `dangling_blocked_by`），而**归档里的
+todo 没有命令能捡回来**，唯一的出路是把 t2 的依赖断开，连"它当初依赖谁"也一起丢。
+留下不是永久钉住：等的人一做完或一了结，下一次 `compact` 自然会带上它。
+
 **账不跟着 tick 走**：搬走的 tick 上记的花费会累加进 `state.json` 的 `archived.cost_usd`，
 `policy.max_total_usd`（这个目标一共只准花这么多）照旧按**累计**算——整理账本不是提额，
 带走了钱它会在输出里说一声。同理，`compact` 改的是 runner 下一轮要读的轮次记录，
@@ -1672,7 +1686,7 @@ claude 11111111-2222-3333-4444-555555555555  ticks 7   2026-08-28T20:15:11+08:00
 | `id_filename_mismatch` | 要修 | `goals/<文件名>.json` 里的 id 和文件名对不上——下一次停放会按 id 再造一个同名文件 |
 | `duplicate_goal_id` | 要修 | 两个文件抢同一个 id，这个 id 从此 `switch` / `rm` 都点不动 |
 | `dangling_in_progress` | 要修 | 在飞的派活指着一条已经不存在的 todo，`done` 认不出它 |
-| `dangling_blocked_by` | 要修 | 依赖指向不存在的 todo（`compact` 把被依赖的那条搬走就会这样）——这条 todo 永远轮不到。`zloop status` 的清单里也标成 `⛔ 等不到 tN` |
+| `dangling_blocked_by` | 要修 | 依赖指向不存在的 todo（手改过 `state.json`，或老版本 `compact` 搬走了被依赖的那条——今天的 `compact` 会留下它）——这条 todo 永远轮不到。`zloop status` 的清单里也标成 `⛔ 等不到 tN` |
 | `dead_blocked_by` | 要修 | 依赖的那条 todo 还在清单里，但它已经派不出去了（已延后，或状态被手改成 zloop 不认的词）——依赖要 done 才放行，等它的那条同样永远轮不到。同样标成 `⛔ 等不到 tN` |
 | `dep_cycle` | 要修 / 留意 | 依赖成了环（`t1 ← t2 ← t1`，自依赖也算）：环上每条都在等下一条先做完，谁都不会先动。环上还有活着的 todo 是「要修」，全了结掉了是「留意」（现在卡不住谁，捡回来就会） |
 | `duplicate_todo_id` | 要修 | 同一个 todo id 有多条，`done` / `edit` 只改得到第一条 |

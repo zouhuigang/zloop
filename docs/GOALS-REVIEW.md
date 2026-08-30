@@ -362,6 +362,9 @@ zloop 不需要 health 子系统，需要的是三行：读不出来的目标文
    todo 搬进 `archive/compact-*.json`，而依赖它的那条 todo 的 `blocked_by` 还指着它，`is_executable`
    要求依赖"存在且 done"（`todo.rs:161`）——于是这条 todo 从此永远排不上，一声不吭。回归测试就是
    照这条真实路径走的（`tests/doctor_test.rs::compacted_dependency_leaves_a_todo_that_can_never_run`）。
+   **（t39 之后不再成立）**：`compact` 现在会把还有人等的那条留在清单里，所以这个坏状态只剩手改
+   `state.json` 和老版本留下的文件两个来源；检查照旧要有，测试改名为
+   `a_dependency_that_is_not_in_the_list_leaves_a_todo_that_can_never_run`，造状态的手法换成直接改文件。
 2. **只读得是硬约束，而且要用测试钉住**：doctor 不能调 `daemon::running()`——它会顺手删掉过期的 pid
    文件。`stale_pid_is_reported_and_doctor_changes_nothing` 同时验两件事：doctor 跑完 pid 文件还在、
    `state.json` 字节不变；再跑一次 `zloop status` 证明"会清它的是 status，不是 doctor"。

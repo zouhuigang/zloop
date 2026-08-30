@@ -2182,8 +2182,8 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<
     // 删 tick = 改 runner 下一轮要读的四个累计量（fail_streak / progress_streak / 花费 /
     // 配额窗口），和 `goal switch` 同一类，所以走同一道闸（A-18）。
     crate::goals::ensure_idle(root, force, "整理账本会动它正在读的轮次记录")?;
-    let (moved_todos, moved_ticks, carried, archive) = state::transaction(path, |st| {
-        let old_ids: std::collections::HashSet<String> = st
+    let (moved_todos, moved_ticks, carried, archive, pinned) = state::transaction(path, |st| {
+        let mut old_ids: std::collections::HashSet<String> = st
             .todos
             .iter()
             .filter(|t| todo::is_terminal(&t.status))
@@ -2193,8 +2193,17 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<
             })
             .map(|t| t.id.clone())
             .collect();
+        // 搬走之前反向扫一遍：还有没做完的 todo 在等它，搬走就等于判它们死刑（t39）。
+        // 这一处不像 `edit --status deferred` 那样只提醒——`edit` 一句 `--status open`
+        // 就撤回来了，而归档里的 todo 没有命令能捡回来，剩下的唯一出路是把依赖断开，
+        // 连"它当初依赖谁"也一并丢掉。所以留下那一条，剩下的照常整理：等的人一做完，
+        // 下一次 compact 自然会带上它。
+        let pinned = todo::dead_if_removed(st, &old_ids);
+        for id in pinned.keys() {
+            old_ids.remove(id);
+        }
         if old_ids.is_empty() {
-            return Ok((0usize, 0usize, 0.0f64, None));
+            return Ok((0usize, 0usize, 0.0f64, None, pinned));
         }
         let (gone_todos, kept_todos): (Vec<_>, Vec<_>) = st.todos.drain(..).partition(|t| old_ids.contains(&t.id));
         let (gone_ticks, kept_ticks): (Vec<_>, Vec<_>) =
@@ -2212,7 +2221,7 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<
         let target = dir.join(format!("compact-{}.json", state::now_iso().replace([':', '+'], "")));
         let payload = serde_json::json!({"compacted_at": state::now_iso(), "keep_days": keep_days, "cost_usd": carried, "todos": gone_todos, "ticks": gone_ticks});
         std::fs::write(&target, serde_json::to_string_pretty(&payload)? + "\n")?;
-        Ok((gone_todos.len(), gone_ticks.len(), carried, Some(target)))
+        Ok((gone_todos.len(), gone_ticks.len(), carried, Some(target), pinned))
     })?;
     match archive {
         Some(p) => {
@@ -2226,7 +2235,29 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<
                 );
             }
         }
+        // 一条都没搬，但原因不是"没有到期的"：照旧那句话会是句谎话
+        None if !pinned.is_empty() => {
+            println!("nothing compacted：到期的 {} 条都还有人在等，留在清单里了", pinned.len())
+        }
         None => println!("nothing to compact (no done/deferred todos older than {keep_days} days)"),
+    }
+    if !pinned.is_empty() {
+        // 长清单只印前几个：这几行是"说清楚为什么留下"，清单本身归 `zloop status`
+        const SHOW: usize = 8;
+        println!("  ⏸ 留下 {} 条没搬：还有没做完的 todo 在等它们", pinned.len());
+        for (dep, waiters) in pinned.iter().take(SHOW) {
+            let ids = waiters.iter().take(SHOW).cloned().collect::<Vec<_>>().join(",");
+            let tail = if waiters.len() > SHOW { "…" } else { "" };
+            println!("     {dep} ← {ids}{tail}");
+        }
+        if pinned.len() > SHOW {
+            println!("     …（共 {} 条）", pinned.len());
+        }
+        // 出口给的是"断开等的那条"，不是"别整理了"：归档里的 todo 捡不回来，
+        // 所以只有先解开依赖，这一条才有资格被搬走
+        if let Some(first) = pinned.values().flatten().next() {
+            println!("  ↳ 搬进归档就再也捡不回来；等它们做完，或 zloop edit {first} --blocked-by ''");
+        }
     }
     Ok(0)
 }

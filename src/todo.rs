@@ -3,6 +3,7 @@
 use crate::state::{now_iso, State, Todo};
 use anyhow::{anyhow, bail, Result};
 use serde_json::Map;
+use std::collections::{BTreeMap, HashSet};
 
 pub const STATUSES: [&str; 4] = ["open", "blocked", "deferred", "done"];
 pub const DEFAULT_PRIORITY: u8 = 1;
@@ -72,6 +73,38 @@ pub fn dead_deps<'a>(state: &'a State, t: &'a Todo) -> Vec<&'a str> {
 /// 真混进来也会被 `dead_deps` 的终态早退滤掉）。
 pub fn dead_dependents<'a>(state: &'a State, id: &str) -> Vec<&'a str> {
     state.todos.iter().filter(|t| t.id != id && dead_deps(state, t).contains(&id)).map(|t| t.id.as_str()).collect()
+}
+
+/// 再反着问一遍 [`dead_deps`]：`victims` 这批 todo 一旦**从清单里消失**，谁会跟着永远
+/// 等不到。返回「被依赖的那条 → 依赖它的那几条」，按 id 排好序。
+///
+/// [`dead_dependents`] 问的是"改状态"，这里问的是"搬走"——`compact` 把 done 的 todo
+/// 连同 tick 移进 `.zloop/archive/`，等它的那条从此指着一个不存在的 id（t39）。
+/// 两者的差别不只是入口：`edit --status deferred` 一句 `--status open` 就撤回来了，
+/// 而归档里的 todo **没有命令能捡回来**，只剩「把依赖断开」这一条路——那会连
+/// 「它当初依赖谁」这件事也一起丢掉。所以这一处不是提醒，是拦下来（见 `cmd_compact`）。
+///
+/// 判据不另写：真按「搬走之后」的清单跑一遍 [`dead_deps`]（被搬走的 id 从此不在清单里，
+/// 走 `None => true` 那一支）。于是终态 todo 不在等谁、`user` 不算依赖、重复 id 只报一次
+/// 这三条，和四张清单、和 `doctor` 完全一致——`done` 的 todo 里留着一条指向被搬走者的
+/// `blocked_by` 不算问题，因为 doctor 的两处检查同样跳过终态。
+///
+/// **本来就死的也算**（比如等的是一条已延后的 todo，`doctor` 在整理前就在喊了）：
+/// 这不是为了把账算在 `compact` 头上，而是那种状态的出口是「把依赖捡回来」
+/// （`edit <dep> --status open`），一旦搬进归档就只剩「把依赖断开」——本来能修的
+/// 变成只能丢。整理不该把人的退路整理掉。
+pub fn dead_if_removed(state: &State, victims: &HashSet<String>) -> BTreeMap<String, Vec<String>> {
+    let mut after = state.clone();
+    after.todos.retain(|t| !victims.contains(&t.id));
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for t in &after.todos {
+        for d in dead_deps(&after, t) {
+            if victims.contains(d) {
+                out.entry(d.to_string()).or_default().push(t.id.clone());
+            }
+        }
+    }
+    out
 }
 
 /// 死等的出口命令。方向不能反：依赖还在清单里就把**依赖**捡回来，已经不在了

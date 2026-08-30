@@ -1923,3 +1923,68 @@ zloop status  → │ 2 │ t2 │ b │ ⏳ 等 t1 │   ← 照旧是「正常
 **留下的一条**（记进 `--next`）：`zloop edit t4 --status deferred` 会把「所有依赖 t4 的
 todo」一起判死刑，而回显只讲 t4 自己，一个字都不说被它连累的那几条。反向扫一遍
 `blocked_by` 就能说，但那是另一处改动，这一轮不顺手做。
+
+---
+
+## 14. 第十二轮：`compact` —— 同一个形状，但撤不回来
+
+### T39（中高）`compact` 把还有人依赖的那条搬进归档，等它的那几条就此永远等不到 — 已修
+
+`edit <dep> --status deferred`（T38）之后，「一条命令判死一片」的第二处是 `zloop compact`。
+
+```
+zloop plan --add "[P0] 做基础" --add "[P1] 等基础" --add "[P1] 也等基础"
+zloop edit t2 --blocked-by t1 ; zloop edit t3 --blocked-by t1
+zloop next ; zloop done t1 --note ok --approach 做了a
+zloop doctor                     → exit 0（一切正常）
+zloop compact --keep-days 0      → compacted 1 todos and 1 ticks → …/compact-….json
+zloop doctor                     → ✗ t2 依赖 t1，但没有这条 todo——它永远轮不到
+                                   ✗ t3 依赖 t1，但没有这条 todo——它永远轮不到   （exit 1）
+```
+
+一次例行整理（`compact` 的定位就是"目标跑长了敲一下"，甚至能进 cron），把两条还开着的
+todo 判成死等，而回显只讲被搬走的那条自己。**判断力和回显之间隔了一次 `doctor`**：
+被连累的是谁，在搬走的那一刻反向扫一遍 `blocked_by` 就知道。
+
+#### 为什么这一处不能照抄 T38 的做法（补一行提醒）
+
+| | `edit <dep> --status deferred`（T38） | `compact`（T39） |
+|---|---|---|
+| 撤回 | `zloop edit t4 --status open`，状态还在清单里 | **没有命令能捡回来**：todo 进了 `.zloop/archive/compact-*.json`，zloop 没有 restore |
+| 出口 | 「把依赖捡回来」和「断开依赖」都还在 | 只剩「断开依赖」`zloop edit t2 --blocked-by ''`——连"它当初依赖谁"也一起丢 |
+| 谁在敲 | 人临时改主意 | 例行维护，可能在脚本/cron 里，回显只进日志 |
+
+所以这一处的结论是**留下那一条不搬**，而不是搬走之后说一声：
+
+```
+compacted 1 todos and 1 ticks → .zloop/archive/compact-….json
+  ⏸ 留下 1 条没搬：还有没做完的 todo 在等它们
+     t1 ← t2,t3
+  ↳ 搬进归档就再也捡不回来；等它们做完，或 zloop edit t2 --blocked-by ''
+```
+
+- **不是"有依赖就整个不整理"**：其余到期的照常搬（同一次里 `t4` 归档了）。
+- **不是永久钉住**：等的人一做完 / 一了结，下一次 `compact` 自然带上它。
+- **一条都没搬时不许说谎**：到期的全被人等着，印的是 `nothing compacted：到期的 N 条都还有人在等`，
+  不是原来那句 `nothing to compact (no done/deferred todos older than N days)`。
+- **本来就死的也留下**：等的是一条已延后的 todo 时 `doctor` 整理前就在喊了，但那种状态的出口是
+  `edit <dep> --status open`；搬进归档就只剩「断开」。**整理不该把人的退路整理掉。**
+
+#### 判据仍然只留一份
+
+`todo::dead_if_removed(state, victims)` 不新写规则，而是把「搬走之后」的清单真的跑一遍
+`dead_deps`（被搬走的 id 从此走 `None => true` 那一支），只挑其中指向 `victims` 的。
+于是终态 todo 不在等谁、`user` 不算依赖、重复 id 只报一次这三条，和四张清单、和 `doctor`
+自动一致——一串 `done` 的依赖链（t2 done 且 `blocked_by t1`）一次就整理干净，
+因为 doctor 的两处检查同样跳过终态。
+
+#### 回归测试
+
+| 测试 | 钉住什么 | 撤掉后 |
+|---|---|---|
+| `cli_test::compact_keeps_a_todo_that_others_still_wait_on` | 整理完 `doctor` 仍退 0；点名 `t1 ← t2,t3` + 出口命令；没人等的照常归档；全被等着时说 `nothing compacted`；等的人一了结就搬走；`done` 的依赖链不互相钉住；本来就死的那条也留下 | 删掉 `old_ids.remove(id)` 那三行 → `panicked … 整理不许留下 doctor 认定的坏状态: compacted 2 todos and 2 ticks …`（doctor 退 1） |
+
+**连带改的两处测试**：`doctor_test` 和 `cli_test` 里原本拿 `compact --keep-days 0` **造**
+「依赖指着不存在的 id」这个状态，现在造不出来了，改成直接从 `state.json` 里抹掉那条
+（`drop_todo_from_state`）。检查本身一个字没动：**坏文件不会因为新版本不再生产就消失**，
+手改过的 state 和老版本留下的 `state.json` 仍然要被 `doctor` 认出来。

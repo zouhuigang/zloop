@@ -80,20 +80,24 @@ fn not_a_zloop_project_exits_1() {
     assert!(o.err.contains("no zloop state"), "{}", o.err);
 }
 
-/// `zloop compact` 会把做完的 todo 搬走，而依赖它的那条 todo 的 `blocked_by` 还指着它。
-/// `is_executable` 要求依赖"存在且 done"，于是这条 todo 从此永远排不上——不报错，只是不动。
+/// `blocked_by` 指着一条不在清单里的 todo：`is_executable` 要求依赖"存在且 done"，
+/// 于是这条 todo 从此永远排不上——不报错，只是不动。
+///
+/// 这个状态**以前是 `zloop compact` 自己造出来的**（搬走做完的 t1，t2 的 `blocked_by`
+/// 还指着它）；t39 之后 compact 会把还有人等的那条留下，所以来源只剩手改过的 state
+/// 和老版本 zloop 留下的文件——检查本身照旧要有，坏文件不会因为新版本不再生产就消失。
 #[test]
-fn compacted_dependency_leaves_a_todo_that_can_never_run() {
+fn a_dependency_that_is_not_in_the_list_leaves_a_todo_that_can_never_run() {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
     init(d, "alpha");
     plan(d, "[P0] first\n[P1] second\n");
     assert_eq!(zloop(d, &["edit", "t2", "--blocked-by", "t1"]).code, 0);
-    assert_eq!(zloop(d, &["next"]).code, 0);
-    let o = zloop(d, &["done", "t1", "--note", "ok", "--approach", "做了 a 因为 b"]);
-    assert_eq!(o.code, 0, "{}", o.err);
-    let o = zloop(d, &["compact", "--keep-days", "0"]);
-    assert_eq!(o.code, 0, "{}", o.err);
+    // 手改文件把 t1 抹掉：等价于老版本 compact 搬走它之后留下的 state
+    let p = d.join(".zloop/state.json");
+    let mut st: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    st["todos"].as_array_mut().unwrap().retain(|t| t["id"] != "t1");
+    fs::write(&p, serde_json::to_string_pretty(&st).unwrap()).unwrap();
 
     let (ks, code) = kinds(d);
     assert!(ks.contains(&"dangling_blocked_by".to_string()), "{ks:?}");

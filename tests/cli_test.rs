@@ -34,6 +34,17 @@ fn zloop(dir: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -
     }
 }
 
+/// 把一条 todo 从 state.json 里抹掉：造「依赖指着一条根本不存在的 id」这种状态。
+/// 以前是拿 `compact --keep-days 0` 造的，而 compact 现在会把还有人等的那条留下
+/// （t39），所以这种坏状态只剩手改 state / 老版本留下的文件两个来源。
+fn drop_todo_from_state(d: &Path, id: &str) {
+    let p = d.join(".zloop/state.json");
+    let mut st: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    let todos = st["todos"].as_array_mut().unwrap();
+    todos.retain(|t| t["id"] != id);
+    fs::write(&p, serde_json::to_string_pretty(&st).unwrap()).unwrap();
+}
+
 #[test]
 fn end_to_end() {
     let dir = tempfile::tempdir().unwrap();
@@ -1281,16 +1292,15 @@ fn status_tells_a_dead_wait_apart_from_a_normal_queue() {
     let o = zloop(d, &["status", "--no-color"], None, &[]);
     assert!(o.out.contains("⛔ 等不到 t4"), "野状态也派不出去，一样是死等: {}", o.out);
 
-    // 依赖被 `compact` 搬走（这条 `edit --blocked-by` 拦得住、compact 拦不住）：
+    // 依赖压根不在清单里（手改过的 state、或老版本 `compact` 搬走的——今天的 compact
+    // 会把它留下，见 `compact_keeps_a_todo_that_others_still_wait_on`）：
     // 只剩断开一条路，所以给的命令也得是断开，不能是"把 t1 捡回来"——t1 已经不在了
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     zloop(d, &["init", "beta"], None, &[]);
     zloop(d, &["plan", "--add", "[P0] 做基础", "--add", "[P1] 等基础"], None, &[]);
     zloop(d, &["edit", "t2", "--blocked-by", "t1"], None, &[]);
-    zloop(d, &["next"], None, &[]);
-    zloop(d, &["done", "t1", "--note", "ok", "--approach", "做了 a"], None, &[]);
-    assert_eq!(zloop(d, &["compact", "--keep-days", "0"], None, &[]).code, 0);
+    drop_todo_from_state(d, "t1");
     let o = zloop(d, &["status", "--no-color"], None, &[]);
     assert!(o.out.contains("⛔ 等不到 t1"), "依赖被搬走了同样永远轮不到: {}", o.out);
     assert!(o.out.contains("zloop edit t2 --blocked-by ''"), "指不到的 id 只能断开: {}", o.out);
@@ -1351,16 +1361,14 @@ fn a_dead_wait_reads_the_same_on_every_list() {
     let o = zloop(d, &["status", "--md"], None, &[]);
     assert!(!o.out.contains('⛔') && o.out.contains("⏳t4"), "捡回来了还在喊死等: {}", o.out);
 
-    // 依赖被 `compact` 搬走：同样是死等，但出口只剩"断开"——t1 已经不在了，
+    // 依赖整条不在清单里：同样是死等，但出口只剩"断开"——t1 已经不在了，
     // 指着人去 `edit t1` 是死路
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     zloop(d, &["init", "beta"], None, &[]);
     zloop(d, &["plan", "--add", "[P0] 做基础", "--add", "[P1] 等基础"], None, &[]);
     zloop(d, &["edit", "t2", "--blocked-by", "t1"], None, &[]);
-    zloop(d, &["next"], None, &[]);
-    zloop(d, &["done", "t1", "--note", "ok", "--approach", "做了 a"], None, &[]);
-    assert_eq!(zloop(d, &["compact", "--keep-days", "0"], None, &[]).code, 0);
+    drop_todo_from_state(d, "t1");
     let o = zloop(d, &["context"], None, &[]);
     assert!(o.out.contains("⛔等不到 t1（zloop edit t2 --blocked-by ''）"), "指不到的 id 只能断开: {}", o.out);
     let o = zloop(d, &["status", "--md"], None, &[]);
@@ -1426,6 +1434,92 @@ fn deferring_a_dependency_names_the_todos_it_kills() {
     assert!(o.out.contains("连累 10 条永远等不到 t1"), "条数要说全: {}", o.out);
     assert!(o.out.contains("t2,t3,t4,t5,t6,t7,t8,t9…"), "只印前 8 个再省略: {}", o.out);
     assert!(!o.out.contains("t11"), "省略号后面别再漏出来: {}", o.out);
+}
+
+/// `compact` 是「一条命令判死一片」的第二处，而且比 `edit --status deferred` 更狠：
+/// 搬进 `.zloop/archive/` 的 todo **没有命令能捡回来**。
+///
+/// 修复前：`compact --keep-days 0` 把 done 的 t1 连同它的 tick 搬走，只印
+/// `compacted 1 todos and 1 ticks`，还开着的 t2/t3 就此指着一个不存在的 id——
+/// 紧接着 `doctor` 退 1 报「t2 依赖 t1，但没有这条 todo」，而唯一的出路是
+/// `edit t2 --blocked-by ''`，连"它当初依赖谁"也一并丢掉。
+///
+/// 所以这一处不是补一行提醒（`edit` 那处可以，因为 `--status open` 撤得回来），
+/// 是**留下那一条不搬**：剩下的照常整理，等的人一做完，下一次 compact 自然带上它。
+#[test]
+fn compact_keeps_a_todo_that_others_still_wait_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "alpha"], None, &[]);
+    zloop(
+        d,
+        &["plan", "--add", "[P0] 做基础", "--add", "[P1] 等基础", "--add", "[P1] 也等基础", "--add", "[P2] 没人等"],
+        None,
+        &[],
+    );
+    zloop(d, &["edit", "t2", "--blocked-by", "t1"], None, &[]);
+    zloop(d, &["edit", "t3", "--blocked-by", "t1"], None, &[]);
+    zloop(d, &["next"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "ok", "--approach", "做了 a"], None, &[]);
+    zloop(d, &["edit", "t4", "--status", "deferred"], None, &[]);
+
+    let o = zloop(d, &["compact", "--keep-days", "0"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    // 核心不变量：整理完 doctor 还是绿的。修复前这里是 exit 1（t2/t3 依赖 t1 但没这条 todo）
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 0, "整理不许留下 doctor 认定的坏状态: {}", o.out);
+    assert!(o.out.contains("留下 1 条没搬"), "留下了就要说: {}", o.out);
+    assert!(o.out.contains("t1 ← t2,t3"), "要点名是谁在等: {}", o.out);
+    assert!(o.out.contains("zloop edit t2 --blocked-by ''"), "欠一个出口: {}", o.out);
+    // 没人等的那条照常搬走：这不是"有依赖就整个不整理了"
+    assert!(o.out.contains("compacted 1 todos"), "没人等的 t4 该照常归档: {}", o.out);
+    let st = state::load(&d.join(".zloop/state.json")).unwrap();
+    assert!(st.todos.iter().any(|t| t.id == "t1"), "t1 得留在清单里");
+    assert!(!st.todos.iter().any(|t| t.id == "t4"), "t4 该已经归档");
+    // 留下的那条不是死等，是正常的「做完了」：别在 status 上多出一个 ⛔
+    assert!(!zloop(d, &["status", "--no-color"], None, &[]).out.contains('⛔'), "留下 ≠ 坏掉");
+
+    // 全部到期的都被人等着 → 一条都没搬，但原因不是"没有到期的"，那句话会是谎话
+    let o = zloop(d, &["compact", "--keep-days", "0"], None, &[]);
+    assert!(o.out.contains("nothing compacted"), "{}", o.out);
+    assert!(!o.out.contains("nothing to compact"), "别再说成没有到期的: {}", o.out);
+
+    // 等的人一了结，下一次整理自然带上它：这是"留下"，不是"永久钉住"
+    zloop(d, &["edit", "t2", "--blocked-by", ""], None, &[]);
+    zloop(d, &["edit", "t3", "--status", "deferred"], None, &[]);
+    let o = zloop(d, &["compact", "--keep-days", "0"], None, &[]);
+    assert!(o.out.contains("compacted") && !o.out.contains("留下"), "没人等了就该搬走: {}", o.out);
+    assert!(!state::load(&d.join(".zloop/state.json")).unwrap().todos.iter().any(|t| t.id == "t1"));
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 0);
+
+    // 等的那条自己已经了结 → 不算在等（判据和四张清单同源：`dead_deps` 跳终态），
+    // 一串 done 的依赖链该一次整理干净，别互相钉住
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "beta"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 一", "--add", "[P1] 二", "--add", "[P1] 三"], None, &[]);
+    zloop(d, &["edit", "t2", "--blocked-by", "t1"], None, &[]);
+    zloop(d, &["next"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "ok", "--approach", "a"], None, &[]);
+    zloop(d, &["next"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "ok", "--approach", "b"], None, &[]);
+    let o = zloop(d, &["compact", "--keep-days", "0"], None, &[]);
+    assert!(o.out.contains("compacted 2 todos") && !o.out.contains("留下"), "了结的那条不在等谁: {}", o.out);
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 0, "done 的 todo 留着指向被搬走者的 blocked_by 不算问题");
+
+    // 依赖一条**已延后**的 todo：doctor 在整理前就在喊了，但那种状态的出口是
+    // 「把依赖捡回来」（edit --status open）——搬进归档就只剩「把依赖断开」。
+    // 整理不该把人的退路整理掉，所以本来就死的那条同样留下
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "gamma"], None, &[]);
+    zloop(d, &["plan", "--add", "[P1] 一", "--add", "[P1] 二"], None, &[]);
+    zloop(d, &["edit", "t2", "--blocked-by", "t1"], None, &[]);
+    zloop(d, &["edit", "t1", "--status", "deferred"], None, &[]);
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 1, "前提：整理之前就已经是死等");
+    let o = zloop(d, &["compact", "--keep-days", "0"], None, &[]);
+    assert!(o.out.contains("t1 ← t2"), "本来就死的也别搬走，出口还留着: {}", o.out);
+    let o = zloop(d, &["status", "--no-color"], None, &[]);
+    assert!(o.out.contains("zloop edit t1 --status open"), "捡回来这条路得还在: {}", o.out);
 }
 
 /// 做完 / 延后的那条不在等谁：给它印「等不到」是噪音，`⏳` 也该原样留着。
