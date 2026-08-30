@@ -608,6 +608,11 @@ fn start_refusal(st: &state::State, reason: &str) -> String {
             format!("{} 条待办全做完了", st.todos.len()),
             "zloop plan --add \"[P0] 下一件事\" 续上，或 zloop goal new \"<新目标>\" 开一个新的".to_string(),
         ),
+        // 这条别学 all_done 说"去开新目标"：活一条都没做，只是全被推到了以后。
+        "all_deferred" => (
+            format!("{} 条待办全被延后了，没有能跑的", st.todos.len()),
+            "zloop edit <id> --status open 把要做的那条捡回来，或 zloop plan --add \"[P0] 下一件事\"".to_string(),
+        ),
         "paused" => ("当前目标是暂停着的".to_string(), "zloop resume 继续，或 zloop goal switch <id> 换一个".to_string()),
         "done" => ("当前目标已经结束了".to_string(), "zloop goal new \"<新目标>\"".to_string()),
         "fail_streak" => (
@@ -1023,10 +1028,13 @@ fn cmd_edit(
         }
         st.todos[idx].updated_at = state::now_iso();
         tick::record(st, "edit", Some(id), "edit", &who)?;
-        let open = !todo::open_ordered(st).is_empty();
-        if st.goal.status == "done" && open {
+        // 没活可跑 ≠ 目标结束：把最后一条 todo 延后也会清空 open 列表，但一条都没做完，
+        // 这时标 done 会让 `decide` 在 goal.status 那一关就返回 done，`status` 说"目标结束"，
+        // `start` 让人去 goal new——两条被推到以后的活就此没人再看（B-3）。
+        let finished = todo::open_ordered(st).is_empty() && !todo::all_deferred(st);
+        if st.goal.status == "done" && !finished {
             st.goal.status = "active".into();
-        } else if !open {
+        } else if finished {
             st.goal.status = "done".into();
         }
         Ok(Ok(st.todos[idx].clone()))
@@ -1297,11 +1305,14 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     let deferred = st.todos.iter().filter(|t| t.status == "deferred").count();
     let planned = total - deferred;
     let later = if deferred > 0 { format!(" · {deferred} 条延后") } else { String::new() };
+    let first_deferred = st.todos.iter().find(|t| t.status == "deferred").map(|t| t.id.clone());
     let (icon, word, code): (&str, &str, &str) = match () {
         // 刚开的目标还没有待办：说"待规划"，别说"全部完成"（decide 对空清单返回 all_done）
         _ if total == 0 => ("◦", "待规划", "34"),
         _ if st.goal.status == "done" => ("✅", "完成", "32"),
         _ if st.goal.status == "paused" => ("⏸", "已暂停", "33"),
+        // 一条没做完、全推到了以后：这不是"完成"，也不是"空闲"，别让它跟正常收工同一个词
+        _ if d.reason == "all_deferred" => ("⏭", "全部延后", "33"),
         _ if matches!(d.reason.as_str(), "fail_streak" | "progress_streak" | "budget") => ("⛔", "已停", "31"),
         _ if matches!(d.reason.as_str(), "user_gate" | "blocked") => ("⏳", "等你决定", "33"),
         _ if ph.kind == "executing" => ("🔄", "执行中", "36"),
@@ -1530,6 +1541,8 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         "还没有待办 · 先用 zloop plan 加几条".to_string()
     } else if !ph.detail.is_empty() {
         ph.detail.clone()
+    } else if d.reason == "all_deferred" {
+        format!("{deferred} 条待办全被延后了，一条都没完成 · 目标没结束，只是没活可跑")
     } else if st.goal.status == "done" || d.reason == "all_done" {
         format!("{planned} 条待办全部完成，目标结束{}", if deferred > 0 { format!("（另有 {deferred} 条延后）") } else { String::new() })
     } else if st.goal.status == "paused" {
@@ -1585,6 +1598,10 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         acts.push(("换目标", "zloop goal new \"另一个目标\"".into()));
     } else if st.goal.status == "paused" {
         acts.push(("继续", "zloop resume".into()));
+    } else if d.reason == "all_deferred" {
+        // 第一位是"捡回来"而不是"换目标"：延后的活还在清单里，别引着人把它们丢掉
+        acts.push(("捡回来", format!("zloop edit {} --status open", first_deferred.as_deref().unwrap_or("<id>"))));
+        acts.push(("加活", "zloop plan --add \"[P0] 下一件事\"".into()));
     } else if st.goal.status == "done" || d.reason == "all_done" {
         acts.push(("加活", "zloop plan --add \"[P0] 下一件事\"".into()));
         acts.push(("换目标", "zloop goal new \"新目标\"".into()));

@@ -110,9 +110,13 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
     let decision = tick::decide(state, at);
     let next = match &decision.todo {
         Some(t) => format!("{} [P{}] {}", t.id, t.priority, t.text),
-        // `unplanned` 是唯一一个"读者该做的事跟停机词字面意思相反"的 reason：
-        // 不是没活了，是活还没写下来。直说下一步，省得被当成"目标已完成"（#5）。
+        // `unplanned` / `all_deferred` 这两个停机词的字面意思和读者该做的事是相反的：
+        // 不是没活了，一个是活还没写下来，一个是活全被推到了以后。直说下一步，
+        // 省得被当成"目标已完成"就去开新目标（#5 / B-3）。
         None if decision.reason == "unplanned" => "（unplanned：还没有待办，先 zloop plan 规划几条，别新建目标）".to_string(),
+        None if decision.reason == "all_deferred" => {
+            "（all_deferred：待办全被延后了，一条都没做完。要么 zloop edit <id> --status open 捡回来，要么 zloop plan 加新的，别当成目标已完成）".to_string()
+        }
         None => format!("（{}）", decision.reason),
     };
     sections.push(format!("## 下一条\n{next}"));
@@ -135,10 +139,14 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
         "## 待办（前 5 条，共 {} 条未完成）\n{}",
         todo::remaining(state),
         match () {
-            // 空清单有两种：还没规划过（去 plan）和全做完了（去开新目标）。写死"全部完成"
-            // 会让刚建的空目标看着像收工了，读的人就去 goal new 一个重名的（#5）。
+            // 空清单有三种：还没规划过（去 plan）、全做完了（去开新目标）、全被延后了
+            // （去捡回来）。写死"全部完成"会让另外两种看着像收工了，读的人就去 goal new
+            // 一个重名的（#5 / B-3）。
             _ if !open.is_empty() => open.join("\n"),
             _ if state.todos.is_empty() => "- 还没有待办：先 zloop plan".to_string(),
+            _ if todo::all_deferred(state) => {
+                format!("- 全被延后了（{} 条），一条都没完成", state.todos.len())
+            }
             _ => "- 全部完成".to_string(),
         }
     ));

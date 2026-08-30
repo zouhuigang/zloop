@@ -68,6 +68,7 @@ pub fn reason_zh(r: &str) -> String {
         "budget" => "到花费上限".into(),
         "throttled" => "本窗口次数用完".into(),
         "all_done" | "done" => "全部完成".into(),
+        "all_deferred" => "待办全被延后了".into(),
         "unplanned" => "还没有待办".into(),
         "paused" => "已暂停".into(),
         other => other.into(),
@@ -163,9 +164,9 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
         None => Phase {
             kind: "stopped",
             summary: format!("stopped ({})", d.reason),
-            // "已完成 / 已暂停 / 待规划" is already the headline word; any other reason is news.
+            // "已完成 / 已暂停 / 待规划 / 全部延后" is already the headline word; any other reason is news.
             detail: match d.reason.as_str() {
-                "all_done" | "done" | "paused" | "unplanned" => String::new(),
+                "all_done" | "done" | "paused" | "unplanned" | "all_deferred" => String::new(),
                 other => format!("{}，已停下等你处理", reason_zh(other)),
             },
         },

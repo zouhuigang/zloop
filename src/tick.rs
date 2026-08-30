@@ -212,10 +212,18 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
     }
     let open = todo::open_ordered(state);
     if open.is_empty() {
-        // 「一条都还没规划」和「全部做完了」是两件事，出口动作正好相反：前者要 `zloop plan`，
-        // 后者才该开新目标。共用 `all_done` 这一个词时，skill 的「已完成 → goal new」那一支
-        // 会把刚 `goal new` 出来的空目标当成做完的，再新建一个重名目标把它停放掉（#5）。
-        return Decision::stop(if state.todos.is_empty() { "unplanned" } else { "all_done" });
+        // 「一条都还没规划」「全部做完了」「全被延后了」是三件事，出口动作各不相同：
+        // 第一个要 `zloop plan`，第二个才该开新目标，第三个要把延后的捡回来。共用
+        // `all_done` 这一个词时，skill 的「已完成 → goal new」那一支会把刚 `goal new`
+        // 出来的空目标当成做完的，再新建一个重名目标把它停放掉（#5）；同样地，一条没做完
+        // 全推到以后的目标会被当成收工，两条延后的活就此没人再看（B-3）。
+        return Decision::stop(if state.todos.is_empty() {
+            "unplanned"
+        } else if todo::all_deferred(state) {
+            "all_deferred"
+        } else {
+            "all_done"
+        });
     }
     let noops = noop_streak(ticks);
     let exhausted = noops >= policy.max_noop_streak;
@@ -346,7 +354,9 @@ pub fn apply_done(
             todo::insert_after(state, id, &body, Some(p))?;
         }
     }
-    if todo::open_ordered(state).is_empty() {
+    // 和 `edit` 同一口径：清单空但一条没完成（全被延后）不算目标结束。走 done 这条路时
+    // 手上这条刚被标成 done，`all_deferred` 本来就是假的——写在这里是为了两处别漂开。
+    if todo::open_ordered(state).is_empty() && !todo::all_deferred(state) {
         state.goal.status = "done".into();
     }
     Ok((tick, idx))

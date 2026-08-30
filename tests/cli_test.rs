@@ -375,6 +375,62 @@ fn skill_tells_you_to_plan_when_the_goal_has_no_todos() {
     }
 }
 
+/// B-3：把待办一条条延后，最后一条延后完，整个目标就被当成"结束"了——`goal.status` 变
+/// `done`、`status` 说"0 条待办全部完成，目标结束"、`start` 让人去 `goal new`。一条活都没做，
+/// 出口却指向"丢掉这个目标"。走真命令（init → plan → edit --status deferred），不手搓状态。
+#[test]
+fn all_deferred_is_not_the_goal_finishing() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "全被推到以后的目标"], None, &[]);
+    zloop(d, &["plan"], Some("[P0] a\n[P0] b\n"), &[]);
+    for id in ["t1", "t2"] {
+        let o = zloop(d, &["edit", id, "--status", "deferred"], None, &[]);
+        assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    }
+
+    // 目标没结束：一条都没完成，只是没活可跑
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert_eq!(st.goal.status, "active", "延后最后一条不该把目标标成 done");
+
+    let next: serde_json::Value = serde_json::from_str(&zloop(d, &["next", "--json"], None, &[]).out).unwrap();
+    assert_eq!(next["reason"], "all_deferred", "全部延后要有自己的 reason，不能跟「全部完成」共用");
+    assert_eq!(next["should_run"], false);
+
+    let status = zloop(d, &["status", "--no-color"], None, &[]).out;
+    assert!(!status.contains("目标结束"), "一条都没做完，别说目标结束:\n{status}");
+    assert!(status.contains("全部延后") && status.contains("一条都没完成"), "{status}");
+    assert!(status.contains("zloop edit t1 --status open"), "出口是把活捡回来，不是换目标:\n{status}");
+
+    let ctx = zloop(d, &["context"], None, &[]).out;
+    assert!(!ctx.contains("全部完成"), "交接包里不许出现「全部完成」:\n{ctx}");
+    assert!(ctx.contains("all_deferred") && ctx.contains("别当成目标已完成"), "{ctx}");
+
+    // start 也走同一个词，给的是"捡回来"而不是 goal new
+    let refused = zloop(d, &["start", "--fast"], None, &[]);
+    assert_eq!(refused.code, 1, "{}{}", refused.out, refused.err);
+    assert!(refused.err.contains("（all_deferred）"), "{}", refused.err);
+    assert!(refused.err.contains("--status open"), "{}", refused.err);
+    assert!(!refused.err.contains("goal new"), "别引着人把没做的活丢掉: {}", refused.err);
+
+    // 捡回来一条就该继续跑
+    zloop(d, &["edit", "t1", "--status", "open"], None, &[]);
+    let next: serde_json::Value = serde_json::from_str(&zloop(d, &["next", "--json"], None, &[]).out).unwrap();
+    assert_eq!((&next["reason"], &next["todo"]["id"]), (&serde_json::json!("ready"), &serde_json::json!("t1")));
+
+    // 有一条真做完了，就还是"目标结束"——这条路不受影响
+    zloop(d, &["done", "t1", "--note", "ok", "--approach", "x"], None, &[]);
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert_eq!(st.goal.status, "done", "1 条完成 + 1 条延后：这才叫收工");
+    assert!(zloop(d, &["status", "--no-color"], None, &[]).out.contains("目标结束"));
+
+    // skill 模板也要把第三个词讲清，否则读的人还是照 all_done 那一支走
+    for host in ["claude", "codex-app"] {
+        let text = hosts::skill_markdown(host);
+        assert!(text.contains("all_deferred"), "{host} 模板要提到 all_deferred:\n{text}");
+    }
+}
+
 #[test]
 fn hook_stop_blocks_only_when_runnable() {
     let dir = tempfile::tempdir().unwrap();

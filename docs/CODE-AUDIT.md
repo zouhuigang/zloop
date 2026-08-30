@@ -499,7 +499,7 @@ $ zloop doctor
 | 场景 | 实际行为 | 判断 |
 |---|---|---|
 | 0 条 todo（刚 init） | `unplanned` + "还没有待办 · 先用 zloop plan" | ✅ |
-| 全部 deferred | `done` + "0 条待办全部完成，目标结束（另有 2 条延后）" | ⚠ B-3 |
+| 全部 deferred | `done` + "0 条待办全部完成，目标结束（另有 2 条延后）" | ❌ B-3（已修） |
 | 自依赖 `t1←t1` | `blocked`，"30 分钟后重试"，doctor 沉默 | ❌ A-9 |
 | 二元环 `t1←t2←t1` | 同上 | ❌ A-9 |
 | tick 时间戳在 2099 | `ready`（不撞配额时无影响） | ✅ |
@@ -577,11 +577,79 @@ noops >= policy.max_noop_streak                   ← 没有 > 0 守卫
 
 想关掉某个检查的人，按另外三个的先例写 0，得到的是相反的效果。
 
-### B-3（低）全部 deferred 时说"目标结束"
+### B-3（重估为中）全部 deferred 时说"目标结束"，并引着人去开新目标 — 已修
 
-`is_terminal` 把 `done` 和 `deferred` 一视同仁，所以全部延后 = 没有未完成的 = "目标结束"。
-括号里的"（另有 2 条延后）"救了它，但主句"0 条待办全部完成，目标结束"字面就是错的。
-和 `unplanned` 当初从 `all_done` 里分出来是同一类问题。
+第四轮把它记成"措辞不准"的低危。**回来修的时候发现比记的严重**：它根本走不到 `all_done`
+那一支，因为在那之前 `goal.status` 就已经被改成 `done` 了。
+
+`cli.rs` 的 `edit` 收尾（原 1026–1031）：
+
+```rust
+let open = !todo::open_ordered(st).is_empty();
+if st.goal.status == "done" && open { st.goal.status = "active".into(); }
+else if !open { st.goal.status = "done".into(); }   // ← 延后最后一条 = 目标结束
+```
+
+`is_terminal` 含 `deferred`，所以把最后一条待办延后就清空了 open 列表，目标当场被标成
+**已结束**。修复前实测（真命令，`init` → `plan` 两条 → `edit --status deferred` 两条）：
+
+```
+$ zloop next --json
+  "reason": "done",  "should_run": false,  "interval_min": null
+$ python3 -c "…" .zloop/state.json → goal.status = done
+
+$ zloop status
+  ✅ 完成      ░░░░░░░░░░░░░░░░ 0%  跑了 0 轮
+  清单    0/0 完成 · 2 条延后
+  阶段    0 条待办全部完成，目标结束（另有 2 条延后）
+  加活    zloop plan --add "[P0] 下一件事"
+  换目标  zloop goal new "新目标"
+
+$ zloop start
+start: 没启动——runner 起来第一轮就会退出（done）。
+原因：当前目标已经结束了。
+下一步：zloop goal new "<新目标>"
+```
+
+一条活都没做，三个出口（status 的页脚、start 的下一步、skill 决策树的"已完成 → goal new"）
+**全部指向"丢掉这个目标"**。skill 模板里那句"只有 `all_done` 才是真做完了"也拦不住它——
+它报的连 `all_done` 都不是，是 `done`。两条被推到以后的活就此没人再看。
+
+**修法**（和 `unplanned` 当初从 `all_done` 里分出来同一个套路）：
+
+1. `todo::all_deferred(state)` = 清单非空 且 每条都是 `deferred`（open 空时"没有一条 done"
+   就等价于"全是 deferred"，因为非终态的都在 open 里）。
+2. `cli.rs` 的 `edit` 和 `tick::apply_done` 的收尾共用同一口径：`finished = open 空 && !all_deferred`，
+   只有 `finished` 才标 `goal.status = done`。`edit` 那边反过来也成立——发现不是 finished
+   就把误标的 `done` 改回 `active`，所以**修复前存量的坏状态会在下一次 edit 时自愈**。
+3. `tick::decide` 的空清单分支从两路变三路：`unplanned` / `all_deferred` / `all_done`。
+4. 出口全部改指向"把活捡回来"：`status` 的标题词（`⏭ 全部延后`）、阶段句、页脚
+   `捡回来 zloop edit t1 --status open`（带上第一条延后 todo 的真 id）；`start_refusal`
+   的 `all_deferred` 一支；`context` 的「下一条」和「待办」两节；`phase::reason_zh`；
+   skill 模板里补第三个词。
+
+修完实测同一条路径：
+
+```
+$ zloop next --json → "reason": "all_deferred"      goal.status = active
+$ zloop status
+  ⏭  全部延后  ░░░░░░░░░░░░░░░░ 0%  跑了 0 轮
+  阶段    2 条待办全被延后了，一条都没完成 · 目标没结束，只是没活可跑
+  捡回来  zloop edit t1 --status open
+$ zloop start
+原因：2 条待办全被延后了，没有能跑的。
+下一步：zloop edit <id> --status open 把要做的那条捡回来，或 zloop plan --add "[P0] 下一件事"
+$ zloop edit t1 --status open && zloop next --json → ready / t1
+```
+
+回归测试两条，撤掉修复都变红：
+
+- `tick_test::all_deferred_is_not_all_done` — 撤掉 `decide` 的三路分支：
+  `left: (false, "all_done")` / `right: (false, "all_deferred")`
+- `cli_test::all_deferred_is_not_the_goal_finishing`（走真命令，不手搓状态）— 撤掉 `edit`
+  的 `!all_deferred` 守卫：`延后最后一条不该把目标标成 done  left: "done"  right: "active"`
+
+后一条同时钉住了**不该动的那一边**：1 条 done + 1 条 deferred 仍然是"目标结束"。
 
 ### 试过但没复现的
 

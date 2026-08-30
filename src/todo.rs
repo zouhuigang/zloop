@@ -191,6 +191,15 @@ pub fn remaining(state: &State) -> usize {
     state.todos.iter().filter(|t| !is_terminal(&t.status)).count()
 }
 
+/// 清单不空、一条都没做完，剩下的全被推到了以后。
+///
+/// `is_terminal` 把 done 和 deferred 一视同仁，所以这种状态在"还有没有活"这一层
+/// 和"全做完了"长得一模一样——但出口动作是相反的：一个该开新目标，一个该
+/// `zloop edit <id> --status open` 把活捡回来。别让它俩共用一个词（同 `unplanned`）。
+pub fn all_deferred(state: &State) -> bool {
+    !state.todos.is_empty() && state.todos.iter().all(|t| t.status == "deferred")
+}
+
 pub fn set_status(state: &mut State, id: &str, status: &str, note: Option<&str>) -> Result<usize> {
     if !STATUSES.contains(&status) {
         bail!("invalid status {status:?}; expected one of {}", STATUSES.join(", "));

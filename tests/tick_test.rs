@@ -46,6 +46,25 @@ fn all_done_marks_goal_done() {
     assert!(!d.should_run && d.reason == "done");
 }
 
+/// 全部延后 ≠ 全部完成（B-3）：`is_terminal` 把 done 和 deferred 一视同仁，于是"一条都没做完、
+/// 全推到了以后"在调度器眼里和"活干完了"长得一样。出口动作是相反的——一个该把延后的捡回来，
+/// 一个才该开新目标——所以它得有自己的 reason。
+#[test]
+fn all_deferred_is_not_all_done() {
+    let mut st = fresh(&["[P0] a", "[P0] b"]);
+    todo::set_status(&mut st, "t1", "deferred", None).unwrap();
+    todo::set_status(&mut st, "t2", "deferred", None).unwrap();
+    let d = tick::decide(&st, now_utc());
+    assert_eq!((d.should_run, d.reason.as_str()), (false, "all_deferred"), "全部延后要有自己的 reason");
+
+    // 只要有一条真做完了，就还是 all_done —— 这条路不受影响
+    let mut st = fresh(&["[P0] a", "[P0] b"]);
+    todo::set_status(&mut st, "t2", "deferred", None).unwrap();
+    done(&mut st, "t1");
+    st.goal.status = "active".into(); // apply_done 会顺手标 done，这里只看清单那一层
+    assert_eq!(tick::decide(&st, now_utc()).reason, "all_done");
+}
+
 #[test]
 fn blocked_by_dependency_and_backoff_ladder() {
     let mut st = fresh(&["[P0] a", "[P0] b"]);
