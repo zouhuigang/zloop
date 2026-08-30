@@ -392,6 +392,38 @@ fn check_policy(gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
             format!("把 {}/{} 的 policy.intervals_min 改回 [3, 10, 30] 这样的递增列表", STATE_DIR, state::STATE_FILE),
         ));
     }
+    // 每一档都合法，不代表这个字段写对了：它是一条**退避阶梯**——第 0 档给正常派活，
+    // 之后每积累一次 noop 往后挪一档（`tick::interval`）。写成 [30, 10, 3] 时每个数都在
+    // 1..=imax 里，上面那条一声不吭，而三件事同时反过来（实测）：正常派活按**最慢**的
+    // 30 分钟等（吞吐掉到 1/10）、blocked/user_gate 的退避是 10 → 3 → 3（越不出活退得越快，
+    // 最该慢下来的那一支反而polling 得最凶）、`runner::slowest_interval` 读 `.last()` 拿到
+    // 3 当成"最慢的一档"去 sleep。三件都不报错、不改值，面板上一切正常——只是循环变笨了。
+    //
+    // 只报**往回走**，不报"没有严格递增"：[10, 10, 10] 是有人存心不要退避，那是合法写法。
+    //
+    // 比的是**钳过之后**的值，那才是真正生效的阶梯。写了越界值时上面那条 error 已经说过
+    // "你写的数没生效"，这里再按原值判一次，只会把同一个根因拆成两条互相矛盾的报告。
+    let eff: Vec<u32> = p.intervals_min.iter().copied().map(crate::tick::clamp_interval).collect();
+    if let Some(i) = (1..eff.len()).find(|&i| eff[i] < eff[i - 1]) {
+        let list = eff.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+        f.push(Finding::warn(
+            "bad_policy",
+            format!(
+                "[{who}] policy.intervals_min = [{list}] 是往回走的：第 {} 档 {} 分钟比第 {} 档的 {} 分钟还短。\
+                 这是退避阶梯，越不出活该等得越久——写反了就是越卡越使劲问，而正常派活按第一档等 {} 分钟",
+                i + 1,
+                eff[i],
+                i,
+                eff[i - 1],
+                eff[0]
+            ),
+            format!(
+                "把 {}/{} 的 policy.intervals_min 改成不往回走的 [3, 10, 30]（每档持平也行，那是存心不退避）",
+                STATE_DIR,
+                state::STATE_FILE
+            ),
+        ));
+    }
 }
 
 /// 账本里有落在**未来**的时间戳。

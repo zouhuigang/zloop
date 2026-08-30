@@ -359,6 +359,10 @@ fn policy_numbers_written_out_of_range_are_reported() {
         ("intervals_min", serde_json::json!([4_294_967_295u32]), true),
         ("intervals_min", serde_json::json!([3, 10, 4_294_967_295u32]), true), // 只歪了最慢那一档
         ("intervals_min", serde_json::json!([0]), true),                       // sleep 0 秒的忙等
+        // 每一档都合法、但阶梯写反了：没有任何值被改掉，所以只是 warn（详见
+        // a_backwards_backoff_ladder_is_reported）
+        ("intervals_min", serde_json::json!([30, 10, 3]), false),
+        ("intervals_min", serde_json::json!([3, 30, 10]), false), // 只有末尾那一档往回走
     ];
     for (field, value, fatal) in cases {
         let tmp = tempfile::tempdir().unwrap();
@@ -387,6 +391,11 @@ fn policy_numbers_written_out_of_range_are_reported() {
         ("intervals_min", serde_json::json!([3, 10, 30])),
         ("intervals_min", serde_json::json!([1])),
         ("intervals_min", serde_json::json!([zloop::tick::INTERVAL_MIN_MAX])),
+        // 持平不是写错：那是有人存心不要退避（runner 的 fixture 就这么写）。
+        // 「往回走」的那条报的是往回走，不是「没有严格递增」——这几条是它的假阳性防线
+        ("intervals_min", serde_json::json!([10, 10, 10])),
+        ("intervals_min", serde_json::json!([1, 1, 2])),
+        ("intervals_min", serde_json::json!([3, 3, 3])),
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
@@ -399,4 +408,74 @@ fn policy_numbers_written_out_of_range_are_reported() {
         let (ks, _) = kinds(d);
         assert!(!ks.contains(&"bad_policy".to_string()), "policy.{field} = {value} 是合法的，不该报：{ks:?}");
     }
+}
+
+/// 阶梯写反了：每一档都在合法区间里，所以取值那条查不出来，而退避整个反过来。
+///
+/// 前半段先把**失败场景**跑出来（不依赖 doctor），后半段才验 doctor 说了这一句：
+/// 只验 doctor 的话，这条报警报的是什么、值不值得报，后人无从判断。
+#[test]
+fn a_backwards_backoff_ladder_is_reported() {
+    use zloop::tick;
+
+    // --- 失败场景：intervals_min = [30, 10, 3]，每个数都在 1..=INTERVAL_MIN_MAX 里 ---
+    let ladder = |iv: Vec<u32>| {
+        let mut st = common::fresh(&["[P0] a", "[P0] b"]);
+        st.policy.intervals_min = iv;
+        st.todos[1].blocked_by = vec!["t1".into()];
+        st.todos[0].status = "blocked".into();
+        let mut seq = vec![];
+        for _ in 0..3 {
+            let d = tick::decide(&st, common::now_utc());
+            assert_eq!(d.reason, "blocked", "fixture 防空跑：退避那一支必须真的走到");
+            seq.push(d.interval_min.unwrap());
+            common::tick_at(&mut st, "noop", None, None);
+        }
+        seq
+    };
+    // 写对了：越不出活等得越久
+    assert_eq!(ladder(vec![3, 10, 30]), vec![10, 30, 30]);
+    // 写反了：越不出活退得越快——最该慢下来的那一支反而 polling 得最凶
+    assert_eq!(ladder(vec![30, 10, 3]), vec![10, 3, 3], "阶梯写反时退避是往回走的");
+
+    // 而正常派活（level 0）用的是**最慢**的那一档：有活干的时候反倒每 30 分钟才动一次
+    let mut st = common::fresh(&["[P0] a"]);
+    st.policy.intervals_min = vec![30, 10, 3];
+    let d = tick::decide(&st, common::now_utc());
+    assert_eq!((d.should_run, d.interval_min), (true, Some(30)), "ready 拿的是第一档");
+
+    // 第三处：runner 在 `decide` 不给间隔时退回"最慢的那一档"，实现是 `.last()`——
+    // 阶梯往回走时它拿到的是**最快**的那一档（3），和字段名的意思正好相反。
+    assert_eq!(st.policy.intervals_min.last().copied(), Some(3));
+    assert_eq!(st.policy.intervals_min.iter().copied().max(), Some(30), ".last() 不是最大值");
+
+    // --- doctor 得说这一句（撤掉 check_policy 里那一段，下面全红）---
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    init(d, "alpha");
+    plan(d, "[P0] one\n");
+    let p = d.join(".zloop/state.json");
+    let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    v["policy"]["intervals_min"] = serde_json::json!([30, 10, 3]);
+    fs::write(&p, serde_json::to_string(&v).unwrap()).unwrap();
+
+    let (ks, code) = kinds(d);
+    assert!(ks.contains(&"bad_policy".to_string()), "阶梯写反了该被报出来：{ks:?}");
+    assert_eq!(code, 0, "没有任何值被改掉，循环照跑——这是 warn 不是 error");
+
+    let o = zloop(d, &["doctor"]);
+    assert!(o.out.contains("intervals_min"), "报告里得点名是哪个字段：{}", o.out);
+    assert!(o.out.contains("往回走"), "得说清楚是哪种写错法：{}", o.out);
+    assert!(!o.out.contains("没发现问题"), "{}", o.out);
+
+    // 报的是"往回走"，不是"没有严格递增"：持平是合法写法，不能被误伤
+    let tmp2 = tempfile::tempdir().unwrap();
+    let d2 = tmp2.path();
+    init(d2, "alpha");
+    plan(d2, "[P0] one\n");
+    let p2 = d2.join(".zloop/state.json");
+    let mut v2: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p2).unwrap()).unwrap();
+    v2["policy"]["intervals_min"] = serde_json::json!([10, 10, 10]);
+    fs::write(&p2, serde_json::to_string(&v2).unwrap()).unwrap();
+    assert!(!kinds(d2).0.contains(&"bad_policy".to_string()), "持平是存心不退避，不该报");
 }
