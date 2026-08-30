@@ -437,16 +437,35 @@ fn blocked_summary(st: &State) -> String {
         .join("\n")
 }
 
+/// 上一轮**真的干过活的**宿主会话——`--resume` 接上去的就是它。
+///
+/// 判据是「这条 tick 是宿主结掉一轮留下的吗」（`tick::is_writeback`），不是「host 对不对」：
+/// `ticks` 里带 session id 的不止宿主轮次。`zloop feedback` / `zloop edit` 把**人在另一个
+/// 终端**的 `CLAUDE_CODE_SESSION_ID` 原样记进 tick（`session::detect()`），于是"人给这条
+/// todo 留了句话" = "把自己的会话挂到这条 todo 名下"；只看 host + todo 的话，下一轮无头
+/// runner 正好去捡它，`claude -p --resume <人的会话>` 让这一轮的提示词接在人那段对话
+/// **后面**跑——上下文全是不相干的、token 按整段转录计费、产出写进人的转录里，人正开着
+/// 那个会话就是两边同时往一条对话里写（A-19）。
+///
+/// 同一条过滤顺带挡掉另外两种「有 session、但不是上一轮干活的那个」：`zloop next` 在
+/// should_run=false 时记的 `noop`（人敲的，`todo` 为空，只在 `All` 模式下够得着），
+/// 以及 runner 自己插的 `reflect` / `replan` 轮次——那两轮本来就是 `--resume None` 起的
+/// 一次性会话，不该成为下一轮工作的上文。
+///
+/// 宿主超时/失败时 runner 自己补的那条 `fail`（`tick::record("fail", …, who)`）用的是
+/// 本轮宿主报回来的 session，是 `WRITEBACK` 成员——谱系不会因为一轮没写回就断掉。
 fn pick_session(state: &State, host: Host, todo_id: &str, mode: ResumeMode) -> Option<String> {
-    let same_host = |t: &&state::Tick| t.host.as_deref() == Some(host.as_str()) && t.session.is_some();
+    let host_round = |t: &&state::Tick| {
+        t.host.as_deref() == Some(host.as_str()) && t.session.is_some() && tick::is_writeback(&t.outcome)
+    };
     match mode {
         ResumeMode::None => None,
-        ResumeMode::All => state.ticks.iter().rev().find(same_host).and_then(|t| t.session.clone()),
+        ResumeMode::All => state.ticks.iter().rev().find(host_round).and_then(|t| t.session.clone()),
         ResumeMode::Todo => state
             .ticks
             .iter()
             .rev()
-            .filter(same_host)
+            .filter(host_round)
             .find(|t| t.todo.as_deref() == Some(todo_id))
             .and_then(|t| t.session.clone()),
     }

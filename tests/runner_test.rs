@@ -198,6 +198,39 @@ echo "{\"session_id\":\"sess-$id\",\"is_error\":false,\"result\":\"ok\"}""#,
     assert!(argv3.lines().all(|l| l == "resume=none"), "{argv3}");
 }
 
+/// A-19：人在自己的会话里给某条 todo 留一句 `zloop feedback`，下一轮无头 runner 不该
+/// 拿**人的**会话 id 去 `--resume`——那会让这一轮接在人那段对话后面跑。
+#[test]
+fn a_humans_feedback_is_not_a_session_to_resume() {
+    let fake = fake_host(
+        r#"r=none; case "$*" in *--resume*) r=$(printf "%s" "$*" | tr "\n" " " | sed -n "s/.*--resume \([^ ]*\).*/\1/p");; esac
+echo "resume=$r" >> "$TMPDIR_MARK/argv.log"
+id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+zloop done "$id" --note "ok" --approach "fake host round" >/dev/null 2>&1
+echo "{\"session_id\":\"sess-$id\",\"is_error\":false,\"result\":\"ok\"}""#,
+    );
+    for extra in [&[][..], &["--resume", "all"][..]] {
+        let d = project(&["[P0] a", "[P0] b"]);
+        // 人在自己的 Claude Code 会话里给 t1 留一句话（feedback tick 记的是人的 session id）
+        let (c, o, e) = run(&d, &["feedback", "t1", "先别动 x.rs"], &[("CLAUDE_CODE_SESSION_ID", "HUMAN-9999")]);
+        assert_eq!(c, 0, "{o}{e}");
+        let mark = tempfile::tempdir().unwrap().keep();
+        let mut args = vec!["run", "--host", "claude", "--fast", "--no-replan"];
+        args.extend_from_slice(extra);
+        let (code, out, _) =
+            run(&d, &args, &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())]);
+        assert_eq!(code, 0, "{out}");
+        let argv = fs::read_to_string(mark.join("argv.log")).unwrap();
+        let calls: Vec<&str> = argv.lines().collect();
+        assert!(!argv.contains("HUMAN-9999"), "runner 跑进了人的对话里（{extra:?}）：{argv}");
+        assert_eq!(calls[0], "resume=none", "第一轮之前只有人说过话，没有上一轮可接（{extra:?}）：{argv}");
+        // 谱系本身没被过滤掉：--resume all 下第二轮照旧接着上一轮宿主的会话
+        if !extra.is_empty() {
+            assert_eq!(calls[1], "resume=sess-t1", "宿主自己的会话谱系不该被一起滤掉：{argv}");
+        }
+    }
+}
+
 #[test]
 fn waiting_on_a_human_polls_instead_of_exiting() {
     let fake = fake_host(

@@ -1344,7 +1344,7 @@ runner 读的所有累计量（第 4 / 5 / 7 / 8 项）都是从 `ticks` 现算�
 `policy.spent_before_compact`），`spent_usd` 加上它；或者 compact 时显式提示
 「这次整理让已记录花费从 $X 降到 $Y，预算闸会跟着放开」，让人自己决定。
 
-### A-19（中高）人留一句反馈，下一轮无头 runner 就 `--resume` 进人的对话里
+### A-19（中高）人留一句反馈，下一轮无头 runner 就 `--resume` 进人的对话里 — 已修
 
 `pick_session`（`runner.rs:440`）挑「上一轮的会话」时只看两件事：host 对不对、
 （`--resume todo` 模式下）todo 对不对。**它不看这条 tick 是谁记的。**
@@ -1374,9 +1374,40 @@ runner 读的所有累计量（第 4 / 5 / 7 / 8 项）都是从 `ticks` 现算�
 继承了当时那个 Claude Code 会话的 id，runner 的日志直接打出
 `resume 870f6118-…`——那正是当时跑审查的那个会话。
 
-修的方向：`pick_session` 加一道「这条 tick 是不是宿主写回的」过滤
-（`COUNTED` 里的 outcome，或者干脆只认 `in_progress.via == "runner"` 期间记的），
-别让「人说过话」等于「人跑过这一轮」。
+**修法**：`pick_session` 的判据从「host 对不对」改成「这条 tick 是不是宿主结掉一轮留下的」——
+复用 A-17 装的那个判据 `tick::is_writeback`（`done` / `progress` / `fail` / `block`）。
+别让「人说过话」等于「人跑过这一轮」：
+
+```rust
+let host_round = |t: &&state::Tick| {
+    t.host.as_deref() == Some(host.as_str()) && t.session.is_some() && tick::is_writeback(&t.outcome)
+};
+```
+
+谱系没被这道过滤削掉：宿主超时 / 崩掉时 runner 自己补的那条 `fail`
+（`runner.rs:1093`，`who` 用的是本轮宿主报回来的 session）也是 `WRITEBACK` 成员，
+所以「上一轮没写回，下一轮接着同一个会话再试」照旧成立。
+
+同一道过滤顺带挡掉另外两种「有 session id、但不是上一轮干活的那个」——两条都只在
+`--resume all` 下够得着（`--resume todo` 那支被 `t.todo` 先滤掉了）：
+
+| tick | 谁记的 | 修之前 `--resume all` 会怎样 |
+|---|---|---|
+| `noop` | `zloop next`（cli.rs:761），人在自己会话里敲的 | 接进人的会话 |
+| `reflect` / `replan` | runner 自己插的那轮，`--resume None` 起的一次性会话 | 下一轮工作接到回看的上文里 |
+
+复现脚本和回归测试：
+
+```
+$ sh scripts/repro-a19-runner-resumes-a-humans-session.sh
+  第 1 轮：--resume []
+  第 2 轮：--resume []
+[OK] runner 没有 resume 人的会话：交互式命令留下的 session id 不再被当成上一轮的宿主会话
+```
+
+| 测试 | 盯住的是 | 撤掉修复之后 |
+|---|---|---|
+| `runner_test::a_humans_feedback_is_not_a_session_to_resume` | 人给 t1 留一句 `feedback` 后跑两轮（默认 `todo` 模式 + `--resume all` 各一遍）：argv 里不许出现人的 session id；同时 `--resume all` 下第 2 轮仍要接上 `sess-t1` | `runner 跑进了人的对话里（[]）：resume=HUMAN-9999` |
 
 ### 10.3 检查过、确认不是问题的
 
@@ -1508,5 +1539,8 @@ A/B 实测（假宿主每轮都 `zloop done t1 --outcome progress`，`max_progre
 > 还在跑的时候，只有「`edit` 改的正是当事的那条 todo」算数。**
 
 `noop_streak` 不在此列：它不是停机闸，A-16 之后 runner 也不读它。
-剩下没修的是 A-18（`compact` 抹掉花费）和 A-19（`pick_session` 认错会话），
-两条都在第 10 节，跟 streak 无关。
+
+A-19（`pick_session` 认错会话）跟 streak 无关，但归到同一句话下面：它串的不是停机判断，
+是「这一轮 `--resume` 谁」，判据换成同一个 `tick::is_writeback` 就修好了——
+**人写的 tick 不是宿主跑过的一轮**，三条 streak 和会话谱系都按这一句办。
+这一类剩下没修的只有 A-18（`compact` 抹掉花费），在第 10 节。
