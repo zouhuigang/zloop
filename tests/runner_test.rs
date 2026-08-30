@@ -385,10 +385,11 @@ echo '{"session_id":"a16","is_error":false,"result":"ok"}'"#,
     assert!(!j.iter().any(|e| e["event"] == "stop" && e["reason"] == "throttled"), "配额满不是终态，不该 stop：{j:?}");
 }
 
-/// `policy.intervals_min` 的**第二个读者**：`decide` 不给间隔时 runner 退回"最慢的那一档"。
+/// `policy.intervals_min` 的**第二个读者**：`decide` 不给间隔时 runner 退回阶梯的末档。
 ///
-/// `slowest_interval` 直接读 `intervals_min.last()`，绕过了 `tick::interval` 的出口封顶。
-/// 所以 `[1, 1, 4294967295]` 这种「只歪最慢那一档」的写法最阴：`zloop next --peek` 看到的
+/// 当年 `runner::slowest_interval` 直接读 `intervals_min.last()`，绕过了 `tick::interval` 的出口封顶
+/// （T34 之后这个读者没了，末档由 `tick::ladder_tail` 一处给出）。
+/// 所以 `[1, 1, 4294967295]` 这种「只歪末档」的写法最阴：`zloop next --peek` 看到的
 /// 间隔一切正常（第一档没歪），doctor 修之前也不吭声，只有 runner 走到"没给间隔"那一支时
 /// 才现形——`--fast` 下睡 4294967295 秒（136 年），正常模式下是 8171 年。
 /// 同一份数据的两个读者要过同一道闸。
@@ -438,6 +439,71 @@ fn a_huge_slowest_interval_cannot_make_the_runner_sleep_for_a_century() {
     let hours = (until - zloop::state::now()).num_hours();
     // 封顶后 `--fast` 下是 10080 秒（不到 3 小时）；撤掉封顶是 4294967295 秒 = 136 年
     assert!(hours < 24, "runner 醒过来的时间不该在一天以外（撤掉封顶：睡到 {until}）");
+}
+
+/// T34：`decide` 不给间隔时 runner 退回的那一档，取的是阶梯的**末档**，不是最大值。
+///
+/// 钉的是「阶梯的尽头只有一个答案」。`decide` 自己的退避序列走到末档就停在那儿
+/// （`tick::interval` 里的 `level.min(len - 1)`），runner 的 fallback 是这条序列耗尽之后的续写：
+/// `[3, 30, 10]` 下 `decide` 给的是 30 → 10 → 10，改成 `.max()` 就变成 30 → 10 → 10 → **30**，
+/// 间隔在耗尽的那一刻反弹回去，同一个字段的两个读者对尽头在哪给出两个答案。
+///
+/// 阶梯写反了是 policy 写错，由 `doctor` 的 `bad_policy` warn 说（T33）；runner 不替人纠正顺序。
+#[test]
+fn the_wait_fallback_is_the_ladders_last_rung_not_its_largest() {
+    let opts = zloop::runner::Options {
+        host: zloop::session::Host::Claude,
+        max_rounds: 1,
+        fast: true,
+        allow_all: false,
+        resume: zloop::runner::ResumeMode::Todo,
+        timeout_min: 30,
+        exit_on_wait: false, // 等人要退出的话下面全是 None，这条测试就成了空跑
+        max_budget_usd: None,
+        git_commit: false,
+        keep_awake: false,
+        no_replan: true,
+        auto_replan: false,
+        reflect_every: 0,
+    };
+    // 一条卡在人手里的 todo + `noops` 次 noop：走 user_gate 那一支的退避序列
+    let gated = |ladder: Vec<u32>, noops: usize| {
+        let mut st = common::fresh(&["[P0] a"]);
+        st.policy.intervals_min = ladder;
+        st.todos[0].blocked_by = vec![zloop::todo::USER.into()];
+        for _ in 0..noops {
+            common::tick_at(&mut st, "noop", None, None);
+        }
+        st
+    };
+    let sleeps = |st: &state::State| {
+        let d = zloop::tick::decide(st, common::now_utc());
+        assert_eq!((d.should_run, d.reason.as_str()), (false, "user_gate"), "fixture 防空跑：该走等人那一支");
+        zloop::runner::wait_plan(st, &d, &opts).expect("等人不是终态，runner 该睡下去").0
+    };
+
+    // fixture 防空跑：第 4 次（noops == max_noop_streak）才是 fallback 那一支
+    let exhausted = gated(vec![3, 30, 10], 3);
+    assert_eq!(exhausted.policy.max_noop_streak, 3, "前提：默认攒够 3 次 noop 才耗尽");
+    assert!(
+        zloop::tick::decide(&exhausted, common::now_utc()).interval_min.is_none(),
+        "前提：耗尽之后 decide 不再给间隔，睡多久才轮到 runner 自己定"
+    );
+
+    let ladder = |noops| sleeps(&gated(vec![3, 30, 10], noops));
+    assert_eq!(
+        (ladder(0), ladder(1), ladder(2), ladder(3)),
+        (30, 10, 10, 10),
+        "非单调阶梯：耗尽之后接着末档 10，不该反弹回最大值 30"
+    );
+
+    // 阶梯正常（递增）时末档就是最大值，两种取法本来就一样——改的是名字和写歪时的行为
+    assert_eq!(sleeps(&gated(vec![3, 10, 30], 3)), 30);
+    // 空阶梯退回 `tick::interval` 那个写死的 3（`doctor` 的空清单 warn 说的就是这个数）；
+    // 旧的 `slowest_interval` 在这里自带第二套默认值 30
+    assert_eq!(sleeps(&gated(vec![], 3)), 3);
+    // 末档写歪照样过 `clamp_interval`（T32：绕过封顶的那个第二读者已经没了）
+    assert_eq!(sleeps(&gated(vec![1, 1, u32::MAX], 3)), zloop::tick::INTERVAL_MIN_MAX);
 }
 
 /// A-17 回归：人在另一个终端敲一句 `zloop feedback`，不能让一轮**失败**的宿主

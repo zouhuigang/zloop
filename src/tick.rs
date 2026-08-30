@@ -391,12 +391,36 @@ pub fn clamp_interval(m: u32) -> u32 {
     m.clamp(1, INTERVAL_MIN_MAX)
 }
 
-fn interval(state: &State, level: usize) -> u32 {
+/// 退避阶梯上的第 `level` 档；越界就**停在末档**，阶梯只会走到头，不会绕回去。
+pub fn interval(state: &State, level: usize) -> u32 {
     let iv = &state.policy.intervals_min;
     if iv.is_empty() {
         return 3;
     }
     clamp_interval(iv[level.min(iv.len() - 1)])
+}
+
+/// 阶梯走到头的那一档：`decide` 不给间隔时（等人 / 被限流 / 被 host 限流），runner 睡的就是它。
+///
+/// **名字里没有「最慢」是故意的（T34）**：取的是**末档**，不是最大值。`intervals_min = [3, 30, 10]`
+/// 的末档是 10，而最大值是 30——函数以前叫 `runner::slowest_interval`，名字和文档都写「最慢的一档」，
+/// 阶梯非单调时那句话是假的。两条修法里选了「照末档、把名字改对」：
+///
+/// - 取 `max()` 会让间隔在阶梯耗尽的那一刻**反弹回去**。`decide` 自己的退避序列走到末档就停
+///   （`interval(state, 1 + noops)` 里的 `level.min(len - 1)`），这里是那条序列耗尽之后的续写：
+///   `[3, 30, 10]` 下 `decide` 给的是 30 → 10 → 10，取 max 就变成 30 → 10 → 10 → **30**，
+///   同一个字段的两个读者对「阶梯的尽头在哪」给出两个答案。
+/// - 阶梯往回走是 policy 写错，由 `doctor` 的 `bad_policy` warn 说出来（T33），不该由 runner
+///   悄悄替人把顺序纠正过来——`[3, 30, 10]` 也可能是存心的：先狠退一次，之后稳定在 10 分钟轮询。
+/// - 而且失败的方向是良性的：拿到末档 10 只是比「最大值」多看几眼，不是睡死（睡死那一头由
+///   `clamp_interval` 挡着），也不是忙等（下限 1 挡着）。
+///
+/// 走 `interval` 而不是自己读一遍 `policy.intervals_min`：这个字段以前有**两个读者**，
+/// runner 那个读者绕过了 `clamp_interval`（`[3, 4294967295]` → 8171 年的 sleep，T32），
+/// 还自带第二套空清单默认值（30，而 `interval` 是 3——`doctor` 的空清单 warn 写的也是 3）。
+/// 现在只剩一个读者，闸和默认值都不可能再各写一套。
+pub fn ladder_tail(state: &State) -> u32 {
+    interval(state, usize::MAX)
 }
 
 // --- the decision ---------------------------------------------------------

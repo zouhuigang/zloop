@@ -323,7 +323,7 @@ pub struct RunArgs {
     /// Kill the host after this many minutes per round (seconds with --fast)
     #[arg(long = "timeout-min", default_value_t = 30)]
     pub timeout_min: u32,
-    /// Exit when waiting on a human instead of polling at the slowest interval
+    /// Exit when waiting on a human instead of polling at the backoff ladder's last rung
     #[arg(long = "exit-on-wait")]
     pub exit_on_wait: bool,
     /// Per-round spend cap passed to `claude -p --max-budget-usd`

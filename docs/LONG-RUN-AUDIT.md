@@ -32,7 +32,7 @@
 按对长程任务的威胁排序：
 
 1. **#1 宿主超时**：`run --timeout-min <N>`（默认 30；`--fast` 时按秒）；超时 → kill、记 `fail`（note 含 timed out）、journal end 标 `timed_out=true`。
-2. **#2 等人不退出**：runner 在 `user_gate` / `blocked` 下按最大间隔（`intervals_min` 末项，默认 30 min）持续轮询；`--exit-on-wait` 恢复旧行为。终态（done / paused / fail_streak / progress_streak）才退出。
+2. **#2 等人不退出**：runner 在 `user_gate` / `blocked` 下按退避阶梯的**末档**（`intervals_min` 末项，默认 30 min；`tick::ladder_tail`）持续轮询；`--exit-on-wait` 恢复旧行为。终态（done / paused / fail_streak / progress_streak）才退出。
 3. **#3 配额默认**：`max_runs` 默认 480；`0` = 不限。
 4. **#4 会话谱系**：同一 todo 续接上次会话，换 todo 新会话；`--resume-all` 保留"一直续接"。
 5. **#5 progress_streak**：policy 新增 `max_progress_streak`（默认 8），`decide` 新增停机原因 `progress_streak`。
@@ -52,7 +52,7 @@
 | #3 配额默认 | `max_runs` 默认 480；`0` 关闭窗口刹车 | `tick_test::max_runs_zero_disables_the_window_brake` |
 | #4 会话谱系 | `--resume todo\|all\|none`（默认 todo）：`pick_session` 按 (host, todo) 取最近**写回**会话（`tick::is_writeback`，A-19 之后；人敲 `feedback`/`edit`/`next` 留下的 session 不算数）；换 todo 开新会话 | `sessions_follow_todo_lineage_by_default`（三种模式的 argv 断言）、`a_humans_feedback_is_not_a_session_to_resume` |
 | #5 progress_streak | policy `max_progress_streak`（默认 8，0 关闭）；`decide` 对候选 todo 的连续 progress 计数，达阈值 → `stopped (progress_streak)`；换 todo 或 done/fail/block 打断 | `tick_test::progress_streak_on_one_todo_stops_the_loop` |
-| #6 限流识别 | `is_error`/非零退出 且文本含 `rate limit / 429 / overloaded / capacity / quota / too many requests / usage limit` → 不记 tick、journal `end.rate_limited=true` + `sleep reason=host_rate_limited`、睡最慢间隔后重试；该轮不计入 `--max-rounds` | `rate_limit_is_not_a_failure_and_is_retried` |
+| #6 限流识别 | `is_error`/非零退出 且文本含 `rate limit / 429 / overloaded / capacity / quota / too many requests / usage limit` → 不记 tick、journal `end.rate_limited=true` + `sleep reason=host_rate_limited`、睡阶梯末档（`tick::ladder_tail`）后重试；该轮不计入 `--max-rounds` | `rate_limit_is_not_a_failure_and_is_retried` |
 | #10 归档 | `init --force` 先把旧 `state.json` 移到 `.zloop/archive/<created_at>-<goal.id>.json`（同名加序号），日志目录不动 | `cli_test::init_force_archives_the_previous_goal` |
 | #11 stale 标注 | policy `stale_after_min`（默认 120，0 关闭）；phase 对超龄 `in_progress` 追加 `⚠ stale (>120m, …)` | `cli_test::stale_in_progress_is_flagged` |
 | #13 单轮预算 | `run --max-budget-usd <x>` 透传 `claude -p --max-budget-usd`（Codex 无对应参数） | `max_budget_flag_is_passed_to_claude` |

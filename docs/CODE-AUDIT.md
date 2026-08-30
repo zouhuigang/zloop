@@ -432,8 +432,8 @@ $ zloop context | grep -c '粘进来的一条'
 
 ### A-5（高）`--exit-on-wait` 在「等人」时从不生效——它只在一种 runner 自己走不到的状态下才管用 — 已修
 
-`RunArgs` 说得很清楚：`Exit when waiting on a human instead of polling at the slowest interval`。
-实测反过来。
+`RunArgs` 说得很清楚：`Exit when waiting on a human instead of polling at the backoff ladder's last rung`
+（当时写的是 `… at the slowest interval`，T34 把"最慢"改成了"末档"，承诺没变）。实测反过来。
 
 ```
 $ zloop init "exit-on-wait probe"; zloop plan --add "[P0] needs a human"
@@ -498,7 +498,7 @@ $ tail -1 /…/.tmpqSYkIf/.zloop/runner/journal.jsonl
 let human = d.reason == "user_gate" || d.reason == "blocked";
 if human {
     if opts.exit_on_wait { return None; }              // ← 标志说了算
-    let m = d.interval_min.unwrap_or_else(|| slowest_interval(state));
+    let m = d.interval_min.unwrap_or_else(|| tick::ladder_tail(state));
     return Some((m, format!("{} (polling until a human unblocks)", d.reason)));
 }
 d.interval_min.map(|m| (m, d.reason.clone()))
@@ -1437,7 +1437,7 @@ A-5 收尾时留了个问号：`max_noop_streak` 在 runner 路径上是不是�
 ```rust
 if d.reason == "throttled" {
     // 等的是时间，不是人，所以 `--exit-on-wait` 不管这一支。
-    let m = d.interval_min.unwrap_or_else(|| slowest_interval(state));
+    let m = d.interval_min.unwrap_or_else(|| tick::ladder_tail(state));
     return Some((m, format!("{} (sleeping until the quota window frees)", d.reason)));
 }
 ```

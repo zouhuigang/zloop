@@ -1771,7 +1771,7 @@ macOS 上 runner 活着期间会**顶住合盖休眠**（`caffeinate` + 有 sudo
 | `--timeout-min <N>` | `30` | 单轮超过这么久就杀掉宿主，记一笔 `fail` |
 | `--resume todo\|all\|none` | `todo` | 会话复用：同一条 todo 才 resume / 一直 resume / 每轮全新 |
 | `--max-budget-usd <金额>` | — | 传给 `claude -p --max-budget-usd`，每轮的花费上限 |
-| `--exit-on-wait` | 关 | 等人时直接退出，而不是按最慢间隔慢速轮询 |
+| `--exit-on-wait` | 关 | 等人时直接退出，而不是按退避阶梯的末档慢速轮询 |
 | `--git-commit` | 关 | 每个写回过的轮次之后自动 `git commit`；只装**这个 runner 起跑之后**变化的文件（排除 `.zloop/`），起跑时就脏着的在制品留着不动，拆不开的会打印出来 |
 | `--allow-all` | 关 | 绕过宿主的权限询问（`--dangerously-skip-permissions` / `danger-full-access`） |
 | `--fast` | 关 | 把"分钟"当"秒"，只用来演示和测试 |
@@ -1780,7 +1780,9 @@ macOS 上 runner 活着期间会**顶住合盖休眠**（`caffeinate` + 有 sudo
 | `--auto-replan` | 关 | 让重估那一轮**真的改计划**。护栏在代码里强制；自主改满 3 次、或连着两次把清单改长，就停机等人（`stop reason=replan_diverged`） |
 | `--no-keep-awake` | 关 | 不碰睡眠设置 |
 
-**它自己会处理的事**：宿主返回限流（429 / rate limit / overloaded）→ 不记失败，睡 30 分钟再试；宿主卡住 → 到 `--timeout-min` 杀掉并记 `fail`；等人 → 默认按最慢间隔慢速轮询而不是退出；被 `kill -9` → 下次启动时 journal 里记一笔 `restart`。
+**它自己会处理的事**：宿主返回限流（429 / rate limit / overloaded）→ 不记失败，睡 `intervals_min` 的**末档**（默认 30 分钟）再试；宿主卡住 → 到 `--timeout-min` 杀掉并记 `fail`；等人 → 默认按同一个末档慢速轮询而不是退出；被 `kill -9` → 下次启动时 journal 里记一笔 `restart`。
+
+> 「末档」是**最后一档**，不是最大的一档：退避阶梯走到头就停在那儿，`[3, 30, 10]` 的末档是 10。阶梯本该越走越慢，写成往回走的 `doctor` 会报 `bad_policy`（警告级）——runner 照写下来的顺序睡，不替人把顺序纠正过来。
 
 #### 环境接入
 

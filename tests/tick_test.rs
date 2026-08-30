@@ -512,17 +512,18 @@ fn an_out_of_range_interval_cannot_put_the_loop_to_sleep_forever() {
         st.policy.intervals_min = vec![bad];
         assert_eq!(tick::hold_decision(&st).interval_min, Some(want), "held_by_other：intervals_min=[{bad}]");
 
-        // 5. runner 在 `decide` 不给间隔时退回"最慢的那一档"，那是这个字段的第二个读者，
-        //    绕过了 `interval()`。它换算成秒去 sleep，不封顶就是 8171 年。
-        let secs = zloop::tick::clamp_interval(bad) as u64 * 60;
+        // 5. runner 在 `decide` 不给间隔时退回阶梯的末档（`tick::ladder_tail`）。这一档以前是
+        //    这个字段的第二个读者、绕过了 `interval()`（T32）；T34 之后它就是 `interval()` 本身。
+        //    它换算成秒去 sleep，不封顶就是 8171 年。
+        let secs = zloop::tick::ladder_tail(&st) as u64 * 60;
         assert!(secs <= cap as u64 * 60, "睡的秒数也得跟着封住：{secs}");
     }
 
-    // 只歪最慢那一档：`decide` 给的 3 是对的，睡死藏在退避阶梯的末尾
+    // 只歪末档：`decide` 给的 3 是对的，睡死藏在退避阶梯的末尾
     let mut st = fresh(&["[P0] a"]);
     st.policy.intervals_min = vec![3, 10, u32::MAX];
     assert_eq!(tick::decide(&st, now).interval_min, Some(3), "第一档没歪，不该被动");
-    assert_eq!(zloop::tick::clamp_interval(*st.policy.intervals_min.last().unwrap()), cap);
+    assert_eq!(zloop::tick::ladder_tail(&st), cap, "睡死藏在末档，末档也得过闸");
 
     // 显示层是第二道：`human_minutes` 收的是同一个数，回绕会把面板变成假的
     assert_ne!(zloop::phase::human_minutes(u32::MAX), "约 0 天", "回绕后 8171 年印成 0 天");

@@ -4,8 +4,8 @@
 //! executes with a timeout, checks that the host wrote back, and sleeps.
 //! Long-run rules (see docs/LONG-RUN-AUDIT.md):
 //!   * a hung host is killed after `timeout_min` and recorded as `fail`;
-//!   * waiting on a human (user_gate / blocked) polls at the slowest interval
-//!     forever instead of exiting — nothing is spent while polling;
+//!   * waiting on a human (user_gate / blocked) polls at the backoff ladder's last
+//!     rung (`tick::ladder_tail`) forever instead of exiting — nothing is spent while polling;
 //!   * host rate limits are not failures: sleep and retry, no tick recorded;
 //!   * sessions are resumed per todo (new todo → fresh session) unless `--resume all`.
 
@@ -882,16 +882,6 @@ fn journal_sleep(root: &Path, units: u32, fast: bool, reason: &str) -> Result<()
     )
 }
 
-/// 最慢的那一档，用在 `decide` 没给间隔的两处（等人 / 被限流）。
-///
-/// 走 `clamp_interval` 而不是直接读 `last()`：这是 `policy.intervals_min` 的**第二个读者**，
-/// 绕过了 `tick::interval` 的封顶。`intervals_min = [3, 4294967295]` 时 `decide` 给的间隔
-/// 是正常的 3，而这里给出 4294967295 分钟 → `secs()` 换算成 8171 年的 sleep，
-/// 同一份数据的两个读者要过同一道闸。
-fn slowest_interval(state: &State) -> u32 {
-    tick::clamp_interval(state.policy.intervals_min.last().copied().unwrap_or(30))
-}
-
 /// Decide how long to sleep for a non-running decision, or `None` to stop the runner.
 ///
 /// `--exit-on-wait` 在 `interval_min` **之前**判：「等人要不要退出」是标志说了算，不是
@@ -921,12 +911,12 @@ pub fn wait_plan(state: &State, d: &tick::Decision, opts: &Options) -> Option<(u
         }
         // 等人时的说法只有一种：不管 `decide` 给的是哪一档间隔（还是压根没给），
         // runner 在做的都是同一件事——替人守着这条 todo，等人回来解开。
-        let m = d.interval_min.unwrap_or_else(|| slowest_interval(state));
+        let m = d.interval_min.unwrap_or_else(|| tick::ladder_tail(state));
         return Some((m, format!("{} (polling until a human unblocks)", d.reason)));
     }
     if d.reason == "throttled" {
         // 等的是时间，不是人，所以 `--exit-on-wait` 不管这一支。
-        let m = d.interval_min.unwrap_or_else(|| slowest_interval(state));
+        let m = d.interval_min.unwrap_or_else(|| tick::ladder_tail(state));
         return Some((m, format!("{} (sleeping until the quota window frees)", d.reason)));
     }
     d.interval_min.map(|m| (m, d.reason.clone()))
@@ -1237,7 +1227,7 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
         }
         if rate_limited {
             let st = state::load(&path)?;
-            let m = slowest_interval(&st);
+            let m = tick::ladder_tail(&st);
             println!(
                 "runner: round {round_no} host rate-limited · not counted · sleeping {} {} · {}",
                 m,

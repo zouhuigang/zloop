@@ -623,10 +623,11 @@ fn a_backwards_backoff_ladder_is_reported() {
     let d = tick::decide(&st, common::now_utc());
     assert_eq!((d.should_run, d.interval_min), (true, Some(30)), "ready 拿的是第一档");
 
-    // 第三处：runner 在 `decide` 不给间隔时退回"最慢的那一档"，实现是 `.last()`——
-    // 阶梯往回走时它拿到的是**最快**的那一档（3），和字段名的意思正好相反。
-    assert_eq!(st.policy.intervals_min.last().copied(), Some(3));
-    assert_eq!(st.policy.intervals_min.iter().copied().max(), Some(30), ".last() 不是最大值");
+    // 第三处：退避耗尽之后 runner 睡的那一档（`tick::ladder_tail`）——阶梯走到头就是**末档**，
+    // 写反时那是**最快**的一档（3），不是最大的 30。这是 T34 定死的口径：runner 照末档睡，
+    // 不替人把顺序纠正过来，所以「写反了要付什么代价」只能由下面这条 warn 说出来。
+    assert_eq!(zloop::tick::ladder_tail(&st), 3, "末档就是 3");
+    assert_eq!(st.policy.intervals_min.iter().copied().max(), Some(30), "末档不是最大值");
 
     // --- doctor 得说这一句（撤掉 check_policy 里那一段，下面全红）---
     let tmp = tempfile::tempdir().unwrap();
