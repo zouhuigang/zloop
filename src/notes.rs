@@ -72,9 +72,31 @@ fn split_stamp(line: &str) -> (Option<String>, String) {
 }
 
 /// 读整份 NOTES：认小标题分两层；没有小标题的老文件全算经验。
+/// 读整份 NOTES，**区分"没有"和"读不出来"**。
+///
+/// - 文件不存在 → `Ok(空)`，这是合法状态（还没记过任何东西）；
+/// - 文件在但读不出来（非 UTF-8、权限、IO 错）→ `Err`。
+///
+/// 为什么要分开：读失败降级成 `Default::default()` 只在**纯读**路径上安全。一旦后面接了
+/// 读-改-写（`add_rule` 就是），那次降级会被写回磁盘，把攒下的全部约定和经验**永久删掉**，
+/// 而且一声不吭——实测往 NOTES.md 末尾加两个非 UTF-8 字节再 `remember --rule`，
+/// 旧的 1 条约定 + 1 条经验当场消失，命令还 exit 0 打印"约定 +1（共 1 条）"。
+pub fn try_read(root: &Path) -> Result<Notes> {
+    let p = path(root);
+    match fs::read_to_string(&p) {
+        Ok(raw) => Ok(parse(&raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Notes::default()),
+        Err(e) => Err(anyhow::anyhow!(
+            "{} 读不出来（{e}）。先把它修好或挪走，别让下一次写入把它盖掉",
+            p.display()
+        )),
+    }
+}
+
+/// 宽容版：只给**纯读**路径用（交接包注入、计数、材料包）。读不出来就当空的——
+/// 这些地方崩掉的代价大于少显示几条。**任何后面接着写的地方都要用 [`try_read`]**。
 pub fn read(root: &Path) -> Notes {
-    let Ok(raw) = fs::read_to_string(path(root)) else { return Notes::default() };
-    parse(&raw)
+    try_read(root).unwrap_or_default()
 }
 
 /// 解析两层格式。`## 约定` / `## 经验` 认前缀，所以标题后面写什么都行。
@@ -184,7 +206,8 @@ pub fn add_rule(root: &Path, text: &str) -> Result<(PathBuf, bool)> {
     let one_line = text.trim().replace('\n', " ");
     // 读-改-写必须整个在锁里：只锁写的那一半等于没锁（实测 20 个并发 `--rule` 只落 12 条）
     crate::state::locked(&lock_target(root), crate::state::LOCK_WAIT, || {
-        let mut n = read(root);
+        // 读-改-写：读不出来就**整个放弃**，不能拿一份空的去覆盖人家的东西
+        let mut n = try_read(root)?;
         if n.rules.iter().any(|r| r == &one_line) {
             return Ok((path(root), true));
         }

@@ -1967,6 +1967,36 @@ fn replan_apply_never_deletes_a_question_that_is_waiting_on_you() {
 }
 
 #[test]
+fn an_unreadable_notes_file_is_never_silently_overwritten() {
+    // 读文件失败降级成 Default::default() 只有在**纯读**路径上才安全。`add_rule` 是读-改-写：
+    // 那次降级会被写回磁盘，把用户攒下的全部约定和经验**永久删掉**，而且一声不吭。
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "别弄丢我的经验"], None, &[]);
+    zloop(d, &["remember", "--rule", "done 之前先跑测试"], None, &[]);
+    zloop(d, &["remember", "bench.sh 要在 release 下跑"], None, &[]);
+    let before = fs::read(d.join(".zloop/NOTES.md")).unwrap();
+    assert!(zloop(d, &["context"], None, &[]).out.contains("done 之前先跑测试"));
+
+    // 塞一个非 UTF-8 字节（磁盘坏块、别的工具用了 GBK、传输截断都会造成）
+    let mut broken = before.clone();
+    broken.extend_from_slice(&[0xff, 0xfe]);
+    fs::write(d.join(".zloop/NOTES.md"), &broken).unwrap();
+
+    let o = zloop(d, &["remember", "--rule", "又一条约定"], None, &[]);
+    assert_ne!(o.code, 0, "读不出来就不该假装读到了空的: {}{}", o.out, o.err);
+    assert!(o.err.contains("NOTES.md") && o.err.contains("读不"), "要说清是哪个文件读不了: {}", o.err);
+
+    let after = fs::read(d.join(".zloop/NOTES.md")).unwrap();
+    assert_eq!(after, broken, "拒绝之后一个字节都不能动——原件还得留着让人抢救");
+    // 把坏字节去掉，老内容必须还在
+    fs::write(d.join(".zloop/NOTES.md"), &before).unwrap();
+    let n = zloop::notes::read(d);
+    assert_eq!(n.rules.len(), 1, "约定还在: {:?}", n.rules);
+    assert_eq!(n.lessons.len(), 1, "经验还在: {:?}", n.lessons);
+}
+
+#[test]
 fn a_successful_round_can_still_say_the_rest_of_the_plan_is_dead() {
     // 最该重规划的那种场景**不偏离**：那一轮顺利完成，可它的结论把剩下几条的前提推翻了。
     // 五个偏离信号（feedback/stalled/fail_streak/rework/blocked）一个都不会响。
