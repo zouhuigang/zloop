@@ -502,6 +502,56 @@ fn plan_from_loopx_state_file() {
     assert_eq!(o.out.trim(), "t1 [P0] open one");
 }
 
+/// A-11 端到端：机器时钟跳到未来一次，就足以让 runner 睡到下个世纪，而面板上一切正常。
+///
+/// 三处一起钉住（少任何一处，这一夜就是白跑的）：
+/// 1. `next` 算出的等待封顶在配额窗口，不再是 38048610 分钟（72 年）；
+/// 2. `status` 的「睡到 …」跨天带日期——只印 `00:00` 时它和正常的轮次间隔一模一样；
+/// 3. `doctor` 直接说出"账本里有未来时间戳"，因为封顶只是不让它睡死，配额位还占着。
+#[test]
+fn a_clock_jump_into_the_future_is_capped_and_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "clock"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a", "--add", "[P1] b"], None, &[]);
+    let o = zloop(d, &["done", "t1", "--note", "half", "--outcome", "progress", "--no-doc"], None, &[]);
+    assert_eq!(o.code, 0, "{}", o.err);
+
+    // 真实世界的造法：先正常写下一轮，然后机器的钟跳了（NTP / 时区 / 挂起恢复）。
+    // 配额设成 1，这条 tick 就把窗口占满了——而它在未来，窗口永远滑不过它。
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.policy.max_runs = 1;
+    st.ticks.last_mut().unwrap().at = "2099-01-01T00:00:00+08:00".into();
+    state::save(&p, &mut st).unwrap();
+
+    let o = zloop(d, &["next", "--peek", "--json"], None, &[]);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap_or_else(|e| panic!("{e}: {}{}", o.out, o.err));
+    assert_eq!(v["reason"], "throttled", "{}", o.out);
+    let minutes = v["interval_min"].as_u64().unwrap_or_else(|| panic!("{}", o.out));
+    assert!(minutes <= 24 * 60, "等待要封顶在配额窗口内，撤掉封顶这里是 38048610 分钟（72 年）：{minutes}");
+
+    // runner 会照这个间隔写下 sleep；status 读的就是这一条
+    let j = d.join(".zloop").join("runner");
+    fs::create_dir_all(&j).unwrap();
+    let wake = chrono::Local::now() + chrono::Duration::minutes(minutes as i64);
+    let until = wake.to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    fs::write(j.join("journal.jsonl"), format!("{{\"event\":\"sleep\",\"until\":\"{until}\",\"reason\":\"throttled\",\"at\":\"x\"}}\n"))
+        .unwrap();
+    let o = zloop(d, &["status"], None, &[]);
+    let day = wake.format("%m-%d").to_string();
+    assert!(o.out.contains("睡到"), "{}", o.out);
+    assert!(o.out.contains(&day), "跨天的「睡到」必须带上日期，否则和正常的轮次间隔长得一模一样：{}", o.out);
+    assert!(zloop(d, &["context"], None, &[]).out.contains(&day), "机器读的那句同样要带日期");
+
+    // 封顶只是不让它睡死：那条 tick 还占着配额位，得有人来看一眼
+    let o = zloop(d, &["doctor", "--json"], None, &[]);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    let kinds: Vec<&str> = v["findings"].as_array().unwrap().iter().filter_map(|f| f["kind"].as_str()).collect();
+    assert!(kinds.contains(&"future_timestamp"), "doctor 要报出未来时间戳：{}", o.out);
+    assert_eq!((v["errors"].as_u64(), o.code), (Some(1), 1), "光这条 tick 就占满了配额，循环已经限流住了：{}", o.out);
+}
+
 #[test]
 fn phase_tracks_the_round() {
     let dir = tempfile::tempdir().unwrap();

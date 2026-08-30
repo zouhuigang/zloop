@@ -565,11 +565,11 @@ $ zloop doctor
 | tick 时间戳在 2099 | `ready`（不撞配额时无影响） | ✅ |
 | tick 时间戳在 1970 | `ready` | ✅ |
 | tick 时间戳是乱码 | `ready`，不崩 | ✅ |
-| **tick 在未来 + 撞配额** | `throttled`，`interval_min=38048610`（72 年） | ❌ **A-11** |
+| **tick 在未来 + 撞配额** | `throttled`，`interval_min=38048610`（72 年） | ❌ **A-11**（已修） |
 | `max_runs = -5` | 反序列化就拒绝："expected usize"，exit 1 | ✅ |
 | 五个阈值分别设 0 | 三个当"关闭"，两个当"永远触发" | ❌ A-10 |
 
-### A-11（高）时钟跳到未来 + 撞配额 = runner 睡 72 年，而 status 看着一切正常
+### A-11（高）时钟跳到未来 + 撞配额 = runner 睡 72 年，而 status 看着一切正常 — 已修
 
 `tick.rs` 的 throttle 分支拿"窗口内最老那条 tick"算还要等多久：
 
@@ -599,8 +599,35 @@ $ zloop status
 触发条件不需要有人手改文件：NTP 校时、改时区、虚拟机挂起恢复、笔记本电池耗尽后时钟重置，
 都会让已有的 tick 落在"未来"。**这正是"跑了一夜回来发现没进展"的一种，而且状态面板还告诉你一切正常。**
 
-修法：(a) 等待时间封顶（比如不超过 `window_hours`，本来就没有等更久的道理）；
-(b) `status` 的"睡到"跨天就带上日期；(c) 顺手在 `doctor` 里报一句"账本里有未来时间戳"。
+**修法**：三处一起，缺任何一处这一夜还是白跑的。
+
+(a) **等待封顶在配额窗口本身**（`tick.rs` 的 throttle 分支）——一条 tick 最多在窗口里
+待 `window_hours`，等得比这更久没有任何道理：
+
+```rust
+let cap = policy.window_hours.clamp(1, 24 * 365) * 60;
+let minutes = (frees_in.num_seconds().div_euclid(60) + 1).clamp(1, cap) as u32;
+```
+
+`window_hours` 先 `clamp` 再乘，是因为它来自手写得了的 `state.json`：不夹住的话
+`window_hours * 60` 自己会溢出，封顶反而成了新的越界口子。正常（过去的）窗口不受影响，
+照旧精确算到分钟——回归测试里把 `22*60+1` 那条一起钉住了。
+
+(b) **`status` / `context` 的"睡到"跨天带日期**（`phase.rs` 的 `hhmm` → `when(ts, now)`）：
+同一天只印 `HH:MM`，跨天印 `%m-%d %H:%M`，跨年印 `%Y-%m-%d %H:%M`。比日期前先把两边
+统一到看的人所在的时区（偏移不同的话同一瞬间会落在不同的"今天"）。
+同一个函数也用在"第几轮开始于"和"在飞的活领于"两处——同一类信息，同一个口径。
+
+(c) **`doctor` 报 `future_timestamp`**：封顶只是不让它睡死，那条 tick 还占着配额位——
+`window_ticks` 收的是「时间戳 ≥ now − window_hours」，未来的 tick **永远**满足，
+`max_runs` 一满窗口就再也滑不开。所以还得有人来看一眼。光这几条未来 tick 就把
+`max_runs` 占满时报 Error（循环已经限流住了），否则报 Warn；5 分钟以内的偏差算正常的
+机器间时钟漂移，不报。
+
+回归测试两条：`a_future_tick_cannot_stretch_the_throttle_wait_past_the_window`（单元，
+撤掉封顶 → `Some(38054161)` vs `Some(1440)`）和 `a_clock_jump_into_the_future_is_capped_and_visible`
+（端到端，真命令走 `done` → 改钟 → `next --peek --json` → `status` → `doctor --json`，
+三处分别撤掉都能变红）。
 
 ### A-9（中高）依赖成环没人拦，永久卡死且无诊断
 

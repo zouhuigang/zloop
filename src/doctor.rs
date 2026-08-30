@@ -12,7 +12,8 @@
 //! （它会顺手删掉过期的 pid 文件）。体检和治疗分开，人才敢在任何时候、任何状态下跑它。
 
 use crate::goals;
-use crate::state::{self, State, STATE_DIR};
+use crate::state::{self, parse_iso, State, STATE_DIR};
+use chrono::{DateTime, FixedOffset};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -123,9 +124,12 @@ pub fn check(root: &Path) -> Report {
     check_goal_files(root, &files, &mut f);
     check_duplicate_ids(root, &files, &mut f);
     let archived = check_archive(root, &mut f);
+    // 一次读钟，所有目标共用：同一份报告里两个目标按不同的"现在"体检会自相矛盾。
+    let now = state::now();
     for gf in &files {
         if let Some(st) = &gf.state {
             check_ledger(root, gf, st, &mut f);
+            check_future_timestamps(gf, st, now, &mut f);
         }
     }
     check_pid(root, &mut f);
@@ -324,6 +328,51 @@ fn check_ledger(root: &Path, gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
             ));
         }
     }
+}
+
+/// 账本里有落在**未来**的时间戳。
+///
+/// 造出它不需要有人手改文件：NTP 校时、改时区、虚拟机挂起恢复、笔记本电池耗尽后时钟重置，
+/// 都会让已经写下的 tick 落在未来。后果不是报错，是**静悄悄地不干活**：
+/// `tick::window_ticks` 按「时间戳 ≥ now − window_hours」收配额窗口，未来的 tick 永远满足
+/// 这个条件，于是它**永远占着一个配额位**——`max_runs` 一满，窗口就再也滑不开。
+/// 等待时间本身已经封顶（A-11），所以最坏是每 `window_hours` 醒一次白跑一趟；
+/// 但配额不会自己恢复，得有人来看一眼。这条就是那个"来看一眼"的信号。
+fn check_future_timestamps(gf: &GoalFile, st: &State, now: DateTime<FixedOffset>, f: &mut Vec<Finding>) {
+    // 几分钟的偏差属于正常的机器间时钟漂移（tick 可能是另一台机器写的），不值得报。
+    let cutoff = now + chrono::Duration::minutes(5);
+    let future: Vec<&state::Tick> =
+        st.ticks.iter().filter(|t| parse_iso(&t.at).map(|ts| ts > cutoff).unwrap_or(false)).collect();
+    if future.is_empty() {
+        return;
+    }
+    let who = gf.label();
+    // 按解析出来的时刻取最远的一条，不按字符串比——两条 tick 的时区偏移可以不一样
+    let farthest = future
+        .iter()
+        .filter_map(|t| parse_iso(&t.at).ok().map(|ts| (ts, t.at.as_str())))
+        .max_by_key(|(ts, _)| *ts)
+        .map(|(_, s)| s)
+        .unwrap_or("");
+    let counted = future.iter().filter(|t| crate::tick::COUNTED.contains(&t.outcome.as_str())).count();
+    // 光这几条就把配额窗口填满了 = 循环已经永久限流，不是"迟早咬人"
+    let jammed = st.policy.max_runs > 0 && counted >= st.policy.max_runs;
+    let what = format!(
+        "[{who}] {} 条 tick 的时间戳在未来（最远 {farthest}）——机器时钟跳过一次就会这样",
+        future.len()
+    );
+    let fix = format!(
+        "先校准系统时钟；再把 {}/{} 里那几条 tick 的 at 改成真实时间（或删掉它们）。\
+         未来的 tick 永远落在配额窗口里、永远占着一个位子：{}",
+        STATE_DIR,
+        state::STATE_FILE,
+        if jammed {
+            format!("现在光它们就占满了 policy.max_runs（{}），循环已经限流住了", st.policy.max_runs)
+        } else {
+            format!("其中 {counted} 条计入配额（policy.max_runs = {}）", st.policy.max_runs)
+        }
+    );
+    f.push(if jammed { Finding::err("future_timestamp", what, fix) } else { Finding::warn("future_timestamp", what, fix) });
 }
 
 /// pid 文件指着一个已经不在的进程。`status` / `goal switch` 会顺手清掉它，

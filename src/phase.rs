@@ -10,7 +10,7 @@
 
 use crate::state::{self, parse_iso, State};
 use crate::tick;
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, Datelike, FixedOffset};
 use serde_json::Value;
 use std::path::Path;
 
@@ -27,8 +27,22 @@ pub struct Phase {
     pub detail: String,
 }
 
-fn hhmm(ts: &str) -> String {
-    parse_iso(ts).map(|dt| dt.format("%H:%M").to_string()).unwrap_or_else(|_| ts.to_string())
+/// 一个墙上时刻，写给正盯着面板的人看：今天之内只印 `HH:MM`，**跨天就必须带上日期**。
+///
+/// 光印 `HH:MM` 时，"睡到 00:00 醒"和正常的轮次间隔长得一模一样。A-11 实测过一个睡到
+/// 2099 年的 runner：面板上唯一的线索是那串 `38048608m55s`，而它长得像个 ID，没人会去
+/// 除以 525600。带上日期，"睡到 2099-01-02 00:00 醒"一眼就是不对劲。
+fn when(ts: &str, now: DateTime<FixedOffset>) -> String {
+    let Ok(dt) = parse_iso(ts) else { return ts.to_string() };
+    // 统一到看的人所在的时区再比日期：两边偏移不同的话，同一瞬间会落在不同的"今天"。
+    let dt = dt.with_timezone(now.offset());
+    if dt.date_naive() == now.date_naive() {
+        dt.format("%H:%M").to_string()
+    } else if dt.year() == now.year() {
+        dt.format("%m-%d %H:%M").to_string()
+    } else {
+        dt.format("%Y-%m-%d %H:%M").to_string()
+    }
 }
 
 fn elapsed(from: &str, now: DateTime<FixedOffset>) -> String {
@@ -95,7 +109,7 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
                 "executing {} · round {} · since {} ({} ago) · host {} · via {}{}",
                 ip.todo,
                 ip.round,
-                hhmm(&ip.started_at),
+                when(&ip.started_at, now),
                 elapsed(&ip.started_at, now),
                 host,
                 ip.via,
@@ -122,12 +136,17 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
                             kind: "sleeping",
                             summary: format!(
                                 "runner sleeping until {} ({}m{:02}s left) · reason {}",
-                                hhmm(until),
+                                when(until, now),
                                 left / 60,
                                 left % 60,
                                 ev.get("reason").and_then(Value::as_str).unwrap_or("ready")
                             ),
-                            detail: format!("两轮之间的休息 · 睡到 {} 醒，还有 {}m{:02}s", hhmm(until), left / 60, left % 60),
+                            detail: format!(
+                                "两轮之间的休息 · 睡到 {} 醒，还有 {}m{:02}s",
+                                when(until, now),
+                                left / 60,
+                                left % 60
+                            ),
                         };
                     }
                 }
@@ -143,7 +162,7 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
                     "runner round {} on {} since {} ({} ago) — no end recorded (process may have died)",
                     round,
                     todo,
-                    hhmm(at),
+                    when(at, now),
                     elapsed(at, now)
                 ),
                 detail: format!("第 {round} 轮做 {todo} · 已跑 {} · ⚠ 没有结束记录，进程可能死了", elapsed(at, now)),

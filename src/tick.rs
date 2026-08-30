@@ -348,7 +348,14 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
             .min()
             .unwrap_or(at);
         let frees_in = oldest + Duration::hours(policy.window_hours) - at;
-        let minutes = (frees_in.num_seconds().div_euclid(60) + 1).max(1) as u32;
+        // 等待有上限：一条 tick 最多在窗口里待 `window_hours`，等得比这更久没有任何道理。
+        // 少了这个封顶，一条**落在未来**的 tick 就能让 runner 睡到下个世纪：`oldest` 在未来
+        // 时 `frees_in` 是个天文数字，实测 `interval_min=38048610`（72 年，A-11）。造出未来
+        // 时间戳不需要有人手改文件——NTP 校时、改时区、虚拟机挂起恢复、笔记本电池耗尽后
+        // 时钟重置，都会让已有的 tick 落在"未来"。封顶之后最坏也只是每 `window_hours`
+        // 醒一次重新判断（未来时间戳本身由 doctor 的 `future_timestamp` 报出来）。
+        let cap = policy.window_hours.clamp(1, 24 * 365) * 60;
+        let minutes = (frees_in.num_seconds().div_euclid(60) + 1).clamp(1, cap) as u32;
         return Decision {
             should_run: false,
             reason: "throttled".into(),

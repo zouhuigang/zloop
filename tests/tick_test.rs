@@ -1,6 +1,6 @@
 mod common;
 
-use chrono::Duration;
+use chrono::{DateTime, Duration};
 use common::*;
 use zloop::tick;
 use zloop::todo;
@@ -187,6 +187,36 @@ fn throttled_by_rolling_window() {
     assert!(!d.should_run);
     assert_eq!(d.interval_min, Some(22 * 60 + 1));
     assert!(tick::decide(&st, now + Duration::hours(23)).should_run);
+}
+
+/// A-11：一条**落在未来**的 tick 撞上配额，会让 runner 睡到下个世纪。
+///
+/// throttle 分支拿"窗口里最老那条 tick"算还要等多久，`oldest` 在未来时那是个天文数字——
+/// 实测 `interval_min=38048610`（72 年），而 `zloop status` 上只印 `睡到 00:00`，和正常的
+/// 轮次间隔长得一模一样。造出这条 tick 不需要有人手改文件：NTP 校时、改时区、虚拟机挂起
+/// 恢复、笔记本电池耗尽后时钟重置，都会让已经写下的 tick 落在"未来"。
+///
+/// 封顶的依据：一条 tick 最多在窗口里待 `window_hours`，等得比这更久没有任何道理。
+#[test]
+fn a_future_tick_cannot_stretch_the_throttle_wait_past_the_window() {
+    let mut st = fresh(&["[P0] a"]);
+    st.policy.max_runs = 1;
+    let now = now_utc();
+    let clock_jumped = DateTime::parse_from_rfc3339("2099-01-01T00:00:00+00:00").unwrap();
+    tick_at(&mut st, "progress", Some("t1"), Some(clock_jumped));
+
+    let d = tick::decide(&st, now);
+    assert_eq!((d.should_run, d.reason.as_str()), (false, "throttled"));
+    let cap = st.policy.window_hours as u32 * 60;
+    assert_eq!(d.interval_min, Some(cap), "等得比配额窗口本身还久没有道理（撤掉封顶：38048610 分钟 ≈ 72 年）");
+    // runner 把它换算成秒（`secs(units, false) = units * 60`）：封顶后是一天，不封顶是 22 亿秒
+    assert!(d.interval_min.unwrap() as u64 * 60 <= 24 * 3600, "睡的秒数也得跟着封住");
+
+    // 正常的（过去的）配额窗口不受影响：还是精确算到分钟，不会被封顶抹平
+    let mut past = fresh(&["[P0] a"]);
+    past.policy.max_runs = 1;
+    tick_at(&mut past, "progress", Some("t1"), Some(now - Duration::hours(2)));
+    assert_eq!(tick::decide(&past, now).interval_min, Some(22 * 60 + 1));
 }
 
 #[test]
