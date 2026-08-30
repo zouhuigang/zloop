@@ -1928,6 +1928,10 @@ fn replan_apply_refuses_rather_than_half_changing_the_plan() {
     let d = dir.path();
     zloop(d, &["init", "g"], None, &[]);
     zloop(d, &["plan", "--add", "[P0] a :: 验a", "--add", "[P0] b :: 验b", "--add", "[P0] c :: 验c"], None, &[]);
+    // 跨过一秒再拒绝：`updated_at` 是秒精度，同一秒内多写一次时间戳不变，
+    // 「拒绝了却还是落了一次盘」这种 bug 会假绿溜过去（踩过——这条测试当年时红时绿，
+    // 红的那几次才是对的）。
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     let b = fs::read_to_string(state::state_path(d)).unwrap();
     // 快照当参数传，别让闭包捕获——`before` 后面会被 shadow，闭包捕获的还是定义时那个（踩过）
     let refused = |o: &Out, guard: &str, before: &str| {
@@ -1943,6 +1947,7 @@ fn replan_apply_refuses_rather_than_half_changing_the_plan() {
 
     // 有轮次在飞：那个 agent 手上拿的 todo 可能正要被换掉
     zloop(d, &["next", "--json"], None, &[("CLAUDE_CODE_SESSION_ID", "A")]);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     let b = fs::read_to_string(state::state_path(d)).unwrap();
     refused(&zloop(d, &["replan", "--apply", "--why", "抢改"], Some("[P0] x :: y\n"), &[]), "不动在飞的轮次", &b);
 }

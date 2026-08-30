@@ -1586,27 +1586,16 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     };
     rows.push(("阶段", style::truncate(&stage, val)));
     // 后台也常驻：不说"没在跑"，就分不清是没人跑还是你忘了看。
-    // 「合盖不休眠」讲的就是这个 runner 的运行时状态，正常时并进「后台」这一行，
-    // 别为一句不需要动作的话单占一行；只有它反常（要人处理）时才单列出来喊一声。
-    let awake = crate::awake::brief();
-    let awake_inline = awake.as_ref().filter(|(_, warn)| !warn).map(|(s, _)| s.clone());
     rows.push((
         "后台",
         match running {
-            Some(pid) => {
-                // 日志路径是能直接敲的东西，排在前面：窄屏时先被截掉的该是
-                // 「合盖不休眠」这种只是让人安心、不需要动作的话
-                let mut line = format!("runner 在跑（pid {pid}）· 日志 .zloop/runner/console.log");
-                if let Some(a) = &awake_inline {
-                    line.push_str(&format!(" · {}", a.split(" · ").next().unwrap_or(a)));
-                }
-                c.dim(&style::truncate(&line, val))
-            }
+            Some(pid) => c.dim(&style::truncate(&format!("runner 在跑（pid {pid}）· 日志 .zloop/runner/console.log"), val)),
             None => c.dim("没有 runner 在跑"),
         },
     ));
-    if let Some((s, true)) = awake.as_ref().map(|(s, w)| (s.clone(), *w)) {
-        rows.push(("睡眠", c.yellow(&format!("⚠ {}", style::truncate(&s, val.saturating_sub(2))))));
+    if let Some((s, warn)) = crate::awake::brief() {
+        let s = style::truncate(&s, val.saturating_sub(2));
+        rows.push(("睡眠", if warn { c.yellow(&format!("⚠ {s}")) } else { c.dim(&s) }));
     }
     // 人说过的话要在人自己的视图里也能看见，否则"我说了它没反应"无从判断
     let pending = crate::tick::pending_feedback(&st);
@@ -2098,8 +2087,13 @@ fn cmd_replan(root: &Path, path: &Path, apply: bool, why: Option<String>) -> Res
     std::io::stdin().read_to_string(&mut raw)?;
     let items = todo::parse_plan(&raw, todo::DEFAULT_PRIORITY);
     let why = why.unwrap_or_default();
-    let out = state::transaction(path, |st| {
-        Ok(match crate::replan::apply(st, path, &items, &why) {
+    // **不能用 `state::transaction`**：它是「锁 → 读 → 改 → **无条件 save**」，
+    // 拒绝的时候照样落一次盘。虽然只多写一个 `updated_at`，但那就违背了
+    // 「拒绝了一个字都不动」这条承诺——而且它只在跨秒时才被测出来，
+    // 同一秒内两次写的时间戳一样，测试会假绿（踩过）。
+    let out = state::locked(path, state::LOCK_WAIT, || {
+        let mut st = state::load(path)?;
+        match crate::replan::apply(&mut st, path, &items, &why) {
             Ok(a) => {
                 let note = format!(
                     "重排：换掉 {} 条、新排 {} 条、保留 {} 条 · {why}",
@@ -2108,11 +2102,13 @@ fn cmd_replan(root: &Path, path: &Path, apply: bool, why: Option<String>) -> Res
                     a.kept.len()
                 );
                 let who = session::detect();
-                let _ = tick::record(st, tick::REPLAN, None, &style::truncate(&note, 300), &who);
-                Ok(a)
+                let _ = tick::record(&mut st, tick::REPLAN, None, &style::truncate(&note, 300), &who);
+                state::save(path, &mut st)?;
+                Ok(Ok(a))
             }
-            Err(e) => Err(e),
-        })
+            // 一个字都不写：连 save 都不调
+            Err(e) => Ok(Err(e)),
+        }
     })?;
     let a = match out {
         Ok(a) => a,

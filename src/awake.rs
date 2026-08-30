@@ -216,11 +216,30 @@ pub fn brief() -> Option<(String, bool)> {
     let holders = live_holders().len();
     match (sleep_disabled(), holders) {
         (Some(true), 0) => Some(("系统被设为不休眠，但没有 runner 在跑".into(), true)),
-        (Some(true), n) => Some((format!("合盖不休眠 · {n} 个 runner 在跑，结束后自动恢复"), false)),
+        // 「不用你操心」这半句是必须的：这行以前只说"合盖不休眠"，人看了不知道
+        // 是自己该去开，还是已经替他开好了（真被问过）。
+        (Some(true), n) => {
+            let batt = on_battery();
+            // 合盖不休眠 + 电池 = 整夜满速跑到没电关机，跑通宵的活正好死在这上面。
+            // 警告放**最前面**：这一行会按终端宽度截断，挂在末尾的警告等于没有（踩过）。
+            let head = if batt { "正用电池，跑长活记得插电 · " } else { "" };
+            Some((format!("{head}合盖、息屏都不会停（zloop 自动开的，{n} 个 runner 跑完自动恢复）"), batt))
+        }
         (Some(false), 0) => (!sudo_ok()).then(|| ("合盖会休眠 · 跑一次 `zloop install --sudoers` 开启保护".into(), false)),
         (Some(false), n) => Some((format!("记了 {n} 个 runner 却没生效"), true)),
         (None, _) => None,
     }
+}
+
+/// 现在靠电池吗？读不出来就当没在（宁可不说，也别瞎警告）。
+fn on_battery() -> bool {
+    Command::new("pmset")
+        .args(["-g", "batt"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("'Battery Power'"))
+        .unwrap_or(false)
 }
 
 pub fn sudoers_rule(user: &str) -> String {
