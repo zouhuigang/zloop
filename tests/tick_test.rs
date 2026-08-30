@@ -351,3 +351,62 @@ fn budget_cap_stops_when_spent_reaches_max_total_usd() {
     st.policy.max_total_usd = 0.0;
     assert!(tick::decide(&st, now_utc()).should_run);
 }
+
+/// A-7：`policy.window_hours` 手滑写大一位，每轮都要走的三条命令全 panic。
+///
+/// `.zloop/state.json` 是**给人改的**——zloop 自己就在教人改隔壁的 `policy.max_total_usd`。
+/// 而 `at - Duration::hours(n)` 对越界的 n 是 panic 不是报错：`window_hours = 99999999999`
+/// 时 `zloop status` / `zloop context` 一起退 101（`tick.rs` 的 `DateTime - TimeDelta
+/// overflowed`），再大一位连 chrono 内部的 `TimeDelta::hours out of bounds` 都出来，
+/// 整个项目目录就此敲不动。
+///
+/// 修法是取值先钳进 `0..=WINDOW_HOURS_MAX` 再交给 chrono：钳过的语义是"按一年算"，
+/// 循环照跑；钳过这件事本身由 `doctor` 的 `bad_policy` 说出来（见 doctor_test）。
+#[test]
+fn an_out_of_range_window_hours_gets_clamped_instead_of_panicking() {
+    let now = now_utc();
+    // 撤掉钳位（`at - Duration::hours(policy.window_hours)`）时，下面每一个取值都会 panic
+    for hours in [99_999_999_999i64, -99_999_999_999, 999_999_999_999_999_999, i64::MAX, i64::MIN] {
+        let mut st = fresh(&["[P0] a"]);
+        st.policy.window_hours = hours;
+        st.policy.max_runs = 1;
+        tick_at(&mut st, "progress", Some("t1"), Some(now - Duration::hours(1)));
+
+        // 1. 收窗口不炸：正数钳到一年（一小时前那条当然还在窗口里），负数钳到 0（窗口空掉）
+        let counted = tick::window_ticks(&st, now).len();
+        assert_eq!(counted, usize::from(hours > 0), "window_hours={hours} 该按钳过的值收窗口");
+
+        // 2. throttle 那一支也不炸，而且等待照旧封在窗口以内
+        let d = tick::decide(&st, now);
+        if hours > 0 {
+            assert_eq!((d.should_run, d.reason.as_str()), (false, "throttled"), "window_hours={hours}");
+            // 那条 tick 一小时前写下，钳过的窗口是一年 → 还要等「一年差一小时」，正好在封顶以内
+            let cap = zloop::tick::WINDOW_HOURS_MAX as u32 * 60;
+            let want = (zloop::tick::WINDOW_HOURS_MAX as u32 - 1) * 60 + 1;
+            assert_eq!(d.interval_min, Some(want.min(cap)), "window_hours={hours}：等待要按钳过的窗口算");
+        } else {
+            assert!(d.should_run, "window_hours={hours}：窗口被钳成 0，配额里一条都没有，该放行");
+        }
+    }
+}
+
+/// 钳位只对越界的值动手：默认值和边界值必须一分不差地按原样生效，
+/// 否则这道"防越界"的闸就顺手把正常配置也改了。
+#[test]
+fn in_range_window_hours_is_left_alone() {
+    let now = now_utc();
+    for hours in [1i64, 24, zloop::tick::WINDOW_HOURS_MAX] {
+        // 边界内侧一分钟 / 外侧一分钟：窗口长度但凡被改动过，这两条就有一条数错
+        for (offset_min, inside) in [(hours * 60 - 1, true), (hours * 60 + 1, false)] {
+            let mut st = fresh(&["[P0] a"]);
+            st.policy.window_hours = hours;
+            tick_at(&mut st, "progress", Some("t1"), Some(now - Duration::minutes(offset_min)));
+            assert_eq!(tick::window_ticks(&st, now).len(), usize::from(inside), "window_hours={hours} offset={offset_min}m");
+        }
+    }
+    // 0 的语义是"窗口空掉"，它本来就合法（钳位前后都一样），单独钉一下别被顺手改掉
+    let mut st = fresh(&["[P0] a"]);
+    st.policy.window_hours = 0;
+    tick_at(&mut st, "progress", Some("t1"), Some(now - Duration::minutes(1)));
+    assert_eq!(tick::window_ticks(&st, now).len(), 0, "window_hours=0：窗口里一条都不该有");
+}

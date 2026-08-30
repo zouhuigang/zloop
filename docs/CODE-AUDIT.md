@@ -68,7 +68,7 @@ cargo clippy -W clippy::indexing_slicing              → 182 条（含测试）
 | log | 11 | 6 | `resolve_evidence` `read_section` |
 | awake | 12 | 8 | 多数是平台相关，测不了 |
 | session | 5 | 4 | `detect` `transcript_path` |
-| **hosts** | 5 | **2** | **`install_claude_stop_hook`** ← 就是 A-1 那个 |
+| **hosts** | 5 | **2** | **`install_claude_stop_hook`** ← 就是 A-1 那个（已修，换成报错） |
 | phase | 3 | 3 | `compute` `reason_zh` |
 
 **最值得记一笔的是最后一列那个巧合**：这一轮唯一确认的 panic 就在
@@ -78,7 +78,7 @@ cargo clippy -W clippy::indexing_slicing              → 182 条（含测试）
 
 严重度按「会不会让用户的东西坏掉 / 会不会让人看到错的结论」排，不按修起来难不难。
 
-### A-1（高）`zloop install --claude-stop-hook` 在 settings.json 结构不对时 panic
+### A-1（高）`zloop install --claude-stop-hook` 在 settings.json 结构不对时 panic — 已修
 
 `src/hosts.rs:252/257/260` 三处 `.expect()` 直接断言 JSON 的形状。
 `~/.claude/settings.json` 是**用户和别的工具都会改**的文件，`"hooks": []` 这种写法完全可能出现。
@@ -101,6 +101,23 @@ cargo clippy -W clippy::indexing_slicing              → 182 条（含测试）
 
 修法：三处 `.expect()` 换成"结构不对就报错说清哪一层不对，并且别动这个文件"。
 **尤其不能默默覆写**——那是用户的全局配置。
+
+**已修**（`hosts.rs`）：三处 `.expect()` 换成 `ok_or_else(shape_err(...))`，报错点名是哪一层
+（`顶层` / `hooks` / `hooks.Stop`）、放的是什么类型、要的是什么类型，并明说**没动这个文件**：
+
+```
+$ HOME=/tmp/x zloop install --claude-stop-hook      # settings.json = {"hooks": []}
+zloop: /tmp/x/.claude/settings.json：hooks是数组，不是对象 {…}——没动这个文件。
+       这是你的全局配置，请自己把hooks改成对象 {…}后重试，或者手动加一条
+       command 为 `zloop hook-stop` 的 Stop hook
+$ echo $?
+2                                                   ← 和"文件不是合法 JSON"同一个出口
+```
+
+上表 7 行 `💥` 全部变成 `exit 2 + 说明`，且改完之后逐行比对过磁盘内容**一个字节没变**；
+`{}` / `{"hooks":{}}` / `{"hooks":{"Stop":[]}}` 三种正常形状照旧写得进去。
+回归测试 `a_wrongly_shaped_settings_json_is_reported_not_panicked_or_clobbered`
+（`tests/cli_test.rs`）——三层分别换回 `.expect()` 都会让它 panic 变红。
 
 ### B-1（低）`Decision` 的 "should_run ⇒ todo 非空" 不变量没人守
 
@@ -186,7 +203,7 @@ E3 之后 `.zloop/` 里躺着一个 3926 字节的半截 `state.json.tmp`。它*
 | CLI 参数 · 超长 | 1 MB 的目标文字、1 MB 的 todo 文字 | ✅ 正常，输出自己截断 |
 | CLI 参数 · 控制字符 | `\x1b[31m` ANSI、`\x07`、`\x08`、`\t` | ✅ 收下并原样存，没有转义注入 |
 | CLI 参数 · 非 UTF-8 | `zloop remember $'\xff\xfe bad'` | ✅ clap 挡在门外：`invalid UTF-8 was detected` |
-| CLI 参数 · 巨大数字 | `compact --keep-days` / `doc --since\|--until` | 💥 **A-8**：装得下 i64 就 panic |
+| CLI 参数 · 巨大数字 | `compact --keep-days` / `doc --since\|--until` | 💥 **A-8**：装得下 i64 就 panic（已修：exit 2 + 同一条友好提示） |
 | CLI 参数 · 枚举越界 | `--priority 99` / `--status bogus` / `--keep-days -1` | ✅ clap 全部拒绝 |
 | CLI 参数 · 未知 id | `edit nosuch` / `done nosuch` / `--blocked-by nosuchid` | ✅ 逐个报名字，exit 2 |
 | CLI 参数 · 自依赖 | `edit t1 --blocked-by t1` | ⚠ **B-2**：收下，todo 永久卡死 |
@@ -201,7 +218,7 @@ E3 之后 `.zloop/` 里躺着一个 3926 字节的半截 `state.json.tmp`。它*
 | stdin · 空 / 垃圾 / 深嵌套 | `hook-stop`、`replan --apply`、`reflect --apply` | ✅ 三个入口全部干净拒绝或静默忽略 |
 | 环境变量 | `COLUMNS` = 0/1/2/-5/abc/超 u64、`NO_COLOR=`、`CLICOLOR_FORCE=1`、`ZLOOP_AWAKE_POLL_SECS=abc` | ✅ 9 种全部 exit 0，输出不变形 |
 | state.json · 非 UTF-8 | 追加一个 `\xff` | ✅ 报错 exit 2，拒绝继续 |
-| state.json · 数值越界 | `policy.window_hours` 手改大 | 💥 **A-7**：`next`/`status`/`context` 全 panic |
+| state.json · 数值越界 | `policy.window_hours` 手改大 | 💥 **A-7**：`next`/`status`/`context` 全 panic（已修：钳进 0..=8760 + doctor `bad_policy`） |
 | NOTES.md · 非 UTF-8 | 追加一个 `\xff`；粘一行 GBK | 💥 **A-4**（已修）：静默清零 + 下一次写入真删 |
 | 子进程 · 超时 | preflight / 宿主留下后台进程 | 💥 **A-6**（已修）：超时形同虚设，SIGTERM 也叫不动 |
 | 信号 · SIGPIPE | `zloop status \| head` | ✅ `main.rs` 恢复了默认处置，安静退出 |
@@ -444,7 +461,7 @@ SIGTERM 之后 6 秒 runner 还活着：它卡在排水上，只能 SIGKILL（A-
 | 等超时期间发 SIGTERM（t=5s） | t=30.2 s 才退 | **t=5.4 s** |
 | 孙进程 | 等它自己咽气 | 当场收掉 |
 
-### A-7（中）`policy.window_hours` 手滑一下，`next` / `status` / `context` 全 panic，而 `doctor` 说没问题
+### A-7（中）`policy.window_hours` 手滑一下，`next` / `status` / `context` 全 panic，而 `doctor` 说没问题 — 已修
 
 `tick.rs:186` `at - Duration::hours(state.policy.window_hours)`，中间没有任何范围检查。
 
@@ -478,7 +495,34 @@ SIGTERM 之后 6 秒 runner 还活着：它卡在排水上，只能 SIGKILL（A-
 外加 `doctor` 补一条 policy 数值体检。这和 §5 的 A-3、和上面的 A-4 是同一个毛病的第三次出现：
 **`doctor` 只查它想到的那几样，没有一条兜底的「我自己走一遍主路径看看炸不炸」。**
 
-### A-8（中）时间参数「装得下 i64」就 panic，装不下反而有好错误提示
+**已修**（`tick.rs` + `doctor.rs`），两半：
+
+1. **算的地方钳住**。新增 `tick::WINDOW_HOURS_MAX = 24 * 365` 和
+   `tick::window_span(policy)`，取值一律先 `clamp(0, WINDOW_HOURS_MAX)` 再交给 chrono；
+   `window_ticks` 和 throttle 那一支的 `frees_in` 都改走它，外加 `checked_sub_signed` /
+   `checked_add_signed` 兜底（`at` 和 `oldest` 都可能是从账本里读来的，一个都不信）。
+   上表五个取值（含 `i64::MAX` / `i64::MIN`）现在 `next` / `status` / `context` 全部 exit 0。
+2. **doctor 说出来**。新增 `bad_policy` 检查——钳过就等于**人写的那个数没生效**，
+   静悄悄按别的数跑比崩掉更难查：
+
+```
+$ zloop doctor          # state.json 里 policy.window_hours = 99999999999
+✗ [repro] policy.window_hours = 99999999999，不在 0..=8760 里
+   ——配额窗口按 8760 小时算，你写的那个数没生效
+   → 把 .zloop/state.json 的 policy.window_hours 改回 24（默认）或别的 0..=8760 的数
+```
+
+同一条检查顺手覆盖另外两个"写了不生效"的取值：`max_total_usd` 为负（错误级，
+花费只增不减 = 这个目标一轮都跑不了）、`intervals_min` 为空（警告级，有 3 分钟的兜底）。
+
+回归测试：`an_out_of_range_window_hours_gets_clamped_instead_of_panicking` /
+`in_range_window_hours_is_left_alone`（`tests/tick_test.rs`，钳位本身 + 合法取值不被误伤）、
+`an_out_of_range_window_hours_does_not_take_the_whole_project_down`（`tests/cli_test.rs`，
+人真敲的那三条命令）、`policy_numbers_written_out_of_range_are_reported`
+（`tests/doctor_test.rs`）。撤掉钳位 → 前两个 panic 变红、CLI 那个 `left: 101 / right: 0`；
+撤掉 `check_policy` 调用 → 后两个变红。
+
+### A-8（中）时间参数「装得下 i64」就 panic，装不下反而有好错误提示 — 已修
 
 两个入口，同一个根因（`state.rs:270` 和 `cli.rs:1990` 都是 `now() - Duration::…(n)`，无 checked）：
 
@@ -501,6 +545,21 @@ SIGTERM 之后 6 秒 runner 还活着：它卡在排水上，只能 SIGKILL（A-
 
 修法：`parse_when` 和 `cmd_compact` 都换成 `checked_sub_signed`，
 越界就走已经写好的那条友好错误路径。
+
+**已修**（`state.rs` + `cli.rs`）：
+
+- `parse_when`：`Duration::minutes/hours/days` → `try_minutes/try_hours/try_days`，
+  再 `now().checked_sub_signed(...)`。算不出来时**不 return**，直接掉进下面那条
+  已经写好的路径——于是"是数字但算不出来"和"根本不是时间"给的是同一句话：
+  `doc: --since 看不懂的时间 "99999999999d"：用 2h / 30m / 7d、2026-08-29，或完整的 ISO 时间戳`（exit 2）。
+- `cmd_compact`：同样换 `try_days` + `checked_sub_signed`，越界时
+  `compact: --keep-days 99999999999 太大了，算不出截止时间；用天数，比如 30`（exit 2）。
+  **验参挪到 `ensure_idle` 之前**：一个连范围都不对的参数，不该先去抢那道闸。
+
+上表 5 个 `💥` 全变成 exit 2；`--since 7d` / `--keep-days 30` 这些正常取值一条没被误伤。
+回归测试 `out_of_range_time_arguments_get_the_same_friendly_error_as_garbage`
+（`tests/cli_test.rs`，两个入口 × 越界取值 + 正常取值），
+两个入口分别撤回原实现都会让它 `left: 101 / right: 2` 变红。
 
 ### B-2（低）`edit <id> --blocked-by <它自己>` 被收下，那条 todo 就再也跑不了
 

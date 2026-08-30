@@ -2033,10 +2033,17 @@ fn cmd_doc(
 
 /// Archive todos finished more than `keep_days` ago, together with their ticks.
 fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<i32> {
+    // 参数先验，再取闸：`--keep-days 99999999999` 以前在这里 panic 退 101（A-8），
+    // 而位数再多一点（i64 装不下）被 clap 拦下来给的是一句人话。算不出截止时间和
+    // "根本不是个天数"是同一类输入错误，得给同一种交代。
+    let Some(cutoff) = chrono::Duration::try_days(keep_days.max(0)).and_then(|d| state::now().checked_sub_signed(d))
+    else {
+        eprintln!("compact: --keep-days {keep_days} 太大了，算不出截止时间；用天数，比如 30");
+        return Ok(2);
+    };
     // 删 tick = 改 runner 下一轮要读的四个累计量（fail_streak / progress_streak / 花费 /
     // 配额窗口），和 `goal switch` 同一类，所以走同一道闸（A-18）。
     crate::goals::ensure_idle(root, force, "整理账本会动它正在读的轮次记录")?;
-    let cutoff = state::now() - chrono::Duration::days(keep_days.max(0));
     let (moved_todos, moved_ticks, carried, archive) = state::transaction(path, |st| {
         let old_ids: std::collections::HashSet<String> = st
             .todos

@@ -293,12 +293,18 @@ pub fn parse_when(value: &str) -> Result<DateTime<FixedOffset>> {
     let v = value.trim();
     if let Some(digits) = v.strip_suffix(['m', 'h', 'd']) {
         if let Ok(n) = digits.parse::<i64>() {
+            // `try_*` + `checked_sub_signed`：作者想到了「这串东西可能不是数字」，
+            // 没想到「是数字但算不出来」——`--since 99999999999d` 以前直接 panic，
+            // 而位数再多一点（i64 都装不下）反而落到下面那条好错误上（A-8）。
+            // 越界和"根本不是时间"是同一类输入错误，这里不 return，让它掉到同一条路上。
             let span = match v.chars().last() {
-                Some('m') => chrono::Duration::minutes(n),
-                Some('h') => chrono::Duration::hours(n),
-                _ => chrono::Duration::days(n),
+                Some('m') => chrono::Duration::try_minutes(n),
+                Some('h') => chrono::Duration::try_hours(n),
+                _ => chrono::Duration::try_days(n),
             };
-            return Ok(now() - span);
+            if let Some(dt) = span.and_then(|s| now().checked_sub_signed(s)) {
+                return Ok(dt);
+            }
         }
     }
     if let Ok(date) = NaiveDate::parse_from_str(v, "%Y-%m-%d") {

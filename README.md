@@ -791,7 +791,7 @@ for d in ~/work/*/; do [ -d "$d/.zloop" ] && (cd "$d" && echo "== $(basename "$d
 |---|---|---|
 | `intervals_min` | `[3, 10, 30]` | 有活时每 3 分钟一轮；等人/无活时 10 → 30 分钟退避；30 也是 runner 等人时的轮询周期 |
 | `max_runs` | `480` | 24 小时窗口内最多记账多少轮（done / progress / fail），防空转刹车；`0` 不限 |
-| `window_hours` | `24` | 上面那个窗口的长度 |
+| `window_hours` | `24` | 上面那个窗口的长度。取值范围 `0..=8760`（一年）；写出范围的会被钳回区间，并由 `zloop doctor` 的 `bad_policy` 报出来 |
 | `max_fail_streak` | `3` | 连续失败几轮停下等人 |
 | `max_noop_streak` | `3` | 交互式 `next` 连续几次"没活"后停止退避。**只对 `zloop next` 生效**：`noop` tick 只有它会记，runner 一条都不记，也不拿它当停机开关 |
 | `max_progress_streak` | `8` | 同一 todo 连续几轮 progress 没 done 就停；`0` 关闭 |
@@ -1661,6 +1661,7 @@ claude 11111111-2222-3333-4444-555555555555  ticks 7   2026-08-28T20:15:11+08:00
 | `dangling_blocked_by` | 要修 | 依赖指向不存在的 todo（`compact` 把被依赖的那条搬走就会这样）——这条 todo 永远轮不到 |
 | `duplicate_todo_id` | 要修 | 同一个 todo id 有多条，`done` / `edit` 只改得到第一条 |
 | `next_id_reuse` | 要修 | `next_id` 已经被用过，下一条 `plan` 会造出重复 id |
+| `bad_policy` | 要修 / 留意 | `policy` 里的数值写出了范围：`window_hours` 不在 `0..=8760`、`max_total_usd` 为负（都是「要修」，取值被无声换掉），或 `intervals_min` 为空（「留意」，退回 3 分钟） |
 | `unreadable_notes` | 要修 | `NOTES.md` 在、但读不出来（非 UTF-8 / 权限）——`context` 会**静默**少掉「约定」「经验」两整节，模型当轮没有任何项目护栏，命令还退 0 |
 | `missing_log` | 留意 | tick 记着的日志文件被删了（信息没了，循环照跑） |
 | `broken_archive` / `archive_id_collision` | 留意 | 归档文件读不出 / 归档里多份同名，只影响翻旧账 |

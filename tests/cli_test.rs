@@ -277,6 +277,49 @@ fn install_is_idempotent_and_refuses_unmanaged() {
     assert!(hosts::install_claude(home.path(), false).is_err());
 }
 
+/// A-1：`~/.claude/settings.json` 是合法 JSON、但不是我要的形状时，别 panic 也别覆写。
+///
+/// 这个文件不属于 zloop——用户和别的工具都在写它，`"hooks": []` 这种写法完全可能出现。
+/// 以前三层形状是三个 `.expect()`：`zloop install --claude-stop-hook` 直接 panic + exit 101
+/// （`hosts.rs:262/267/270`）。对比之下"文件不是合法 JSON"那条路径处理得很好（报错 + 说明），
+/// 这个反差本身就是结论：**校验了形状的有无，没校验形状对不对。**
+///
+/// 两条都要钉：报的错说得出是哪一层，以及**磁盘上那个文件一个字节都没动**。
+#[test]
+fn a_wrongly_shaped_settings_json_is_reported_not_panicked_or_clobbered() {
+    // (文件内容, 错误里必须点名的那一层)
+    let cases = [
+        ("[]", "顶层"),
+        ("\"hello\"", "顶层"),
+        ("42", "顶层"),
+        ("{\"hooks\": []}", "hooks"),
+        ("{\"hooks\": \"none\"}", "hooks"),
+        ("{\"hooks\": {\"Stop\": {}}}", "hooks.Stop"),
+        ("{\"hooks\": {\"Stop\": \"off\"}}", "hooks.Stop"),
+    ];
+    for (raw, layer) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let settings = home.path().join(".claude/settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(&settings, raw).unwrap();
+        // 撤掉修复（换回 .expect）时这一行就是 panic，测试进程直接死
+        let err = hosts::install_claude_stop_hook(home.path()).unwrap_err().to_string();
+        assert!(err.contains(layer), "错误得说清是哪一层不对（{raw} → 期望点名 {layer}）：{err}");
+        assert!(err.contains("没动这个文件"), "得明说没碰用户的全局配置：{err}");
+        assert_eq!(fs::read_to_string(&settings).unwrap(), raw, "{raw}：用户的全局配置必须原样留着");
+    }
+    // 形状对的照旧写得进去，别把闸修成一堵墙
+    for raw in ["{}", "{\"hooks\":{}}", "{\"hooks\":{\"Stop\":[]}}"] {
+        let home = tempfile::tempdir().unwrap();
+        let settings = home.path().join(".claude/settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(&settings, raw).unwrap();
+        hosts::install_claude_stop_hook(home.path()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], hosts::HOOK_COMMAND, "{raw}");
+    }
+}
+
 /// skill 是给人改的（Warp 那边它就是改进的载体）。所以：用户区永远保留，
 /// 托管区被手改过就停下报错——绝不静默覆盖。
 #[test]
@@ -2265,4 +2308,70 @@ fn a_finished_todo_no_longer_counts_as_waiting_on_you() {
     let o = zloop(d, &["done", "t2", "--outcome", "progress", "--note", "在做"], None, &[]);
     assert!(!o.out.contains("t1 在等你回话"), "t1 已经做完了，别再说它在等人: {}", o.out);
     assert!(!zloop(d, &["replan"], None, &[]).out.contains("t1 在等你回话"), "材料包同理");
+}
+
+/// A-8：时间参数「装得下 i64」就 panic，装不下反而有好错误提示。
+///
+/// `--since 99999999999999999999d` 这种 i64 都装不下的，`digits.parse::<i64>()` 失败，
+/// 落到写好的那条友好错误上（exit 2 + 「用 2h / 30m / 7d」）；而刚好装得下的
+/// `99999999999d` 走进 `now() - Duration::days(n)`，直接 panic 退 101。
+/// 作者想到了"这串东西可能不是数字"，没想到"是数字但算不出来"——两者是同一类输入错误，
+/// 就该给同一种交代。修法是 `try_*` + `checked_sub_signed`，越界的落回同一条路径。
+#[test]
+fn out_of_range_time_arguments_get_the_same_friendly_error_as_garbage() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    assert_eq!(zloop(d, &["init", "alpha"], None, &[]).code, 0);
+    zloop(d, &["plan"], Some("[P1] one\n"), &[]);
+
+    // 撤掉修复时下面每一条都是 exit 101 + 一行 Rust panic
+    for arg in ["99999999999d", "99999999999h", "9223372036854775807d"] {
+        for flag in ["--since", "--until"] {
+            let o = zloop(d, &["doc", "--all", flag, arg], None, &[]);
+            assert_eq!(o.code, 2, "doc {flag} {arg} 该走输入错误那条路：{}{}", o.out, o.err);
+            assert!(o.err.contains("看不懂的时间"), "得给和乱码同一条提示：{}", o.err);
+            assert!(!o.err.contains("panicked"), "{}", o.err);
+        }
+    }
+    // compact 是另一个入口、同一个根因：`now() - Duration::days(keep_days)`
+    for arg in ["99999999999", "999999999999999", "9223372036854775807"] {
+        let o = zloop(d, &["compact", "--keep-days", arg, "--force"], None, &[]);
+        assert_eq!(o.code, 2, "compact --keep-days {arg}：{}{}", o.out, o.err);
+        assert!(o.err.contains("算不出截止时间"), "得说清是这个数太大：{}", o.err);
+        assert!(!o.err.contains("panicked"), "{}", o.err);
+    }
+    // 正常取值一条都不能被误伤
+    assert_eq!(zloop(d, &["doc", "--all", "--since", "7d"], None, &[]).code, 0);
+    assert_eq!(zloop(d, &["compact", "--keep-days", "30", "--force"], None, &[]).code, 0);
+}
+
+/// A-7 的 CLI 面：`policy.window_hours` 越界时，**每轮都要走的那三条命令**不能崩。
+///
+/// 炸的正好是 skill 每轮的 `context` → `next` 和 runner 每轮的 decide；人拿到的是一行
+/// Rust panic 加一句 "run with RUST_BACKTRACE=1"，整个项目目录就此敲不动。
+/// 单元测试（tick_test）钉的是钳位本身，这里钉的是"用户真敲的那几条命令还能用"。
+#[test]
+fn an_out_of_range_window_hours_does_not_take_the_whole_project_down() {
+    for hours in ["99999999999", "-99999999999", "999999999999999999", "9223372036854775807"] {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        assert_eq!(zloop(d, &["init", "alpha"], None, &[]).code, 0);
+        zloop(d, &["plan"], Some("[P1] one\n"), &[]);
+        let p = state::state_path(d);
+        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        v["policy"]["window_hours"] = serde_json::json!(hours.parse::<i64>().unwrap());
+        fs::write(&p, serde_json::to_string(&v).unwrap()).unwrap();
+
+        // 撤掉钳位时 status / context / next 一起 exit 101
+        for args in [vec!["status"], vec!["context"], vec!["next", "--peek", "--json"]] {
+            let o = zloop(d, &args, None, &[]);
+            assert_eq!(o.code, 0, "window_hours={hours} 时 `zloop {}` 该照常能用：{}{}", args.join(" "), o.out, o.err);
+            assert!(!o.err.contains("panicked"), "window_hours={hours} `zloop {}`：{}", args.join(" "), o.err);
+        }
+        // 而且不是闷头钳掉就算了：doctor 得把这个没生效的取值报出来
+        let o = zloop(d, &["doctor", "--json"], None, &[]);
+        let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+        let kinds: Vec<&str> = v["findings"].as_array().unwrap().iter().filter_map(|f| f["kind"].as_str()).collect();
+        assert!(kinds.contains(&"bad_policy"), "window_hours={hours} 该被 doctor 报出来：{}", o.out);
+    }
 }

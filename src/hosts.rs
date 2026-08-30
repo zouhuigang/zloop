@@ -248,7 +248,36 @@ pub fn install_codex(home: &Path, force: bool) -> Result<Vec<Written>> {
     ])
 }
 
+/// JSON 值的类型名，只为把「你那儿放的是个什么」说给人听。
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "布尔值",
+        Value::Number(_) => "数字",
+        Value::String(_) => "字符串",
+        Value::Array(_) => "数组",
+        Value::Object(_) => "对象",
+    }
+}
+
+/// 形状不对时的报错。**说清哪一层不对，并且明说没动这个文件**——
+/// `~/.claude/settings.json` 是用户的全局配置，别的工具也在写它。
+fn shape_err(path: &Path, at: &str, want: &str, got: &'static str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}：{at}是{got}，不是{want}——没动这个文件。\
+         这是你的全局配置，请自己把{at}改成{want}后重试，\
+         或者手动加一条 command 为 `{HOOK_COMMAND}` 的 Stop hook",
+        path.display()
+    )
+}
+
 /// Append a Stop hook running `zloop hook-stop` to ~/.claude/settings.json (idempotent).
+///
+/// 三层形状（顶层 / `hooks` / `hooks.Stop`）以前是三个 `.expect()`：`{"hooks": []}` 这种
+/// 完全正常的写法直接把 `zloop install --claude-stop-hook` 打成 panic + exit 101（A-1）。
+/// 作者想到了「文件可能不是合法 JSON」（那条路径 exit 2 + 说明，处理得很好），
+/// 没想到「是合法 JSON 但不是我要的形状」。**这个文件不属于 zloop**，所以形状不对时
+/// 唯一安全的动作是报错走人，绝不能按自己的想象重建一份覆写回去。
 pub fn install_claude_stop_hook(home: &Path) -> Result<Vec<(PathBuf, bool)>> {
     let settings_path = home.join(".claude").join("settings.json");
     let mut settings: Value = if settings_path.exists() {
@@ -257,17 +286,22 @@ pub fn install_claude_stop_hook(home: &Path) -> Result<Vec<(PathBuf, bool)>> {
     } else {
         json!({})
     };
-    let hooks = settings
+    // 类型名要在可变借用之前取，取完的是 &'static str，后面随便用
+    let root_kind = json_kind(&settings);
+    let root = settings
         .as_object_mut()
-        .expect("settings object")
-        .entry("hooks")
-        .or_insert_with(|| json!({}));
+        .ok_or_else(|| shape_err(&settings_path, "顶层", "对象 {…}", root_kind))?;
+    let hooks = root.entry("hooks").or_insert_with(|| json!({}));
+    let hooks_kind = json_kind(hooks);
     let stop = hooks
         .as_object_mut()
-        .expect("hooks object")
+        .ok_or_else(|| shape_err(&settings_path, "hooks", "对象 {…}", hooks_kind))?
         .entry("Stop")
         .or_insert_with(|| json!([]));
-    let arr = stop.as_array_mut().expect("Stop array");
+    let stop_kind = json_kind(stop);
+    let arr = stop
+        .as_array_mut()
+        .ok_or_else(|| shape_err(&settings_path, "hooks.Stop", "数组 […]", stop_kind))?;
     let present = arr.iter().any(|entry| {
         entry
             .get("hooks")

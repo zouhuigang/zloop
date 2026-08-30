@@ -129,6 +129,7 @@ pub fn check(root: &Path) -> Report {
     for gf in &files {
         if let Some(st) = &gf.state {
             check_ledger(root, gf, st, &mut f);
+            check_policy(gf, st, &mut f);
             check_future_timestamps(gf, st, now, &mut f);
         }
     }
@@ -327,6 +328,44 @@ fn check_ledger(root: &Path, gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
                 format!("把 state.json 的 next_id 改成 {}", max + 1),
             ));
         }
+    }
+}
+
+/// `policy` 里的数值写出了范围。
+///
+/// 这个块是**给人改的**（`start` 撞上预算时 zloop 自己就在说「改大 policy.max_total_usd」），
+/// 所以隔壁字段被顺手写错只是时间问题。`window_hours` 越界以前是直接 panic——炸掉的正好是
+/// 每轮都要走的 `next` / `status` / `context`，而唯一一个专门回答「哪儿不对」的命令
+/// 一声不吭地 exit 0（A-7）。现在取值会被钳进合法区间，循环照跑；
+/// 但**钳过就等于你写的那个数没生效**，得有人说这一句，这条就是那一句。
+fn check_policy(gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
+    let who = gf.label();
+    let p = &st.policy;
+    let max = crate::tick::WINDOW_HOURS_MAX;
+    if p.window_hours < 0 || p.window_hours > max {
+        f.push(Finding::err(
+            "bad_policy",
+            format!(
+                "[{who}] policy.window_hours = {}，不在 0..={max} 里——配额窗口按 {} 小时算，你写的那个数没生效",
+                p.window_hours,
+                p.window_hours.clamp(0, max)
+            ),
+            format!("把 {}/{} 的 policy.window_hours 改回 24（默认）或别的 0..={max} 的数", STATE_DIR, state::STATE_FILE),
+        ));
+    }
+    if p.max_total_usd < 0.0 {
+        f.push(Finding::err(
+            "bad_policy",
+            format!("[{who}] policy.max_total_usd = {:.2} 是负数——花费只增不减，这个目标一轮都跑不了", p.max_total_usd),
+            format!("把 {}/{} 的 policy.max_total_usd 改成 0（不限）或一个正数", STATE_DIR, state::STATE_FILE),
+        ));
+    }
+    if p.intervals_min.is_empty() {
+        f.push(Finding::warn(
+            "bad_policy",
+            format!("[{who}] policy.intervals_min 是空的——间隔退回写死的 3 分钟，退避那一档等于没有"),
+            format!("把 {}/{} 的 policy.intervals_min 写成 [3, 10, 30] 这样的递增列表", STATE_DIR, state::STATE_FILE),
+        ));
     }
 }
 

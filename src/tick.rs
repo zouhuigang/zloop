@@ -278,8 +278,29 @@ pub fn spent_total(state: &State) -> f64 {
     spent_usd(&state.ticks) + state.archived.cost_usd
 }
 
+/// `policy.window_hours` 的合法上限：一年。
+///
+/// 配额窗口比这还长就等于没有窗口（`max_runs` 变成终身配额），而代价是每一处
+/// `now ± window_hours` 都要在 chrono 的边界上跳舞。
+pub const WINDOW_HOURS_MAX: i64 = 24 * 365;
+
+/// 配额窗口的长度，**取值先钳到 `0..=WINDOW_HOURS_MAX` 再交给 chrono**。
+///
+/// `.zloop/state.json` 不是内部文件——zloop 自己就在教人去手改那个 `policy` 块
+/// （`start` 撞到预算上限时的提示就是「改大 policy.max_total_usd」），隔壁字段被顺手
+/// 写错只是时间问题。而 `Duration::hours(n)` 和 `at - span` 对越界的 n 都是 **panic**：
+/// `window_hours = 99999999999` 时 `status` / `context` 一起退 101，
+/// 再大一位连 chrono 内部的 `TimeDelta::hours out of bounds` 都出来了，
+/// 整个项目目录就此敲不动（A-7）。钳一下的代价是「按 1 年算」，比崩掉强得多；
+/// 真被钳到了由 `doctor` 的 `bad_policy` 说出来，不会悄没声。
+pub fn window_span(policy: &crate::state::Policy) -> Duration {
+    Duration::hours(policy.window_hours.clamp(0, WINDOW_HOURS_MAX))
+}
+
 pub fn window_ticks<'a>(state: &'a State, at: DateTime<FixedOffset>) -> Vec<&'a Tick> {
-    let since = at - Duration::hours(state.policy.window_hours);
+    // 钳完还有 `checked_`：`at` 也可能是从账本里读来的（不是 now），谁都不信一遍
+    let span = window_span(&state.policy);
+    let since = at.checked_sub_signed(span).unwrap_or(at);
     state
         .ticks
         .iter()
@@ -356,14 +377,17 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
             .filter_map(|t| parse_iso(&t.at).ok())
             .min()
             .unwrap_or(at);
-        let frees_in = oldest + Duration::hours(policy.window_hours) - at;
+        let span = window_span(policy);
+        // `oldest` 是账本里读来的时间戳、`span` 是人手改的 policy 算出来的：两个都不可信，
+        // 加起来越界就按「等满一个窗口」处理（下面还会再钳一次）。
+        let frees_in = oldest.checked_add_signed(span).map(|free_at| free_at - at).unwrap_or(span);
         // 等待有上限：一条 tick 最多在窗口里待 `window_hours`，等得比这更久没有任何道理。
         // 少了这个封顶，一条**落在未来**的 tick 就能让 runner 睡到下个世纪：`oldest` 在未来
         // 时 `frees_in` 是个天文数字，实测 `interval_min=38048610`（72 年，A-11）。造出未来
         // 时间戳不需要有人手改文件——NTP 校时、改时区、虚拟机挂起恢复、笔记本电池耗尽后
         // 时钟重置，都会让已有的 tick 落在"未来"。封顶之后最坏也只是每 `window_hours`
         // 醒一次重新判断（未来时间戳本身由 doctor 的 `future_timestamp` 报出来）。
-        let cap = policy.window_hours.clamp(1, 24 * 365) * 60;
+        let cap = policy.window_hours.clamp(1, WINDOW_HOURS_MAX) * 60;
         let minutes = (frees_in.num_seconds().div_euclid(60) + 1).clamp(1, cap) as u32;
         return Decision {
             should_run: false,

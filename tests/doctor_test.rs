@@ -334,3 +334,58 @@ fn leftover_temp_files_get_reported() {
     assert_eq!(r.errors, 0, "残留不算错误");
     assert!(r.findings.iter().any(|f| f.kind == "leftover_tmp"), "{:?}", r.findings);
 }
+
+/// A-7 的体检面：`policy` 里的数值写出了范围，得有人说一句。
+///
+/// `window_hours` 越界以前是直接 panic——炸掉的正好是每轮都要走的 `next` / `status` /
+/// `context`，而唯一一个专门回答"哪儿不对"的命令 exit 0 说"没发现问题"。
+/// 现在取值会被钳进合法区间，循环照跑；但**钳过就等于人写的那个数没生效**，
+/// 静悄悄地按别的数跑比崩掉更难查。这条就是那一句。
+#[test]
+fn policy_numbers_written_out_of_range_are_reported() {
+    // (改哪个字段, 写成什么, 是不是 error 级)
+    // error = 人写的取值被无声地换掉了；warn = 有个说得过去的兜底（intervals_min 退回 3 分钟）
+    let cases = [
+        ("window_hours", serde_json::json!(99_999_999_999i64), true),
+        ("window_hours", serde_json::json!(-1), true),
+        ("window_hours", serde_json::json!(i64::MAX), true),
+        ("max_total_usd", serde_json::json!(-5.0), true),
+        ("intervals_min", serde_json::json!([]), false),
+    ];
+    for (field, value, fatal) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        init(d, "alpha");
+        plan(d, "[P0] one\n");
+        let p = d.join(".zloop/state.json");
+        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        v["policy"][field] = value.clone();
+        fs::write(&p, serde_json::to_string(&v).unwrap()).unwrap();
+
+        let (ks, code) = kinds(d);
+        assert!(ks.contains(&"bad_policy".to_string()), "policy.{field} = {value} 该被报出来，实际 {ks:?}");
+        assert_eq!(code != 0, fatal, "policy.{field} = {value}：doctor 的退出码级别不对");
+        let o = zloop(d, &["doctor"]);
+        assert!(o.out.contains(field), "报告里得点名是哪个字段：{}", o.out);
+        assert!(!o.out.contains("没发现问题"), "policy.{field} = {value}：{}", o.out);
+    }
+    // 合法取值一条都不能被误伤（边界值也算合法）
+    for (field, value) in [
+        ("window_hours", serde_json::json!(0)),
+        ("window_hours", serde_json::json!(24)),
+        ("window_hours", serde_json::json!(24 * 365)),
+        ("max_total_usd", serde_json::json!(0.0)),
+        ("max_total_usd", serde_json::json!(12.5)),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        init(d, "alpha");
+        plan(d, "[P0] one\n");
+        let p = d.join(".zloop/state.json");
+        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        v["policy"][field] = value.clone();
+        fs::write(&p, serde_json::to_string(&v).unwrap()).unwrap();
+        let (ks, _) = kinds(d);
+        assert!(!ks.contains(&"bad_policy".to_string()), "policy.{field} = {value} 是合法的，不该报：{ks:?}");
+    }
+}
