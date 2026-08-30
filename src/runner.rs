@@ -805,18 +805,25 @@ fn slowest_interval(state: &State) -> u32 {
 }
 
 /// Decide how long to sleep for a non-running decision, or `None` to stop the runner.
+///
+/// `--exit-on-wait` 在 `interval_min` **之前**判：「等人要不要退出」是标志说了算，不是
+/// noop 计数说了算。原来的顺序（先 match `interval_min`，`Some` 直接返回、只有 `None`
+/// 那一支才问标志）让这个标志在真 runner 上变成死代码——`decide` 只有在
+/// `noop_streak >= max_noop_streak` 时才给 `None`，而 runner 在 `!should_run` 那一支
+/// 只写 journal 的 sleep，一条 noop tick 都不记，所以 `noop_streak` 恒为 0。实测抓到过
+/// 一个带着 `--exit-on-wait` 的 runner 在 user_gate 上转了 20 小时（A-5）。
 pub fn wait_plan(state: &State, d: &tick::Decision, opts: &Options) -> Option<(u32, String)> {
-    match d.interval_min {
-        Some(m) => Some((m, d.reason.clone())),
-        None => {
-            let human = d.reason == "user_gate" || d.reason == "blocked";
-            if human && !opts.exit_on_wait {
-                Some((slowest_interval(state), format!("{} (polling until a human unblocks)", d.reason)))
-            } else {
-                None
-            }
+    let human = d.reason == "user_gate" || d.reason == "blocked";
+    if human {
+        if opts.exit_on_wait {
+            return None;
         }
+        // 等人时的说法只有一种：不管 `decide` 给的是哪一档间隔（还是压根没给），
+        // runner 在做的都是同一件事——替人守着这条 todo，等人回来解开。
+        let m = d.interval_min.unwrap_or_else(|| slowest_interval(state));
+        return Some((m, format!("{} (polling until a human unblocks)", d.reason)));
     }
+    d.interval_min.map(|m| (m, d.reason.clone()))
 }
 
 /// 启动前体检：如果 runner 第一轮就会直接退出，返回那个 reason。

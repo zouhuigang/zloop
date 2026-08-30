@@ -53,6 +53,35 @@ fn run(d: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
     (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
 }
 
+/// 和 `run` 一样，但带上限：到点还没退出就 SIGKILL 再 panic（带上它最后说了什么）。
+///
+/// 「本该退出的 runner 不退出」这一类回归（A-5）用 `run` 是测不出来的：撤掉修复之后
+/// 测试**挂住**而不是变红，而挂住的测试没人当成失败——它只是让 `cargo test` 永远跑不完。
+fn run_within(d: &Path, args: &[&str], env: &[(&str, &str)], limit: Duration) -> (i32, String, String) {
+    let mut cmd = Command::new(zloop_bin());
+    cmd.current_dir(d).args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    common::scrub_ambient_env(&mut cmd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut ch = cmd.spawn().unwrap();
+    let deadline = std::time::Instant::now() + limit;
+    let mut overran = false;
+    while ch.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = Command::new("kill").args(["-KILL", &ch.id().to_string()]).status();
+            let _ = ch.wait();
+            overran = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let o = ch.wait_with_output().unwrap();
+    let (out, err) = (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned());
+    assert!(!overran, "`zloop {}` 过了 {limit:?} 还没自己退出\n--- stdout ---\n{out}\n--- stderr ---\n{err}", args.join(" "));
+    (o.status.code().unwrap_or(-1), out, err)
+}
+
 /// `hook-stop` 读 stdin（内容不用，但会读），测试里必须把它接成空管道，
 /// 否则在终端下跑 `cargo test` 会卡在等输入。
 fn hook_stop(d: &Path, env: &[(&str, &str)]) -> (i32, String) {
@@ -178,11 +207,9 @@ echo '{"session_id":"w","is_error":false,"result":"ok"}'"#,
     );
     let d = project(&["[P0] gated"]);
     run(&d, &["done", "t1", "--block", "waiting for a decision"], &[]);
-    for _ in 0..3 {
-        run(&d, &["next"], &[]); // exhaust noop streak so decide() says interval=None
-    }
     // --exit-on-wait: old behaviour, exits at once
-    let (_, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--exit-on-wait"], &[("PATH", &with_fake_path(&fake))]);
+    let (_, out, _) =
+        run_within(&d, &["run", "--host", "claude", "--fast", "--exit-on-wait"], &[("PATH", &with_fake_path(&fake))], Duration::from_secs(20));
     assert!(out.contains("runner: stop (user_gate)"), "{out}");
 
     // default: keeps polling; unblock from "another terminal" after 2.5s and it finishes the todo
@@ -199,6 +226,41 @@ echo '{"session_id":"w","is_error":false,"result":"ok"}'"#,
     let st = state::load(&state::state_path(&d)).unwrap();
     assert_eq!(st.goal.status, "done");
     assert!(journal(&d).iter().any(|e| e["event"] == "sleep" && e["reason"].as_str().unwrap().starts_with("user_gate")));
+}
+
+/// A-5：`--exit-on-wait` 走真实路径必须生效。
+///
+/// 原来它挂在 `decide()` 返回 `interval=None` 上，而那要 `noop_streak >= max_noop_streak`；
+/// runner 在 `!should_run` 那一支只写 journal 的 sleep，**一条 noop tick 都不记**，
+/// 所以真 runner 自己永远到不了那个状态——这个标志在等人路径上是死代码。上面那条测试
+/// 原本靠先敲 3 次 `zloop next` 把 streak 顶满，把死代码测成了绿的（实景抓到过一个带着
+/// `--exit-on-wait` 的 runner 在 user_gate 上转了 20 小时 24 分、写了 1849 条 journal）。
+///
+/// 这一条一次手工搓状态都没有：init/plan 之后，是**宿主自己**在第一轮 `--block` 把 todo
+/// 交回给人，runner 下一轮撞上 user_gate。
+#[test]
+fn exit_on_wait_stops_the_first_time_the_runner_itself_hits_a_human_gate() {
+    let fake = fake_host(
+        r#"id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+zloop done "$id" --note "要人拍板" --approach "fake host round" --block "用哪个库？" >/dev/null 2>&1
+echo '{"session_id":"a5","is_error":false,"result":"blocked"}'"#,
+    );
+    let d = project(&["[P0] gated"]);
+    let (code, out, _) = run_within(
+        &d,
+        &["run", "--host", "claude", "--fast", "--exit-on-wait", "--no-replan"],
+        &[("PATH", &with_fake_path(&fake))],
+        Duration::from_secs(25),
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("runner: round 1"), "第一轮得真的跑过，等人这件事才是 runner 自己走到的：{out}");
+    assert!(out.contains("runner: stop (user_gate)"), "带着 --exit-on-wait 撞上 user_gate 就该退出：{out}");
+    assert!(!out.contains("polling until a human unblocks"), "退出模式下一次都不该睡：{out}");
+    let st = state::load(&state::state_path(&d)).unwrap();
+    // 这条断言是上面那段历史的钉子：等人那一支一条 noop 都不记，所以 `--exit-on-wait`
+    // 不能挂在 noop_streak 上——挂上去就等于关掉。
+    assert!(!st.ticks.iter().any(|t| t.outcome == "noop"), "runner 在等人时不记 noop tick：{:?}", st.ticks);
+    assert!(!journal(&d).iter().any(|e| e["event"] == "sleep"), "退出模式下不该有 sleep：{:?}", journal(&d));
 }
 
 #[test]
@@ -365,11 +427,9 @@ fn wait_and_stop_trigger_notifications() {
     st.policy.notify_cmd = Some(format!("cat >> {}", d.join("notify.log").display()));
     state::save(&p, &mut st).unwrap();
     run(&d, &["done", "t1", "--block", "which db?"], &[]);
-    for _ in 0..3 {
-        run(&d, &["next"], &[]);
-    }
     // exit-on-wait: one "stop" notification
-    let (_, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--exit-on-wait"], &[("PATH", &with_fake_path(&fake))]);
+    let (_, out, _) =
+        run_within(&d, &["run", "--host", "claude", "--fast", "--exit-on-wait"], &[("PATH", &with_fake_path(&fake))], Duration::from_secs(20));
     assert!(out.contains("runner: stop (user_gate)"), "{out}");
     let log = fs::read_to_string(d.join("notify.log")).unwrap();
     assert!(log.contains("\"event\":\"stop\"") && log.contains("user_gate"), "{log}");

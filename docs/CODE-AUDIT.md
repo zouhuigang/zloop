@@ -265,7 +265,7 @@ $ zloop context | grep -c '粘进来的一条'
 （`doctor_test.rs::unreadable_notes_reported_because_context_drops_the_rules_silently`
 先复现那个静默，再钉住 doctor 必须报）。
 
-### A-5（高）`--exit-on-wait` 在「等人」时从不生效——它只在一种 runner 自己走不到的状态下才管用
+### A-5（高）`--exit-on-wait` 在「等人」时从不生效——它只在一种 runner 自己走不到的状态下才管用 — 已修
 
 `RunArgs` 说得很清楚：`Exit when waiting on a human instead of polling at the slowest interval`。
 实测反过来。
@@ -323,9 +323,40 @@ $ tail -1 /…/.tmpqSYkIf/.zloop/runner/journal.jsonl
 一个带着 `--exit-on-wait` 的 runner，在 `user_gate` 上**转了 20 小时 24 分**，
 写了 1849 条 journal（200 KB），并且一路占着 keep-awake（`zloop awake` 里那个 holder）。
 
-修法：`wait_plan` 把 `exit_on_wait` 提到 `interval_min` 前面判——
+修法（**已修**，`runner.rs::wait_plan`）：把 `exit_on_wait` 提到 `interval_min` 前面判——
 「等人」这件事该不该退出，由标志决定，不该由 noop 计数决定。
-顺带把那个测试的三次 `zloop next` 去掉，让它钉真实路径。
+顺带统一了继续等下去时的说法：只要是 `user_gate` / `blocked`，不管 `decide` 给的是哪一档
+间隔（还是压根没给），journal 和终端上都写 `… (polling until a human unblocks)`；
+原来这句话也锁在同一个到不了的 `None` 分支里，真 runner 上从来没打印过。
+
+```rust
+let human = d.reason == "user_gate" || d.reason == "blocked";
+if human {
+    if opts.exit_on_wait { return None; }              // ← 标志说了算
+    let m = d.interval_min.unwrap_or_else(|| slowest_interval(state));
+    return Some((m, format!("{} (polling until a human unblocks)", d.reason)));
+}
+d.interval_min.map(|m| (m, d.reason.clone()))
+```
+
+复现与回归：
+
+- `scripts/repro-a5-exit-on-wait.sh`——全程真实路径（init → plan → runner 起跑 → **宿主自己**
+  `zloop done --block` 把 todo 交回给人 → 下一轮 runner 撞 user_gate）。
+  修之前：15 秒后进程还在，journal 2 条 sleep、账本 **0 条 noop**，退出码 1；修之后退出码 0。
+- `tests/runner_test.rs::exit_on_wait_stops_the_first_time_the_runner_itself_hits_a_human_gate`
+  钉同一条路径，并顺带钉住「等人那一支一条 noop 都不记」这个前提（`--exit-on-wait`
+  因此不能挂在 `noop_streak` 上）。
+- 原来那两条测试（`waiting_on_a_human_polls_instead_of_exiting`、
+  `wait_and_stop_trigger_notifications`）里的三次 `zloop next` 已删掉。
+- 新增测试辅助 `run_within(…, limit)`：这一类「本该退出的 runner 不退出」的回归，用原来的
+  `run()` 撤掉修复后是**挂住**而不是变红——挂住的测试没人会当成失败。撤掉修复实测：
+  三条全部 FAILED（各 20–25 秒被上限掐掉），不是挂死。
+
+**还没修的隔壁问题**：`max_noop_streak` 这条 policy 在 runner 路径上依旧近乎空转——
+`noop` tick 只有 `zloop next` 在 `should_run=false` 时才记（`cli.rs:763`），runner 自己
+一条都不记。修完 A-5 之后「等人」不再依赖它，但 `throttled` 那一支的 `exhausted` 分支
+对 runner 仍然永远为假。要么让 runner 也记，要么在 README 里说清它只对 `zloop next` 生效。
 
 ### A-6（高）超时管不住留下后台进程的那一轮，而且这段时间里 SIGTERM 叫不动 runner — 已修
 
