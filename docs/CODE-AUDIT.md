@@ -1305,6 +1305,8 @@ A/B 实测（`scripts/repro-a17-interactive-write-masks-a-failed-round.sh`），
 **没顺手改的**（同一张表上、同型、留给后面）：`edit` tick 也会打断 `fail_streak`
 （README 明说「任意 `edit` 都会重置计数」，而且 `edit` 至少意味着计划真的动了，先留着）；
 `feedback` 对 `progress_streak` 的无条件清零是第 5 项上一模一样的形状，没在本轮动。
+→ 这两条就是第 11 节的 **A-20 / A-21**，都已复现并修掉（「`edit` 意味着计划真的动了」
+只在改的**正是当事那条 todo** 时成立——改别的 todo 时计划动的不是这条活）。
 
 ### A-18（中）`zloop compact` 把花费一起归档走，`max_total_usd` 静默复位
 
@@ -1378,8 +1380,11 @@ runner 读的所有累计量（第 4 / 5 / 7 / 8 项）都是从 `ticks` 现算�
 
 ### 10.3 检查过、确认不是问题的
 
-- **`edit` / `feedback` 打断 fail / noop / progress 三条 streak**：有意设计，`tick.rs:14`
-  写明了理由——「人开口说话正是『停下来等人』该等到的东西」。第 4 / 5 项就该被它打断。
+- ~~**`edit` / `feedback` 打断 fail / noop / progress 三条 streak**：有意设计，`tick.rs:14`
+  写明了理由——「人开口说话正是『停下来等人』该等到的东西」。第 4 / 5 项就该被它打断。~~
+  **这条判断是错的**，见第 11 节（A-20 / A-21）：代码里的注释说的是「停下来等人之后人开口」，
+  代码做的是「人任何时候开口」，两者只在循环**已经停了**的时候等价。本轮把这条从
+  「不是问题」挪回发现清单——`noop` 那条仍然成立（它不是停机闸，且 A-16 之后 runner 不读它）。
 - **`reflect` / `replan` tick 对 streak 透明**：有意，`tick.rs:22` 写明「插一轮反思不代表
   失败被解决了」。
 - **`goal new` / `switch` / `rm` 换掉整个 `state.json`**：`goals::ensure_idle` 已经挡住了
@@ -1389,3 +1394,119 @@ runner 读的所有累计量（第 4 / 5 / 7 / 8 项）都是从 `ticks` 现算�
   它是对的，但**只对了 noop 一种**——A-17 说的就是剩下三种。
 - **`held_by_other` 挡不住 runner**：有意且必须（`tick.rs:108` 有整段说明和四种在场组合的表），
   runner 自家的 `claude -p` 子进程要靠这条放行才进得来。
+
+---
+
+## 11. 第九轮：A-17 那张表上同型的最后两条
+
+A-17 修完时留了一句「没顺手改的」：`edit` 也会打断 `fail_streak`、`feedback` 对
+`progress_streak` 的无条件清零是一模一样的形状。这一轮把这两条一起复现、一起修掉。
+两条都是同一句话的两个变体——**「人在另一个终端敲一条交互式命令，就把无头 runner 的停机闸拆了」**。
+
+复现脚本：`scripts/repro-a20-a21-another-terminal-disarms-the-brakes.sh`（四个场景，
+两对 A/B 对照；退出码 1 = 至少一条复现）。
+
+### A-20（高）人顺手整理 backlog（`zloop edit` 改**别的** todo），连续失败停机这道闸就被拆了 — 已修
+
+`tick::fails_in_a_row` 的最后一个分支是 `_ => n = 0`，`edit` 落在里面：
+
+```rust
+match t.outcome.as_str() {
+    "fail" => n += 1,
+    o if transparent(o) => {}
+    FEEDBACK => { if forgive_at > 0 && n >= forgive_at { n = 0; } }   // A-17 收窄过的
+    _ => n = 0,   // ← done / progress / block / edit 一视同仁
+}
+```
+
+`edit` tick 全仓只有一个写入点：`cli.rs:1033`，也就是**人敲的 `zloop edit`**
+（`replan --apply` 改计划记的是 `replan`，对 streak 透明，不走这条）。而 README 明说
+「任意 `edit` 都会重置计数」——这句在**循环已经停下**的场景里是对的，问题是代码没区分
+停没停，也没区分改的是**哪一条** todo：无头 runner 正在 t1 上一轮一轮失败，人在另一个
+终端把 t7 的文字改一改、把 t9 推后，t1 的失败计数就归零了。
+
+A/B 实测（同一个每轮必败的假宿主、同一份 `max_fail_streak=2`，唯一差别是有没有人改 **t2**）：
+
+```
+=== A-20 场景 A：宿主每轮都失败，没人插话 ===
+  起了 2 轮 ｜ 账本里 fail：2 条
+  runner: runner: stop (fail_streak)
+
+=== A-20 场景 B：一模一样，只是人每隔 1 秒 zloop edit t2（另一条 todo！）===
+  起了 7 轮 ｜ 账本里 fail：6 条
+  runner: 还在跑（20 秒都没停）
+```
+
+**修法**：`fails_in_a_row` 顺带记住这串连续失败落在哪几条 todo 上（`failing`），
+`edit` 分支单独拿出来，两种情况才清零：
+
+1. `edit` 改的**就是**正在失败的那条 todo —— 活真的换了，之前的失败不再算数
+   （README 教的出口 `zloop edit t3 --text …` 一字不差照旧成立）；
+2. 循环**已经停在 `fail_streak` 上** —— 人是在回应一个停着的循环，和 `feedback` 同一条规矩。
+
+没记 todo id 的 `edit`（手改过的账本）按「改的是别的活」处理：宁可多认不可漏认。
+
+### A-21（高）人插一句 `zloop feedback`，同一条 todo 原地踏步那道闸就永远数不到上限 — 已修
+
+`tick::progress_streak` 从尾往前扫，`_ => break`，于是任何一条 `feedback` 都把它断掉。
+这就是 A-17 后半截在 `fail_streak` 上修掉的形状，换了一条 streak 而已，
+而 `zloop feedback` 正是文档教人「跟正在跑的循环说话」的那条路。
+
+A/B 实测（假宿主每轮都 `zloop done t1 --outcome progress`，`max_progress_streak=2`）：
+
+```
+=== A-21 场景 C：宿主每轮都 progress 原地踏步，没人插话 ===
+  起了 2 轮 ｜ 账本里 progress：2 条
+  runner: runner: stop (progress_streak)
+
+=== A-21 场景 D：一模一样，只是人每隔 1 秒 zloop feedback t1 ===
+  起了 9 轮 ｜ 账本里 progress：8 条
+  runner: 还在跑（20 秒都没停）
+```
+
+后果比 A-17 更"安静"：宿主每轮都在**正常写回**，日志、花费、轮次全都对，
+只是同一条 todo 永远完不了——`max_progress_streak` 这道「这条活太大了，停下来让人拆」的闸
+从此不响，长跑会一直在一条 todo 上烧到撞 `max_runs` 或 `max_total_usd`。
+
+**修法**：`progress_streak(ticks, todo_id)` 加一个 `forgive_at` 参数
+（调用处传 `policy.max_progress_streak`），实现也从"从尾往前扫"改成"从头往后走"——
+和 `fails_in_a_row` 一样，要判一条 `feedback` 写下时循环停没停，得知道它**前面**攒了几轮。
+规矩和 A-20 完全一致：
+
+| 这一轮的 tick | 还在跑 | 已经停在 `progress_streak` 上 |
+|---|---|---|
+| `feedback`（任意 todo） | 不清零 | 清零 |
+| `edit` 改的**就是**这条 todo | 清零（README 的出口「拆小它」） | 清零 |
+| `edit` 改的是别的 todo | 不清零 | 清零 |
+| `noop` / `reflect` / `replan` | 透明 | 透明 |
+| 其它（`done` / `fail` / `block` / 别的 todo 的 `progress`） | 断掉 | 断掉 |
+
+修完同一个脚本四个场景全停：
+
+```
+[OK]   A-20：改别人的 todo 不再拆掉连续失败这道闸（A=stop (fail_streak) / B=stop (fail_streak)）
+[OK]   A-21：反馈不再拆掉原地踏步这道闸（C=stop (progress_streak) / D=stop (progress_streak)）
+```
+
+场景 D 修完是 4 轮才停（A/C 是 2 轮）：人每秒插一句，总有几句正好落在"计数刚够到上限、
+`decide` 还没来得及看"的缝里，按第 1 条规矩那是合法的清零。**闸关得上就行**——
+它本来的语义就是「停下来等人，人回应了就再试一次」。
+
+回归测试两条，撤掉对应那处修复就变红：
+
+| 测试 | 盯住的是 | 撤掉之后 |
+|---|---|---|
+| `tick_test::an_edit_on_another_todo_does_not_disarm_the_fail_brake` | A-20：改 t2 不清 t1 的失败计数；停下之后改 t2 才清；改 t1 照旧随时清 | `第 1 次改别的 todo 把失败计数清零了 left: 0 right: 1` |
+| `tick_test::feedback_mid_run_does_not_disarm_the_progress_brake` | A-21：反馈插在两轮 progress 中间不清零；停下之后清；`edit` 改这条 todo 随时清、改别的不清 | `第 1 句反馈把原地踏步计数清零了 left: 0 right: 1` |
+
+### 11.1 这一类到此为止
+
+「交互式命令写进账本的东西串进 runner 的判断」这一类（A-16 → A-17 → A-18 / A-19 → A-20 / A-21）
+到这一轮为止，`tick.rs` 里三条 streak 的规矩统一成了一句话：
+
+> **人写的 tick（`feedback` / `edit`）只有在循环已经停在这条 streak 上时才清零；
+> 还在跑的时候，只有「`edit` 改的正是当事的那条 todo」算数。**
+
+`noop_streak` 不在此列：它不是停机闸，A-16 之后 runner 也不读它。
+剩下没修的是 A-18（`compact` 抹掉花费）和 A-19（`pick_session` 认错会话），
+两条都在第 10 节，跟 streak 无关。

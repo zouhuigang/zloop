@@ -18,10 +18,16 @@ pub const COUNTED: [&str; 3] = ["done", "progress", "fail"];
 /// runner 用长度差判结算时，人插一句 `zloop feedback` 就能让一轮失败的宿主被记成
 /// 「写回了」——fail 不记、`fail_streak` 恒为 0、连续失败停机整个失效（A-17）。
 pub const WRITEBACK: [&str; 4] = ["done", "progress", "fail", "block"];
-/// `feedback` 是唯一一个**人写的** outcome（`zloop feedback`）：agent 自述之外的另一路信号。
-/// 它不计入 `COUNTED`（不吃配额、不推进轮次），但会打断 noop / progress 两条 streak——
-/// 人开口说话正是"停下来等人"该等到的东西，等到了就该让循环继续。
-/// fail 那条要多一个条件（**循环已经停在 fail_streak 上**），理由见 `fail_streak`。
+/// `feedback` 和 `edit` 是两个**人写的** outcome（`zloop feedback` / `zloop edit`）：
+/// agent 自述之外的另一路信号。它们不计入 `COUNTED`（不吃配额、不推进轮次），
+/// 会打断 `noop_streak`——人开口说话正是"停下来等人"该等到的东西。
+///
+/// 但 fail / progress 那两条**停机**闸不一样：无条件清零等于给无头 runner 拆保险丝，
+/// 人一句话插进两次 fail（或两轮 progress）中间，计数就永远数不到上限。规矩收窄成两条，
+/// 理由见 `fail_streak` / `progress_streak`：
+/// 1. **循环已经停在那条 streak 上**时，人的任何一句话都算回应，清零；
+/// 2. 还在跑的时候，只有「`edit` 改的就是正在失败 / 正在原地踏步的那条 todo」才清零——
+///    活真的换了，之前的结果不再算数。改 backlog 里**别的** todo 不算（A-20）。
 pub const OUTCOMES: [&str; 9] =
     ["done", "progress", "fail", "block", "noop", "edit", "feedback", "reflect", "replan"];
 pub const FEEDBACK: &str = "feedback";
@@ -99,24 +105,53 @@ impl Decision {
 /// 「人开口说话就该让循环继续」这条语义没丢，只是收窄到它本来说的那个场景：**停下来
 /// 等人之后**人才开的口（README 里那段实测——连着 3 次 fail → `WAIT (fail_streak)` →
 /// `zloop feedback …` → `RUN`——一字不差地照旧成立）。
+///
+/// `edit` 是同一形状的第二条（A-20）：`edit` tick 全仓只有 `zloop edit` 记（cli.rs），
+/// 也就是**人在另一个终端**敲的。改的是**正在失败的那条活**才算"活变了、之前的失败
+/// 不再算数"；顺手把 backlog 里另一条 todo 改个名、推后一条 P2，跟这串失败没有任何
+/// 关系，不该把闸拆了。改别的活只有在**循环已经停在 `fail_streak` 上**时才清零——
+/// 那时候人是在回应一个停着的循环，和 `feedback` 同一条规矩。
 pub fn fail_streak(state: &State) -> usize {
     fails_in_a_row(&state.ticks, state.policy.max_fail_streak)
 }
 
 fn fails_in_a_row(ticks: &[Tick], forgive_at: usize) -> usize {
-    // 从头往后走，不是从尾往前：要判「这条 feedback 写下的当时循环停没停」，
+    // 从头往后走，不是从尾往前：要判「这条 feedback / edit 写下的当时循环停没停」，
     // 得知道它**前面**攒了几条 fail。
     let mut n = 0;
+    // 这串连续失败落在哪几条 todo 上——`edit` 改的是不是其中之一，决定它算不算数
+    let mut failing: Vec<&str> = Vec::new();
     for t in ticks {
+        // 循环这会儿是不是已经停在 fail_streak 上（停了，人的任何一句话都算回应）
+        let stopped = forgive_at > 0 && n >= forgive_at;
         match t.outcome.as_str() {
-            "fail" => n += 1,
-            o if transparent(o) => {}
-            FEEDBACK => {
-                if forgive_at > 0 && n >= forgive_at {
-                    n = 0; // 人回应的是一个已经停在那儿的循环——放它再试
+            "fail" => {
+                n += 1;
+                if let Some(id) = t.todo.as_deref() {
+                    if !failing.contains(&id) {
+                        failing.push(id);
+                    }
                 }
             }
-            _ => n = 0, // done / progress / block / edit：这一轮有别的结果了
+            o if transparent(o) => {}
+            FEEDBACK => {
+                if stopped {
+                    n = 0; // 人回应的是一个已经停在那儿的循环——放它再试
+                    failing.clear();
+                }
+            }
+            "edit" => {
+                // 没记 todo 的 edit（手改过的账本）当成"改的是别的活"：宁可多认不可漏认
+                let touches_failing = t.todo.as_deref().is_some_and(|id| failing.contains(&id));
+                if touches_failing || stopped {
+                    n = 0;
+                    failing.clear();
+                }
+            }
+            _ => {
+                n = 0; // done / progress / block：这一轮有别的结果了
+                failing.clear();
+            }
         }
     }
     n
@@ -127,13 +162,31 @@ pub fn noop_streak(ticks: &[Tick]) -> usize {
 }
 
 /// Trailing consecutive `progress` ticks on `todo_id`; `noop` is transparent, anything else breaks it.
-pub fn progress_streak(ticks: &[Tick], todo_id: &str) -> usize {
+///
+/// `forgive_at` = `policy.max_progress_streak`，和 `fail_streak` 同一条规矩（A-21）：
+/// 人写的两种 tick（`feedback` / 改**别的** todo 的 `edit`）只有在**循环已经停在
+/// `progress_streak` 上**时才清零。还在跑的时候补一句「先别动 x.rs」跟"这条活不再
+/// 原地踏步了"没有关系——无条件清零等于给无头 runner 拆保险丝：反馈一插进两轮
+/// progress 中间，尾部连续数就永远到不了上限，同一条 todo 一轮一轮地推、一轮一轮
+/// 地烧（实测 8 轮 progress 不停，见 `scripts/repro-a20-a21-…`）。
+///
+/// `edit` 改的**就是这条 todo** 是例外，照旧无条件清零：README 给 `progress_streak`
+/// 开的出口就是 `zloop edit t3 --text "更小的一步"`——活真的换了，之前的原地踏步不算数。
+pub fn progress_streak(ticks: &[Tick], todo_id: &str, forgive_at: usize) -> usize {
+    // 和 fails_in_a_row 一样从头往后走：要判一条 feedback 写下时循环停没停
     let mut n = 0;
-    for t in ticks.iter().rev() {
+    for t in ticks {
+        let stopped = forgive_at > 0 && n >= forgive_at;
         match t.outcome.as_str() {
-            o if transparent(o) => continue,
+            o if transparent(o) => {}
             "progress" if t.todo.as_deref() == Some(todo_id) => n += 1,
-            _ => break,
+            "edit" if t.todo.as_deref() == Some(todo_id) => n = 0,
+            FEEDBACK | "edit" => {
+                if stopped {
+                    n = 0;
+                }
+            }
+            _ => n = 0,
         }
     }
     n
@@ -282,7 +335,9 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
         return Decision::stop("budget");
     }
     let candidate = &state.todos[runnable[0]];
-    if policy.max_progress_streak > 0 && progress_streak(ticks, &candidate.id) >= policy.max_progress_streak {
+    if policy.max_progress_streak > 0
+        && progress_streak(ticks, &candidate.id, policy.max_progress_streak) >= policy.max_progress_streak
+    {
         return Decision::stop("progress_streak");
     }
     let counted = window_ticks(state, at);

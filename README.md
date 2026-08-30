@@ -774,7 +774,7 @@ for d in ~/work/*/; do [ -d "$d/.zloop" ] && (cd "$d" && echo "== $(basename "$d
 |---|---|---|
 | `stopped (done)` | 全部 todo 完成 | 同一件事继续做：`zloop plan --add …` 加活会自动回到 active；**换一件事**：`zloop goal new "新目标"`（旧目标原地停放，[6.2](#62-一个项目多个目标)） |
 | `waiting (user_gate)` / runner 日志 `polling until a human unblocks` | 某条 todo 被 `--block` 等你决定；后台 runner **没有退出**，在 30 分钟一次慢速轮询 | `zloop status` 看 `!` 那条下面 `↳` 的问题 → 回答后 `zloop edit t3 --status open`（必要时 `--text` 改写），runner 下次轮询自动续 |
-| `stopped (fail_streak)` | 连续 3 轮失败：宿主超时、没写回、或真的报错 | `zloop log --todo t3` 看原因 → 修环境 / 拆 todo / `zloop edit t3 --text …`（任意 `edit` 都会重置计数）→ `zloop start` |
+| `stopped (fail_streak)` | 连续 3 轮失败：宿主超时、没写回、或真的报错 | `zloop log --todo t3` 看原因 → 修环境 / 拆 todo / `zloop edit t3 --text …`（**停下之后**任意 `edit` 都重置计数；循环还在跑的时候只有改**正在失败的那条** todo 才算，见下）→ `zloop start` |
 | `stopped (progress_streak)` | 同一 todo 连续 8 轮"有进展"却没完成 | 多半 todo 太大：`zloop edit t3 --text "更小的一步"` 或 `zloop done t3 --outcome progress --next "拆出的下一步"` |
 | `stopped (paused)` | 你 `zloop pause` 了 | `zloop resume` |
 | `stopped (budget)` | 累计花费达到 policy `max_total_usd` | 看 `zloop status` 标题行的 `$花费/上限`，确认值得就调大上限再 `start` |
@@ -1421,11 +1421,13 @@ feedback → t1：正则不行，输入会有嵌套括号，换成手写状态�
   每轮协议也明说了"有反馈就先按它调整"。
 - `zloop status` 多一行 `反馈`，你自己也看得见（免得"我说了它没反应"无从判断）。
 - `zloop doc <todo>` 里，反馈紧跟在它回应的那一轮后面，和模型的实现思路并排——事后翻文档能看出方向为什么变。
-- **noop / progress 两条 streak 会被它打断**：循环停下来等人，人开口说话正是它该等到的东西。
+- **`noop` streak 会被它打断**：循环停下来等人，人开口说话正是它该等到的东西。
   实测连续 3 次 `fail` 之后 `next` 是 `WAIT (fail_streak)`，`zloop feedback …` 之后立刻变回 `RUN`。
-- `fail` 那条要多一个条件：**只有循环已经停在 `fail_streak` 上**（失败数够到 `max_fail_streak`），
-  这句反馈才清零。还在跑的时候补一句「先别动 x.rs」不算"失败被解决了"——无条件清零等于给无头
-  runner 拆保险丝：反馈一插进两次 fail 中间，连续失败就永远数不到上限，宿主一轮一轮接着烧（A-17）。
+- `fail` / `progress` 那两条**停机**闸要多一个条件：**只有循环已经停在那条 streak 上**
+  （失败数够到 `max_fail_streak` / 同一条 todo 的 progress 够到 `max_progress_streak`），
+  这句反馈才清零。还在跑的时候补一句「先别动 x.rs」不算"失败被解决了"、也不算"这条活不再
+  原地踏步了"——无条件清零等于给无头 runner 拆保险丝：反馈一插进两次 fail（或两轮 progress）
+  中间，计数就永远数不到上限，宿主一轮一轮接着烧（A-17 / A-21）。
 - 不吃配额、不推进轮次（`feedback` 不在计数的 outcome 里）；不改 todo 状态、不碰在飞状态。要让一条已完成的
   todo 重做，照旧是 `zloop edit <id> --status open`。
 
@@ -1836,7 +1838,9 @@ paused/done  >  unplanned / all_done  >  user_gate / blocked  >  fail_streak  > 
 - 有可执行 todo（`open` 且 `blocked_by` 全部 done）→ `ready`，选 `(priority, 写入顺序)` 最靠前的一条，`interval_min = 3`。
 - 一条 todo 都没有 → `unplanned`（去 `zloop plan`）；有过 todo 但全了结了 → `all_done`（去开新目标）。两者都是 `interval_min = null`，但下一步不一样，所以不共用一个词。
 - 全部 blocked 且有人在等 → `user_gate`；纯依赖未满足 → `blocked`。退避 10 → 30 分钟，交互式连续 3 次 noop 后 `interval_min = null`。
-- 最近连续 3 次 `fail` → `fail_streak`；同一 todo 连续 8 次 `progress` → `progress_streak`；两者都停下等人，`edit` 重置。
+- 最近连续 3 次 `fail` → `fail_streak`；同一 todo 连续 8 次 `progress` → `progress_streak`；两者都停下等人。
+  停下之后人的任何一句话（`feedback` / 任意 `edit`）都重置；**还在跑的时候**只有 `edit` 改的正是那条 todo 才重置——
+  人在另一个终端顺手整理 backlog 不该把这两道闸拆了（A-20 / A-21）。
 - 24 小时窗口内记账满 `max_runs` → `throttled`，给出几分钟后释放。
 
 **`noop` 计数只走交互式这一路。** `noop` tick 只有 `zloop next` 在 `should_run=false` 时会记（`--peek` 不记），runner 在等待那一支只写 journal 的 `sleep`，一条 tick 都不记。所以上面两处「连续 3 次 noop 后 `interval_min = null`」说的都是**人在终端里连敲**：`max_noop_streak` 不参与 runner 的停机判断。runner 那边的规矩是另一套，只有两条——

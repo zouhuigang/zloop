@@ -146,6 +146,35 @@ fn feedback_mid_run_does_not_disarm_the_fail_brake() {
     assert!(tick::decide(&st, now_utc()).should_run, "停下来等人之后，人说话该让循环继续");
 }
 
+/// A-20：`edit` tick 全仓只有 `zloop edit` 记，也就是**人在另一个终端**敲的。
+/// 顺手把 backlog 里另一条 todo 改个名，跟正在失败的这条活没有半点关系，
+/// 不该把连续失败停机那道闸拆了（实测：runner 从 2 轮就停变成 20 秒都不停）。
+#[test]
+fn an_edit_on_another_todo_does_not_disarm_the_fail_brake() {
+    let mut st = fresh(&["[P0] a", "[P1] 另一条不相干的活"]);
+    st.policy.max_fail_streak = 3;
+    for i in 0..2 {
+        outcome(&mut st, "t1", "fail", "boom");
+        tick_at(&mut st, "edit", Some("t2"), None); // 人在整理 backlog，改的是 t2
+        assert_eq!(tick::fail_streak(&st), i + 1, "第 {} 次改别的 todo 把失败计数清零了", i + 1);
+        assert!(tick::decide(&st, now_utc()).should_run, "还没到上限，不该停");
+    }
+    outcome(&mut st, "t1", "fail", "boom");
+    let d = tick::decide(&st, now_utc());
+    assert_eq!((d.should_run, d.reason.as_str()), (false, "fail_streak"), "该停在连续失败上");
+
+    // 停下来等人之后，人改哪条 todo 都算回应（和 feedback 同一条规矩）
+    tick_at(&mut st, "edit", Some("t2"), None);
+    assert!(tick::decide(&st, now_utc()).should_run, "停下之后人动了计划，该放它再试");
+
+    // 改的就是**正在失败的那条活**：活换了，之前的失败不算数——还没停也照旧清零
+    let mut st2 = fresh(&["[P0] a"]);
+    st2.policy.max_fail_streak = 3;
+    outcome(&mut st2, "t1", "fail", "boom");
+    tick_at(&mut st2, "edit", Some("t1"), None);
+    assert_eq!(tick::fail_streak(&st2), 0, "改的是失败的那条活，README 教的出口不能堵上");
+}
+
 #[test]
 fn throttled_by_rolling_window() {
     let mut st = fresh(&["[P0] a"]);
@@ -219,6 +248,40 @@ fn progress_streak_on_one_todo_stops_the_loop() {
         outcome(&mut st, "t1", "progress", "x");
     }
     assert!(tick::decide(&st, now_utc()).should_run);
+}
+
+/// A-21：和 A-17 后半截一模一样的形状，只是换了一条 streak。人在另一个终端补一句
+/// `zloop feedback`，同一条 todo 原地踏步那道闸就永远数不到上限——实测 8 轮 progress
+/// 一直不停（`scripts/repro-a20-a21-another-terminal-disarms-the-brakes.sh` 场景 D）。
+#[test]
+fn feedback_mid_run_does_not_disarm_the_progress_brake() {
+    let mut st = fresh(&["[P0] a", "[P1] 另一条不相干的活"]);
+    st.policy.max_progress_streak = 3;
+    for i in 0..2 {
+        outcome(&mut st, "t1", "progress", "还在推");
+        // 循环还没停在人面前，这句话不是"这条活不再原地踏步了"
+        tick_at(&mut st, "feedback", Some("t1"), None);
+        assert_eq!(tick::progress_streak(&st.ticks, "t1", 3), i + 1, "第 {} 句反馈把原地踏步计数清零了", i + 1);
+        assert!(tick::decide(&st, now_utc()).should_run, "还没到上限，不该停");
+    }
+    outcome(&mut st, "t1", "progress", "还在推");
+    let d = tick::decide(&st, now_utc());
+    assert_eq!((d.should_run, d.reason.as_str()), (false, "progress_streak"), "该停在原地踏步上");
+
+    // 停下来等人之后人再开口：放它再试（和 fail_streak 同一条规矩）
+    tick_at(&mut st, "feedback", Some("t1"), None);
+    assert!(tick::decide(&st, now_utc()).should_run, "停下来等人之后，人说话该让循环继续");
+
+    // README 给这道闸开的出口是「拆小它」：改的就是这条 todo，还没停也清零
+    let mut st2 = fresh(&["[P0] a", "[P1] 另一条不相干的活"]);
+    st2.policy.max_progress_streak = 3;
+    for _ in 0..2 {
+        outcome(&mut st2, "t1", "progress", "还在推");
+    }
+    tick_at(&mut st2, "edit", Some("t2"), None); // 改别的活不算（A-20 同一条规矩）
+    assert_eq!(tick::progress_streak(&st2.ticks, "t1", 3), 2, "改别的 todo 不该清掉这条的原地踏步计数");
+    tick_at(&mut st2, "edit", Some("t1"), None); // 拆小它——活换了
+    assert_eq!(tick::progress_streak(&st2.ticks, "t1", 3), 0, "把这条 todo 改小了，之前的原地踏步不算数");
 }
 
 #[test]
