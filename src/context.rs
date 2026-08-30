@@ -12,6 +12,25 @@ use std::path::Path;
 
 pub const DEFAULT_BUDGET: usize = 4000;
 
+/// 交接包这一轮少掉了「约定」和「经验」两整节时，要往 stderr 喊的那一句；读得出来就是 `None`。
+///
+/// [`build`] 用的是宽容版 `notes::read`：NOTES.md 读不出来就当"什么都没记过"，两节一声不吭地
+/// 消失，命令照样 exit 0。`zloop doctor` 已经会报这一条（`unreadable_notes`），但**doctor 只在
+/// 有人敲的时候才说话**——无头 runner 一轮都不会跑它。护栏丢在哪一轮，就得在哪一轮听得见，
+/// 所以 `zloop context` 自己也得出这个声。
+///
+/// 只出声不改退出码：交接包是每轮的第一条命令，让它 exit 非 0 会把整轮劝退，
+/// 而"没有约定"是能降级干活的——能读到的那部分照旧交付。
+pub fn notes_warning(root: &Path) -> Option<String> {
+    let e = crate::notes::read_error(root)?;
+    let p = crate::notes::path(root);
+    let p = p.strip_prefix(root).unwrap_or(&p).display().to_string();
+    Some(format!(
+        "⚠ {p} 读不出来（{e}）：这一轮的交接包里没有「约定」和「经验」两节，项目护栏这一轮是缺的——\
+         照它干活等于没看过项目约定。`zloop doctor` 里有怎么修"
+    ))
+}
+
 fn resume_hint(host: Option<Host>) -> &'static str {
     match host {
         Some(Host::Codex) => "在 Codex 里：先 `zloop context`，再 `zloop next --json`，做完 `zloop done …`。无头续跑：`zloop run --host codex`。",

@@ -1997,6 +1997,45 @@ fn an_unreadable_notes_file_is_never_silently_overwritten() {
 }
 
 #[test]
+fn context_says_out_loud_that_this_round_has_no_project_rules() {
+    // 护栏丢失只在**丢失的那一轮**有意义。`zloop doctor` 会报 `unreadable_notes`，可 doctor
+    // 只在有人敲的时候才说话——无头 runner 一轮都不会跑它。每轮必跑的是 `zloop context`，
+    // 所以这个声得由它自己来出。
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "别让我在没有约定的情况下开工"], None, &[]);
+    zloop(d, &["remember", "--rule", "done 之前先跑测试"], None, &[]);
+    zloop(d, &["remember", "bench.sh 要在 release 下跑"], None, &[]);
+
+    // 读得出来的时候一个字都不许多说：这行只在真出事时出现，否则就成了每轮都刷的噪音
+    let ok = zloop(d, &["context"], None, &[]);
+    assert!(ok.out.contains("done 之前先跑测试"), "{}", ok.out);
+    assert!(!ok.err.contains("NOTES.md"), "正常情况下不该有告警: {:?}", ok.err);
+
+    // NOTES.md 还在，但混进了非 UTF-8 字节
+    let mut broken = fs::read(d.join(".zloop/NOTES.md")).unwrap();
+    broken.extend_from_slice(&[0xff, 0xfe]);
+    fs::write(d.join(".zloop/NOTES.md"), &broken).unwrap();
+
+    let o = zloop(d, &["context"], None, &[]);
+    // 先把"静默"这件事本身钉住：包里确实少了这两整节
+    assert!(!o.out.contains("done 之前先跑测试"), "约定确实没了（这正是要喊的原因）: {}", o.out);
+    assert!(!o.out.contains("bench.sh"), "经验也没了: {}", o.out);
+    // 这一轮就得听得见，而且要说清是哪个文件、丢了什么
+    assert!(o.err.contains("NOTES.md"), "得点名是哪个文件: {:?}", o.err);
+    assert!(o.err.contains("约定") && o.err.contains("经验"), "得说清少了哪两节: {:?}", o.err);
+    assert_eq!(o.err.lines().filter(|l| l.contains("NOTES.md")).count(), 1, "一行就够: {:?}", o.err);
+    // 交接包本身照旧交付、exit 0：没有约定是能降级干活的，把整轮劝退比少两节更糟
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("## 目标") && o.out.contains("## 下一条"), "能读到的那部分照旧给: {}", o.out);
+
+    // 文件根本不存在 ≠ 读不出来：没记过东西的项目不该每轮被喊一次
+    fs::remove_file(d.join(".zloop/NOTES.md")).unwrap();
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(!o.err.contains("NOTES.md"), "没这个文件是合法状态，别喊: {:?}", o.err);
+}
+
+#[test]
 fn a_successful_round_can_still_say_the_rest_of_the_plan_is_dead() {
     // 最该重规划的那种场景**不偏离**：那一轮顺利完成，可它的结论把剩下几条的前提推翻了。
     // 五个偏离信号（feedback/stalled/fail_streak/rework/blocked）一个都不会响。

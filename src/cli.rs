@@ -555,6 +555,11 @@ pub fn run(cli: Cli) -> Result<i32> {
             let st = state::load(&path)?;
             let host = for_host.as_deref().and_then(Host::parse);
             println!("{}", context::build(&st, &root, budget, host, state::now()));
+            // 包后面喊，不是前面：4000 字的包会把开头那行顶出屏幕，而读的人（和模型）
+            // 停在的是最后一行。护栏丢了这件事得跟"怎么继续"挨着。
+            if let Some(w) = context::notes_warning(&root) {
+                eprintln!("{w}");
+            }
             Ok(0)
         }
         Cmd::Log { todo, last, show } => cmd_log(&root, todo, last, show),
@@ -1352,7 +1357,8 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     // 两列编号是两回事，都要显示：**步骤**是执行顺序（`state.todos` 的数组顺序），
     // **id** 是创建时发的（t1…tN），而 `done --next` 会把后继插在当前这条后面——
     // 于是第 4 步可能是 t8。以前只给没做完的行显示 id，看的人只能猜，正是误解的来源。
-    const MAX_ROWS: usize = 15;
+    /// 清单最多印这么多行（**行**不是条：带验收的那条占两行）。
+    const MAX_LINES: usize = 14;
     if !st.todos.is_empty() {
         let next_id = d.todo.as_ref().map(|t| t.id.clone());
         struct Row {
@@ -1397,8 +1403,10 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             if waiting_on_you {
                 sub.push(("答完敲".into(), format!("zloop edit {} --status open", t.id), 4));
             }
+            // 验收只给**当前这一步**：排队中的那几条即使印出来也一定被截断，
+            // 一行读不全的验收标准不是信息，是噪音——想看全的敲 `zloop next` / `--json`。
             if let Some(a) = &t.acceptance {
-                if t.status != "done" {
+                if paint == 2 {
                     sub.push(("验收：".into(), a.clone(), 0));
                 }
             }
@@ -1413,14 +1421,34 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             });
         }
 
-        // 太长就折叠：没做完的全留着，前面垫 3 步做过的当上下文，其余收成一行。
+        // 折叠。两条原则：
+        //
+        // 1. **预算按印出来的行数算，不按 todo 条数**。有的行带附注（验收、等你回话的原话），
+        //    一条 todo 可能占两三行——按条数记账会算漏，正好 15 条时一条都不折、却印出 22 行。
+        // 2. **做完的没有阅读价值**，只留最近一条当上下文，其余收成一句「前面 N 步都做完了」。
+        //    要翻历史有 `zloop log`，状态栏该回答的是"现在在哪、接下来做什么"。
+        let lines_of = |r: &Row| 1 + r.sub.len();
         let first_open = rows.iter().position(|r| !r.finished).unwrap_or(rows.len());
-        let dropped = if rows.len() <= MAX_ROWS { 0 } else { first_open.saturating_sub(3).min(rows.len().saturating_sub(1)) };
-        let mut shown = &rows[dropped..];
+        // 留 1 条做过的当上下文；剩下的折掉（少于 2 条就不值得折，折了反而多一行）
+        let folded = first_open.saturating_sub(1);
+        let folded = if folded >= 2 { folded } else { 0 };
+        let mut shown = &rows[folded..];
         let mut tail = 0;
-        if shown.len() > MAX_ROWS {
-            tail = shown.len() - MAX_ROWS;
-            shown = &shown[..MAX_ROWS];
+        // 折起来那一行本身也占预算
+        let mut budget = MAX_LINES.saturating_sub(usize::from(folded > 0));
+        let mut keep = 0;
+        for r in shown {
+            let need = lines_of(r);
+            if keep > 0 && budget < need + 1 {
+                // +1 给「后面还有 N 步」那一行留位置
+                break;
+            }
+            budget = budget.saturating_sub(need);
+            keep += 1;
+        }
+        if keep < shown.len() {
+            tail = shown.len() - keep;
+            shown = &shown[..keep];
         }
 
         // 列宽：中文和 emoji 都按 style::width 的两列口径算，否则框线会歪
@@ -1480,8 +1508,17 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         println!("  {}", rule("├", "┼", "┤"));
         // 表格宽度装不下的命令：半条命令比放到表外更糟，所以攒起来印在表下面
         let mut spill: Vec<(String, String)> = Vec::new();
-        if dropped > 0 {
-            note_row(&format!("… 前 {dropped} 步已收起 · zloop log 里有它们的记录"));
+        if folded > 0 {
+            let stat = format!("✅ {folded} 条");
+            println!(
+                "  {bar_ch} {} {bar_ch} {} {bar_ch} {}{} {bar_ch} {}{} {bar_ch}",
+                " ".repeat(w_n),
+                " ".repeat(w_id),
+                c.dim(&style::truncate("前面都做完了 · zloop log 看做了什么", w_tx)),
+                pad(&style::truncate("前面都做完了 · zloop log 看做了什么", w_tx), w_tx),
+                c.dim(&stat),
+                pad(&stat, w_st),
+            );
         }
         for r in shown {
             let body = style::truncate(&r.text, w_tx);
@@ -1558,16 +1595,27 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     };
     rows.push(("阶段", style::truncate(&stage, val)));
     // 后台也常驻：不说"没在跑"，就分不清是没人跑还是你忘了看。
+    // 「合盖不休眠」讲的就是这个 runner 的运行时状态，正常时并进「后台」这一行，
+    // 别为一句不需要动作的话单占一行；只有它反常（要人处理）时才单列出来喊一声。
+    let awake = crate::awake::brief();
+    let awake_inline = awake.as_ref().filter(|(_, warn)| !warn).map(|(s, _)| s.clone());
     rows.push((
         "后台",
         match running {
-            Some(pid) => c.dim(&style::truncate(&format!("runner 在跑（pid {pid}）· 日志 .zloop/runner/console.log"), val)),
+            Some(pid) => {
+                // 日志路径是能直接敲的东西，排在前面：窄屏时先被截掉的该是
+                // 「合盖不休眠」这种只是让人安心、不需要动作的话
+                let mut line = format!("runner 在跑（pid {pid}）· 日志 .zloop/runner/console.log");
+                if let Some(a) = &awake_inline {
+                    line.push_str(&format!(" · {}", a.split(" · ").next().unwrap_or(a)));
+                }
+                c.dim(&style::truncate(&line, val))
+            }
             None => c.dim("没有 runner 在跑"),
         },
     ));
-    if let Some((s, warn)) = crate::awake::brief() {
-        let s = style::truncate(&s, val.saturating_sub(2));
-        rows.push(("睡眠", if warn { c.yellow(&format!("⚠ {s}")) } else { c.dim(&s) }));
+    if let Some((s, true)) = awake.as_ref().map(|(s, w)| (s.clone(), *w)) {
+        rows.push(("睡眠", c.yellow(&format!("⚠ {}", style::truncate(&s, val.saturating_sub(2))))));
     }
     // 人说过的话要在人自己的视图里也能看见，否则"我说了它没反应"无从判断
     let pending = crate::tick::pending_feedback(&st);
