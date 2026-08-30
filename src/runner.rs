@@ -812,6 +812,19 @@ fn slowest_interval(state: &State) -> u32 {
 /// `noop_streak >= max_noop_streak` 时才给 `None`，而 runner 在 `!should_run` 那一支
 /// 只写 journal 的 sleep，一条 noop tick 都不记，所以 `noop_streak` 恒为 0。实测抓到过
 /// 一个带着 `--exit-on-wait` 的 runner 在 user_gate 上转了 20 小时（A-5）。
+///
+/// `throttled` 同理，而且它是最后一处把 noop 计数当停机开关的地方（A-16）。配额窗口
+/// 是**自己会滑过去**的：`decide` 连还差几分钟都算出来了，等下去一定等得到，退出等于
+/// 把长跑掐了。而 `decide` 在 `noop_streak >= max_noop_streak` 时会把这一支的
+/// `interval_min` 翻成 `None`——runner 自己一条 noop 都不记，但 **`zloop next` 记**，
+/// 两边读的是同一本账。于是人在终端里敲三下 `zloop next`（就想看一眼现在什么情况），
+/// 就把「runner 睡到窗口放开再接着跑」变成了「runner 拒绝启动 / 下次醒来直接退出」。
+/// 实测 A/B：不敲 → `sleep until 11:57 (throttled)`；敲三下 → `stop (throttled)`，
+/// 连 `zloop start` 都当场拒绝。所以这里和等人一样：说法由 runner 定，不由计数定。
+///
+/// 修完之后 `max_noop_streak` 对 runner 的调度**再无任何影响**（三条非终态出口
+/// user_gate / blocked / throttled 全部改成必睡），README 里那句「runner 不受此影响」
+/// 才是真的。它只剩一个消费者：交互式 `zloop next` 的退避提示。
 pub fn wait_plan(state: &State, d: &tick::Decision, opts: &Options) -> Option<(u32, String)> {
     let human = d.reason == "user_gate" || d.reason == "blocked";
     if human {
@@ -822,6 +835,11 @@ pub fn wait_plan(state: &State, d: &tick::Decision, opts: &Options) -> Option<(u
         // runner 在做的都是同一件事——替人守着这条 todo，等人回来解开。
         let m = d.interval_min.unwrap_or_else(|| slowest_interval(state));
         return Some((m, format!("{} (polling until a human unblocks)", d.reason)));
+    }
+    if d.reason == "throttled" {
+        // 等的是时间，不是人，所以 `--exit-on-wait` 不管这一支。
+        let m = d.interval_min.unwrap_or_else(|| slowest_interval(state));
+        return Some((m, format!("{} (sleeping until the quota window frees)", d.reason)));
     }
     d.interval_min.map(|m| (m, d.reason.clone()))
 }

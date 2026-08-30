@@ -793,7 +793,7 @@ for d in ~/work/*/; do [ -d "$d/.zloop" ] && (cd "$d" && echo "== $(basename "$d
 | `max_runs` | `480` | 24 小时窗口内最多记账多少轮（done / progress / fail），防空转刹车；`0` 不限 |
 | `window_hours` | `24` | 上面那个窗口的长度 |
 | `max_fail_streak` | `3` | 连续失败几轮停下等人 |
-| `max_noop_streak` | `3` | 交互式 `next` 连续几次"没活"后停止退避（runner 不受此影响） |
+| `max_noop_streak` | `3` | 交互式 `next` 连续几次"没活"后停止退避。**只对 `zloop next` 生效**：`noop` tick 只有它会记，runner 一条都不记，也不拿它当停机开关 |
 | `max_progress_streak` | `8` | 同一 todo 连续几轮 progress 没 done 就停；`0` 关闭 |
 | `stale_after_min` | `120` | `in_progress` 多久没写回算悬挂 |
 | `max_total_usd` | `0`（不限） | 本目标累计花费上限（来自 `claude -p` 返回的 `total_cost_usd`），达到即 `stopped (budget)` |
@@ -1835,6 +1835,12 @@ paused/done  >  unplanned / all_done  >  user_gate / blocked  >  fail_streak  > 
 - 全部 blocked 且有人在等 → `user_gate`；纯依赖未满足 → `blocked`。退避 10 → 30 分钟，交互式连续 3 次 noop 后 `interval_min = null`。
 - 最近连续 3 次 `fail` → `fail_streak`；同一 todo 连续 8 次 `progress` → `progress_streak`；两者都停下等人，`edit` 重置。
 - 24 小时窗口内记账满 `max_runs` → `throttled`，给出几分钟后释放。
+
+**`noop` 计数只走交互式这一路。** `noop` tick 只有 `zloop next` 在 `should_run=false` 时会记（`--peek` 不记），runner 在等待那一支只写 journal 的 `sleep`，一条 tick 都不记。所以上面两处「连续 3 次 noop 后 `interval_min = null`」说的都是**人在终端里连敲**：`max_noop_streak` 不参与 runner 的停机判断。runner 那边的规矩是另一套，只有两条——
+- **等得到的就等**：`user_gate` / `blocked` / `throttled` 是三种非终态，runner 一律睡下去再看（等人那两种可以用 `--exit-on-wait` 改成退出；`throttled` 等的是时间不是人，所以那个标志不管它）。
+- **等不到的才退**：`paused` / `done` / `unplanned` / `all_done` / `all_deferred` / `fail_streak` / `progress_streak` / `budget`，这些不会自己好转，runner 直接停。
+
+两边读的是同一本账，所以这条边界不划清是会串味的：`next` 记下的 `noop` 曾经能把 `throttled` 那一支的 `interval_min` 翻成 `null`，于是**人敲三下 `zloop next` 看一眼，就能让一个本来睡到窗口放开再接着跑的 runner 拒绝启动**（A-16）。
 
 ### `.zloop/` 目录与状态文件
 

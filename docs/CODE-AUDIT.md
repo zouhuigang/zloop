@@ -353,10 +353,8 @@ d.interval_min.map(|m| (m, d.reason.clone()))
   `run()` 撤掉修复后是**挂住**而不是变红——挂住的测试没人会当成失败。撤掉修复实测：
   三条全部 FAILED（各 20–25 秒被上限掐掉），不是挂死。
 
-**还没修的隔壁问题**：`max_noop_streak` 这条 policy 在 runner 路径上依旧近乎空转——
-`noop` tick 只有 `zloop next` 在 `should_run=false` 时才记（`cli.rs:763`），runner 自己
-一条都不记。修完 A-5 之后「等人」不再依赖它，但 `throttled` 那一支的 `exhausted` 分支
-对 runner 仍然永远为假。要么让 runner 也记，要么在 README 里说清它只对 `zloop next` 生效。
+**隔壁问题已查清**：`max_noop_streak` 在 runner 路径上不是「空转」，是**跨进程串味**——
+见 [A-16](#a-16中高noop-计数从交互式命令串进-runner-的停机判断人敲三下-zloop-next-就能让长跑拒绝启动--已修)。
 
 ### A-6（高）超时管不住留下后台进程的那一轮，而且这段时间里 SIGTERM 叫不动 runner — 已修
 
@@ -1088,3 +1086,80 @@ no index.lock ／ git add OK                  ← 仓库没被留下的锁废掉
 **还剩的裸子进程**：`awake.rs` 里的 `pmset` / `sudo` / `caffeinate` / `visudo`（8 处）。
 它们不在每轮的热路径上，`pmset` 和 `visudo` 也不是会挂住的那一类，但「每一个子进程都走
 `run_capture`」这句话目前还不是真的——单开一条记着。
+
+## 9. 第七轮：noop 计数的作用域
+
+### A-16（中高）noop 计数从交互式命令串进 runner 的停机判断：人敲三下 `zloop next`，就能让长跑拒绝启动 — 已修
+
+A-5 收尾时留了个问号：`max_noop_streak` 在 runner 路径上是不是死策略？
+查下来结论比「死」难看——它**不是不生效，而是从错误的进程生效**。
+
+三段事实，逐条都验过：
+
+1. **`noop` tick 只有一个生产者**：`zloop next` 在 `should_run=false` 且非 `--peek` 时记
+   （`cli.rs:763`）。全仓 `tick::record` 的调用点一共 8 处，runner 那 4 处只记
+   `reflect` / `fail` / `replan`，**一条 noop 都不记**（实测跑一轮再空转：账本 0 条 noop）。
+2. **但账本是共用的**：runner 每轮开头 `state::load` → `tick::decide`，读的就是 `zloop next`
+   写进去的那些 tick。`decide` 里 `exhausted = noop_streak >= max_noop_streak`。
+3. **`wait_plan` 把 `None` 一律当「停」**。A-5 已经把 `user_gate` / `blocked` 摘出来了，
+   于是 `exhausted` 只剩最后一个出口：`throttled`（`tick.rs:267`）。
+
+合起来就是：人在终端里敲三下 `zloop next` 想看一眼现在什么情况，
+把一个本该「睡到配额窗口放开再接着跑」的 runner 变成了「拒绝启动」。
+
+同一份状态，唯一的差别是有没有人敲过 `zloop next`
+（`scripts/repro-a16-noop-poke-kills-throttled-runner.sh`，修之前）：
+
+```
+=== 场景 A：没人碰过它 ===
+  runner: 睡着（还活着） ｜ 账本里 runner 记的 noop：0 条
+  journal: {"event":"sleep","until":"2026-08-30T12:08:02+08:00","reason":"throttled"}
+
+=== 场景 B：人敲了 3 下 zloop next ===
+  $ zloop next → WAIT (throttled) remaining 1 · retry in 1440 min   （×3）
+  账本里现在有 3 条 noop（全是 zloop next 记的）
+  runner: 退出了：runner: stop (throttled)
+  $ zloop start → start: 没启动——runner 起来第一轮就会退出（throttled）
+```
+
+**为什么修法是「让 runner 别读」而不是「让 runner 也记」**：
+配额窗口是**自己会滑过去**的，`decide` 连还差几分钟都算出来了（上面那条 `retry in 1440 min`），
+等下去一定等得到。让 runner 也记 noop，等于让每一次撞配额的长跑在第三次退避时自杀——
+方向正好反了。这和 A-5 是同一条原则：**该不该退出由 runner 自己的规矩定，不由计数定。**
+
+修法（`runner.rs::wait_plan`）：
+
+```rust
+if d.reason == "throttled" {
+    // 等的是时间，不是人，所以 `--exit-on-wait` 不管这一支。
+    let m = d.interval_min.unwrap_or_else(|| slowest_interval(state));
+    return Some((m, format!("{} (sleeping until the quota window frees)", d.reason)));
+}
+```
+
+修完之后 runner 的规矩收敛成两条，`max_noop_streak` 对它**再无任何影响**：
+
+| | reason | runner 怎么办 |
+|---|---|---|
+| 等得到的 | `user_gate` / `blocked` | 睡下去再看（`--exit-on-wait` 可改成退出） |
+| | `throttled` | 睡下去再看（等的是时间不是人，那个标志不管它） |
+| 等不到的 | `paused` `done` `unplanned` `all_done` `all_deferred` `fail_streak` `progress_streak` `budget` | 停 |
+
+顺带删掉 `cli.rs::start_refusal` 里的 `"throttled"` 分支：`start` 的拒绝理由全部来自
+`immediate_stop_reason`，而它现在再也不会返回 `throttled`，那条文案已成死代码。
+
+README 里 `max_noop_streak` 那一行原来写的是「（runner 不受此影响）」——**话是对的，代码不是**。
+现在两边对齐了，并在「`next` 怎么决定」下补了一节讲清这条边界。
+
+复现与回归：
+
+- `scripts/repro-a16-noop-poke-kills-throttled-runner.sh`：A/B 两个一模一样的项目，
+  只有 B 被人敲过 3 下 `zloop next`。修之前退出码 1（B 秒退），修之后 0（两边都睡着）。
+- `tests/runner_test.rs::interactive_next_pokes_cannot_kill_a_throttled_runner`：
+  全程真实路径（真跑一轮填满 `max_runs=1` → 敲三下 `next` → `zloop start`）。
+  撤掉修复实测变红：
+  `配额窗口会自己滑过去，start 不该拒绝：start: 没启动——runner 起来第一轮就会退出（throttled）`。
+  测试里先钉住「`next --peek --json` 确实给出 `reason=throttled, interval_min=null`」这个前提，
+  否则 `max_noop_streak` 默认值一改，这条测试就悄悄变成在测空气。
+
+151 测试全过（原 150）。

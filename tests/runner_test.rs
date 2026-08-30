@@ -263,6 +263,68 @@ echo '{"session_id":"a5","is_error":false,"result":"blocked"}'"#,
     assert!(!journal(&d).iter().any(|e| e["event"] == "sleep"), "退出模式下不该有 sleep：{:?}", journal(&d));
 }
 
+/// A-16：`max_noop_streak` 是交互式 `zloop next` 的退避提示，**不是 runner 的停机开关**。
+///
+/// 上一条测试钉住了「runner 自己一条 noop tick 都不记」，但账本是共用的——`zloop next`
+/// 记下的 noop，runner 的 `decide` 照样读得到。`decide` 在 `noop_streak >= max_noop_streak`
+/// 时会把 `throttled` 那一支的 `interval_min` 翻成 `None`，而 `wait_plan` 原来把 `None`
+/// 一律当「停」。于是人在终端里敲三下 `zloop next`（就想看一眼现在什么情况），就把
+/// 「睡到配额窗口放开再接着跑」变成了「runner 拒绝启动」。配额窗口自己会滑过去，
+/// `decide` 连还差几分钟都算出来了，这一支没有任何理由退出。
+#[test]
+fn interactive_next_pokes_cannot_kill_a_throttled_runner() {
+    let fake = fake_host(
+        r#"id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+zloop done "$id" --note ok --approach "fake host round" >/dev/null 2>&1
+echo '{"session_id":"a16","is_error":false,"result":"ok"}'"#,
+    );
+    let d = project(&["[P0] a", "[P1] b"]);
+    // 跑一轮就撞满配额窗口；t2 还开着，所以判断确实会走到 throttled 那一支（而不是 all_done）
+    let p = state::state_path(&d);
+    let mut st = state::load(&p).unwrap();
+    st.policy.max_runs = 1;
+    state::save(&p, &mut st).unwrap();
+
+    let tools = fake_power_tools(true);
+    let path = format!("{}:{}", tools.display(), with_fake_path(&fake));
+    let e = awake_env();
+    let vars = awake_vars(&e, &path);
+
+    let (code, out, err) = run(&d, &["run", "--host", "claude", "--fast", "--no-replan", "--max-rounds", "1"], &vars);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("runner: round 1 written back"), "{out}");
+
+    // 人在终端里敲三下 `zloop next`
+    for _ in 0..3 {
+        let (_, out, _) = run(&d, &["next"], &[]);
+        assert!(out.contains("WAIT (throttled)"), "{out}");
+    }
+    let st = state::load(&p).unwrap();
+    assert_eq!(st.ticks.iter().filter(|t| t.outcome == "noop").count(), 3, "{:?}", st.ticks);
+    // 前提：账本确实把 throttled 那一支的 interval_min 翻成了 null。不先钉住这一条，
+    // 下面的断言在 `max_noop_streak` 改了默认值之后会变成在测空气。
+    let (_, out, _) = run(&d, &["next", "--peek", "--json"], &[]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!((v["reason"].as_str(), v["interval_min"].is_null()), (Some("throttled"), true), "{out}");
+
+    // runner 照常起来，睡到窗口放开为止
+    let (code, out, err) = run(&d, &["start", "--fast", "--timeout-min", "120"], &vars);
+    assert_eq!(code, 0, "配额窗口会自己滑过去，start 不该拒绝：{out}{err}");
+    assert!(out.contains("runner started in the background (pid"), "{out}");
+    let mut slept = false;
+    for _ in 0..60 {
+        if journal(&d).iter().any(|e| e["event"] == "sleep" && e["reason"].as_str().unwrap_or("").starts_with("throttled")) {
+            slept = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    run(&d, &["stop"], &vars);
+    let j = journal(&d);
+    assert!(slept, "起来之后该睡在 throttled 上：{j:?}");
+    assert!(!j.iter().any(|e| e["event"] == "stop" && e["reason"] == "throttled"), "配额满不是终态，不该 stop：{j:?}");
+}
+
 #[test]
 fn max_budget_flag_is_passed_to_claude() {
     let fake = fake_host(

@@ -636,10 +636,8 @@ fn start_refusal(st: &state::State, reason: &str) -> String {
             "能跑的待办一条都没有（都在等人或被挡着），而 --exit-on-wait 让 runner 等不了".to_string(),
             "去掉 --exit-on-wait 就会挂着轮询等你；或者 zloop edit <id> --blocked-by \"\" 解开再 start".to_string(),
         ),
-        "throttled" => (
-            format!("{} 小时窗口里已经跑满 policy.max_runs（{}）轮", p.window_hours, p.max_runs),
-            "等窗口滑过去，或改大 policy.max_runs，再 start".to_string(),
-        ),
+        // `throttled` 不在这里：配额窗口自己会滑过去，runner 睡到它放开就接着跑，
+        // 不算「起来第一轮就会退出」，所以 `start` 照常放行（A-16，见 runner::wait_plan）。
         other => (format!("调度器说 {other}"), "zloop next 看当前判断".to_string()),
     };
     format!("start: 没启动——runner 起来第一轮就会退出（{reason}）。\n原因：{why}。\n下一步：{next}")
