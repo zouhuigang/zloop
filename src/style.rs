@@ -95,9 +95,23 @@ fn ioctl_cols() -> Option<usize> {
     extern "C" {
         fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     }
-    #[cfg(any(target_os = "macos", target_os = "ios", target_vendor = "apple", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
     const TIOCGWINSZ: c_ulong = 0x4008_7468;
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_vendor = "apple", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )))]
     const TIOCGWINSZ: c_ulong = 0x5413;
     let mut ws = Winsize { rows: 0, cols: 0, xpix: 0, ypix: 0 };
     // stdout, then stderr, then stdin: `zloop status | less` still knows how wide the screen is.
@@ -167,9 +181,8 @@ pub enum Align {
 /// 其余列按内容取最大宽。返回逐行的字符串，调用方自己加缩进。
 pub fn table(head: &[&str], rows: &[Vec<String>], align: &[Align], flex: usize, budget: usize, c: &Style) -> Vec<String> {
     let n = head.len();
-    let mut w: Vec<usize> = (0..n)
-        .map(|i| rows.iter().map(|r| width(&r[i])).max().unwrap_or(0).max(width(head[i])))
-        .collect();
+    let mut w: Vec<usize> =
+        (0..n).map(|i| rows.iter().map(|r| width(&r[i])).max().unwrap_or(0).max(width(head[i]))).collect();
     // 框线开销：每列 `│ 内容 ` = 宽度 + 3，末尾再一个 `│`
     let fixed: usize = w.iter().enumerate().filter(|(i, _)| *i != flex).map(|(_, x)| *x).sum();
     let room = budget.saturating_sub(fixed + 3 * n + 1);
@@ -182,7 +195,11 @@ pub fn table(head: &[&str], rows: &[Vec<String>], align: &[Align], flex: usize, 
     let cell = |s: &str, i: usize| {
         let s = truncate(s, w[i]);
         let pad = " ".repeat(w[i].saturating_sub(width(&s)));
-        if align.get(i) == Some(&Align::Right) { format!("{pad}{s}") } else { format!("{s}{pad}") }
+        if align.get(i) == Some(&Align::Right) {
+            format!("{pad}{s}")
+        } else {
+            format!("{s}{pad}")
+        }
     };
     let line = |cells: Vec<String>| format!("{bar} {} {bar}", cells.join(&format!(" {bar} ")));
 

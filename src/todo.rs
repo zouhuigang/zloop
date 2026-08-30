@@ -46,9 +46,7 @@ pub fn parse_line(line: &str, default_priority: u8) -> Option<(u8, String)> {
 }
 
 pub fn parse_plan(text: &str, default_priority: u8) -> Vec<(u8, String)> {
-    text.lines()
-        .filter_map(|l| parse_line(l, default_priority))
-        .collect()
+    text.lines().filter_map(|l| parse_line(l, default_priority)).collect()
 }
 
 fn strip_html_comments(s: &str) -> String {
@@ -134,20 +132,13 @@ pub fn add(state: &mut State, items: &[(u8, String)], replace: bool) -> Vec<Todo
     if replace {
         state.todos.retain(|t| is_terminal(&t.status));
     }
-    let created: Vec<Todo> = items
-        .iter()
-        .map(|(p, text)| new_todo(state, text, *p))
-        .collect();
+    let created: Vec<Todo> = items.iter().map(|(p, text)| new_todo(state, text, *p)).collect();
     state.todos.extend(created.iter().cloned());
     created
 }
 
 pub fn index_of(state: &State, id: &str) -> Result<usize> {
-    state
-        .todos
-        .iter()
-        .position(|t| t.id == id)
-        .ok_or_else(|| anyhow!("unknown todo id {id:?}"))
+    state.todos.iter().position(|t| t.id == id).ok_or_else(|| anyhow!("unknown todo id {id:?}"))
 }
 
 pub fn insert_after(state: &mut State, after_id: &str, text: &str, priority: Option<u8>) -> Result<Todo> {
@@ -162,29 +153,18 @@ pub fn is_executable(todo: &Todo, state: &State) -> bool {
     if todo.status != "open" {
         return false;
     }
-    todo.blocked_by.iter().all(|dep| {
-        dep != USER
-            && state
-                .todos
-                .iter()
-                .any(|t| &t.id == dep && t.status == "done")
-    })
+    todo.blocked_by.iter().all(|dep| dep != USER && state.todos.iter().any(|t| &t.id == dep && t.status == "done"))
 }
 
 /// Indices of non-terminal todos sorted by (priority, write order).
 pub fn open_ordered(state: &State) -> Vec<usize> {
-    let mut idx: Vec<usize> = (0..state.todos.len())
-        .filter(|&i| !is_terminal(&state.todos[i].status))
-        .collect();
+    let mut idx: Vec<usize> = (0..state.todos.len()).filter(|&i| !is_terminal(&state.todos[i].status)).collect();
     idx.sort_by_key(|&i| (state.todos[i].priority, i));
     idx
 }
 
 pub fn executable(state: &State) -> Vec<usize> {
-    open_ordered(state)
-        .into_iter()
-        .filter(|&i| is_executable(&state.todos[i], state))
-        .collect()
+    open_ordered(state).into_iter().filter(|&i| is_executable(&state.todos[i], state)).collect()
 }
 
 pub fn remaining(state: &State) -> usize {

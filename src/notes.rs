@@ -85,10 +85,7 @@ pub fn try_read(root: &Path) -> Result<Notes> {
     match read_raw(root) {
         Ok(Some(raw)) => Ok(parse(&raw)),
         Ok(None) => Ok(Notes::default()),
-        Err(e) => Err(anyhow::anyhow!(
-            "{} 读不出来（{e}）。先把它修好或挪走，别让下一次写入把它盖掉",
-            path(root).display()
-        )),
+        Err(e) => Err(anyhow::anyhow!("{} 读不出来（{e}）。先把它修好或挪走，别让下一次写入把它盖掉", path(root).display())),
     }
 }
 
@@ -252,4 +249,3 @@ pub fn replace(root: &Path, n: &Notes) -> Result<(PathBuf, PathBuf)> {
         Ok((write(root, n)?, backup))
     })
 }
-

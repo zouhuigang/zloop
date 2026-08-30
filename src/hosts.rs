@@ -50,12 +50,7 @@ fn fingerprint(s: &str) -> String {
 /// 抹尾部是必须的：读回来的托管区切到 `USER_MARK` 为止，末尾会多带一个换行，
 /// 而生成时没有——不归一化的话每次 install 都误判成"用户改过"（实测踩过）。
 fn canonical(text: &str, prefix: &str) -> String {
-    text.lines()
-        .filter(|l| !l.trim_start().starts_with(prefix))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end()
-        .to_string()
+    text.lines().filter(|l| !l.trim_start().starts_with(prefix)).collect::<Vec<_>>().join("\n").trim_end().to_string()
 }
 
 /// 一段托管文字的指纹。**写入侧和读取侧必须都走这个函数**，否则算出来的值不可比。
@@ -282,15 +277,17 @@ pub fn install_claude_stop_hook(home: &Path) -> Result<Vec<(PathBuf, bool)>> {
     let settings_path = home.join(".claude").join("settings.json");
     let mut settings: Value = if settings_path.exists() {
         let raw = fs::read_to_string(&settings_path)?;
-        if raw.trim().is_empty() { json!({}) } else { serde_json::from_str(&raw)? }
+        if raw.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&raw)?
+        }
     } else {
         json!({})
     };
     // 类型名要在可变借用之前取，取完的是 &'static str，后面随便用
     let root_kind = json_kind(&settings);
-    let root = settings
-        .as_object_mut()
-        .ok_or_else(|| shape_err(&settings_path, "顶层", "对象 {…}", root_kind))?;
+    let root = settings.as_object_mut().ok_or_else(|| shape_err(&settings_path, "顶层", "对象 {…}", root_kind))?;
     let hooks = root.entry("hooks").or_insert_with(|| json!({}));
     let hooks_kind = json_kind(hooks);
     let stop = hooks
@@ -299,9 +296,7 @@ pub fn install_claude_stop_hook(home: &Path) -> Result<Vec<(PathBuf, bool)>> {
         .entry("Stop")
         .or_insert_with(|| json!([]));
     let stop_kind = json_kind(stop);
-    let arr = stop
-        .as_array_mut()
-        .ok_or_else(|| shape_err(&settings_path, "hooks.Stop", "数组 […]", stop_kind))?;
+    let arr = stop.as_array_mut().ok_or_else(|| shape_err(&settings_path, "hooks.Stop", "数组 […]", stop_kind))?;
     let present = arr.iter().any(|entry| {
         entry
             .get("hooks")

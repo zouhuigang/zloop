@@ -88,20 +88,19 @@ pub fn pair_feedback(state: &State, root: &Path) -> Vec<Pair> {
             continue;
         }
         let todo = fb.todo.clone().unwrap_or_else(|| "-".into());
-        let said = state.ticks[..i]
-            .iter()
-            .rev()
-            .find(|t| t.todo == fb.todo && tick::COUNTED.contains(&t.outcome.as_str()))
-            .map(|t| {
-                let approach = t
-                    .log
-                    .as_deref()
-                    .and_then(|rel| crate::log::read_section(root, rel, "实现思路"))
-                    .map(|a| format!("（实现思路：{}）", crate::style::truncate(&a, 120)))
-                    .unwrap_or_default();
-                let note = if t.note.is_empty() { format!("[{}]", t.outcome) } else { t.note.clone() };
-                format!("{note}{approach}")
-            });
+        let said =
+            state.ticks[..i].iter().rev().find(|t| t.todo == fb.todo && tick::COUNTED.contains(&t.outcome.as_str())).map(
+                |t| {
+                    let approach = t
+                        .log
+                        .as_deref()
+                        .and_then(|rel| crate::log::read_section(root, rel, "实现思路"))
+                        .map(|a| format!("（实现思路：{}）", crate::style::truncate(&a, 120)))
+                        .unwrap_or_default();
+                    let note = if t.note.is_empty() { format!("[{}]", t.outcome) } else { t.note.clone() };
+                    format!("{note}{approach}")
+                },
+            );
         out.push(Pair { todo, at: fb.at.clone(), said, replied: fb.note.clone() });
     }
     out.reverse(); // 最近的在前

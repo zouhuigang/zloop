@@ -92,8 +92,11 @@ fn rel(root: &Path, path: &Path) -> String {
 /// 目录里排好序的 `*.json`；目录不存在就是空的（不是错误）
 fn json_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(rd) = fs::read_dir(dir) else { return Vec::new() };
-    let mut paths: Vec<PathBuf> =
-        rd.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().map(|e| e == "json").unwrap_or(false)).collect();
+    let mut paths: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().map(|e| e == "json").unwrap_or(false))
+        .collect();
     paths.sort();
     paths
 }
@@ -174,7 +177,8 @@ fn check_goal_files(root: &Path, files: &[GoalFile], f: &mut Vec<Finding>) {
         let Some(st) = &gf.state else {
             // 读不出来的目标文件：`goal list` 会显示成"损坏"，但不会告诉你怎么办
             let fix = if gf.current {
-                "看一眼文件（是不是被手改坏了）；要把它挪开就 `zloop goal new \"新目标\"`，它会被停到 .zloop/goals/".to_string()
+                "看一眼文件（是不是被手改坏了）；要把它挪开就 `zloop goal new \"新目标\"`，它会被停到 .zloop/goals/"
+                    .to_string()
             } else {
                 format!("看一眼文件；确认不要了就 `zloop goal rm {}`（只搬到 .zloop/archive/，不删）", gf.stem)
             };
@@ -255,7 +259,11 @@ fn check_ledger(root: &Path, gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
     let who = gf.label();
     let ids: Vec<&str> = st.todos.iter().map(|t| t.id.as_str()).collect();
     // 停放中的目标：`zloop edit` / `zloop done` 只认当前目标，照抄建议动作会改错账本
-    let scope = if gf.current { String::new() } else { format!("（这条 todo 在停放的 {who} 里：先 `zloop goal switch {who}`）") };
+    let scope = if gf.current {
+        String::new()
+    } else {
+        format!("（这条 todo 在停放的 {who} 里：先 `zloop goal switch {who}`）")
+    };
 
     // 1. tick 指着的日志文件不在了：`zloop doc` / `zloop log` 会静默跳过那几轮
     let mut missing: Vec<(&str, &str)> = Vec::new();
@@ -396,10 +404,7 @@ fn check_future_timestamps(gf: &GoalFile, st: &State, now: DateTime<FixedOffset>
     let counted = future.iter().filter(|t| crate::tick::COUNTED.contains(&t.outcome.as_str())).count();
     // 光这几条就把配额窗口填满了 = 循环已经永久限流，不是"迟早咬人"
     let jammed = st.policy.max_runs > 0 && counted >= st.policy.max_runs;
-    let what = format!(
-        "[{who}] {} 条 tick 的时间戳在未来（最远 {farthest}）——机器时钟跳过一次就会这样",
-        future.len()
-    );
+    let what = format!("[{who}] {} 条 tick 的时间戳在未来（最远 {farthest}）——机器时钟跳过一次就会这样", future.len());
     let fix = format!(
         "先校准系统时钟；再把 {}/{} 里那几条 tick 的 at 改成真实时间（或删掉它们）。\
          未来的 tick 永远落在配额窗口里、永远占着一个位子：{}",

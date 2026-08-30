@@ -393,11 +393,7 @@ pub fn entries(root: &Path, state: &State, todo: Option<&str>, last: usize) -> R
     if !dir.is_dir() {
         return Ok((Vec::new(), 0));
     }
-    let mine: HashMap<String, Tick> = state
-        .ticks
-        .iter()
-        .filter_map(|t| t.log.clone().map(|rel| (rel, t.clone())))
-        .collect();
+    let mine: HashMap<String, Tick> = state.ticks.iter().filter_map(|t| t.log.clone().map(|rel| (rel, t.clone()))).collect();
     let theirs = logs_of_other_goals(root);
 
     let mut hidden = 0;
@@ -474,7 +470,8 @@ pub fn write_raw(root: &Path, stem: &str, body: &str) -> Result<String> {
 pub fn append(root: &Path, rel: &str, lines: &str) -> Result<()> {
     use std::io::Write;
     let path = root.join(STATE_DIR).join(rel);
-    let mut f = fs::OpenOptions::new().append(true).open(&path).with_context(|| format!("appending to {}", path.display()))?;
+    let mut f =
+        fs::OpenOptions::new().append(true).open(&path).with_context(|| format!("appending to {}", path.display()))?;
     f.write_all(lines.as_bytes())?;
     if !lines.ends_with('\n') {
         f.write_all(b"\n")?;

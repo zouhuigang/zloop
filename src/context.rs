@@ -46,7 +46,11 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
     let spent_line = if spent > 0.0 || state.policy.max_total_usd > 0.0 {
         format!(
             "\n已花费：${spent:.2}{}",
-            if state.policy.max_total_usd > 0.0 { format!(" / 上限 ${:.2}", state.policy.max_total_usd) } else { String::new() }
+            if state.policy.max_total_usd > 0.0 {
+                format!(" / 上限 ${:.2}", state.policy.max_total_usd)
+            } else {
+                String::new()
+            }
         )
     } else {
         String::new()
@@ -122,7 +126,11 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
             }
         }
         let more = failures.len().saturating_sub(3);
-        let tail = if more > 0 { format!("\n（更早还有 {more} 次，`zloop log` 里有全部记录）") } else { String::new() };
+        let tail = if more > 0 {
+            format!("\n（更早还有 {more} 次，`zloop log` 里有全部记录）")
+        } else {
+            String::new()
+        };
         sections.push(format!("## 本目标失败过的地方（别重复踩）\n{}{}", lines.join("\n"), tail));
     }
 
@@ -150,7 +158,11 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
             let t = &state.todos[i];
             let deps = if t.blocked_by.is_empty() { String::new() } else { format!(" ⏳{}", t.blocked_by.join(",")) };
             let note = if t.status == "blocked" && !t.note.is_empty() { format!(" — {}", t.note) } else { String::new() };
-            let acc = t.acceptance.as_deref().map(|a| format!(" ｜验收：{}", a.chars().take(80).collect::<String>())).unwrap_or_default();
+            let acc = t
+                .acceptance
+                .as_deref()
+                .map(|a| format!(" ｜验收：{}", a.chars().take(80).collect::<String>()))
+                .unwrap_or_default();
             format!("- {} {} [P{}] {}{}{}{}", crate::prompt::checkbox(&t.status), t.id, t.priority, t.text, deps, note, acc)
         })
         .collect();
@@ -212,7 +224,11 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
     let out = render(&kept);
     // 连"## 目标"一节都放不下（预算小到几十个字符）：按整行截，
     // 宁可少一行也不留半行或者一个被切断的"##"标题。
-    if out.chars().count() > budget { head_lines(&out, budget) } else { out }
+    if out.chars().count() > budget {
+        head_lines(&out, budget)
+    } else {
+        out
+    }
 }
 
 /// `text` 里能放进 `budget` 个字符的前若干**完整**行，一行都放不下就返回空串。

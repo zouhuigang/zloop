@@ -368,14 +368,35 @@ impl RunArgs {
 
     /// Re-serialize for the detached child process.
     fn to_argv(&self) -> Vec<String> {
-        let mut v = vec!["--host".into(), self.host.clone(), "--max-rounds".into(), self.max_rounds.to_string(),
-                         "--resume".into(), self.resume.clone(), "--timeout-min".into(), self.timeout_min.to_string()];
-        if self.fast { v.push("--fast".into()); }
-        if self.allow_all { v.push("--allow-all".into()); }
-        if self.exit_on_wait { v.push("--exit-on-wait".into()); }
-        if self.git_commit { v.push("--git-commit".into()); }
-        if self.no_keep_awake { v.push("--no-keep-awake".into()); }
-        if let Some(b) = &self.max_budget_usd { v.push("--max-budget-usd".into()); v.push(b.clone()); }
+        let mut v = vec![
+            "--host".into(),
+            self.host.clone(),
+            "--max-rounds".into(),
+            self.max_rounds.to_string(),
+            "--resume".into(),
+            self.resume.clone(),
+            "--timeout-min".into(),
+            self.timeout_min.to_string(),
+        ];
+        if self.fast {
+            v.push("--fast".into());
+        }
+        if self.allow_all {
+            v.push("--allow-all".into());
+        }
+        if self.exit_on_wait {
+            v.push("--exit-on-wait".into());
+        }
+        if self.git_commit {
+            v.push("--git-commit".into());
+        }
+        if self.no_keep_awake {
+            v.push("--no-keep-awake".into());
+        }
+        if let Some(b) = &self.max_budget_usd {
+            v.push("--max-budget-usd".into());
+            v.push(b.clone());
+        }
         v
     }
 }
@@ -442,7 +463,18 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Plan { add, file, replace, from_loopx } => cmd_plan(&path, add, file, replace, from_loopx),
         Cmd::Next { json, peek } => cmd_next(&root, &path, json, peek),
         Cmd::Done { id, note, outcome, block, next, evidence, approach, decision, pitfall, rethink, no_doc, force } => {
-            cmd_done(&root, &path, &id, note, &outcome, block, next, DoneDoc { evidence, approach, decision, pitfall, rethink, no_doc }, force, style::Style::detect(cli.no_color))
+            cmd_done(
+                &root,
+                &path,
+                &id,
+                note,
+                &outcome,
+                block,
+                next,
+                DoneDoc { evidence, approach, decision, pitfall, rethink, no_doc },
+                force,
+                style::Style::detect(cli.no_color),
+            )
         }
         Cmd::Replan { apply, why } => cmd_replan(&root, &path, apply, why),
         Cmd::Reflect { apply, max_rules } => cmd_reflect(&root, &path, apply, max_rules, style::Style::detect(cli.no_color)),
@@ -496,7 +528,10 @@ pub fn run(cli: Cli) -> Result<i32> {
         Cmd::Notify { text } => {
             let st = state::load(&path)?;
             if !notify::configured(&st) {
-                eprintln!("notify: nothing configured — set policy.notify_url and/or policy.notify_cmd in {}", path.display());
+                eprintln!(
+                    "notify: nothing configured — set policy.notify_url and/or policy.notify_cmd in {}",
+                    path.display()
+                );
                 return Ok(2);
             }
             let text = text.unwrap_or_else(|| "zloop 通知测试：收到这条说明配置正确".into());
@@ -523,7 +558,10 @@ pub fn run(cli: Cli) -> Result<i32> {
                     println!("       保留了你的自定义段落（{} 之后 {} 字节）", hosts::USER_MARK, w.kept_user);
                 }
                 if w.migrated {
-                    println!("       这一份是旧版装的，现在加上了改动保护：写在 {} 之后的内容以后不会被覆盖", hosts::USER_MARK);
+                    println!(
+                        "       这一份是旧版装的，现在加上了改动保护：写在 {} 之后的内容以后不会被覆盖",
+                        hosts::USER_MARK
+                    );
                 }
             }
             if sudoers {
@@ -542,7 +580,8 @@ pub fn run(cli: Cli) -> Result<i32> {
                     match r.changed {
                         Some(true) => "set to 1".to_string(),
                         Some(false) => "restored to 0".to_string(),
-                        None if !r.sudo && r.before == Some(true) && r.holders == 0 => "unchanged (no passwordless sudo — run `sudo pmset -a disablesleep 0` by hand)".to_string(),
+                        None if !r.sudo && r.before == Some(true) && r.holders == 0 =>
+                            "unchanged (no passwordless sudo — run `sudo pmset -a disablesleep 0` by hand)".to_string(),
                         None => "unchanged".to_string(),
                     }
                 );
@@ -567,11 +606,13 @@ pub fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Log { todo, last, show } => cmd_log(&root, todo, last, show),
         Cmd::Doctor { json } => cmd_doctor(&root, json, style::Style::detect(cli.no_color)),
-        Cmd::Goal { cmd } => cmd_goal(&root, cmd.unwrap_or(GoalCmd::List { json: false }), style::Style::detect(cli.no_color)),
+        Cmd::Goal { cmd } => {
+            cmd_goal(&root, cmd.unwrap_or(GoalCmd::List { json: false }), style::Style::detect(cli.no_color))
+        }
         Cmd::Run(args) => runner::run(&root, args.options()),
         Cmd::Start(args) => {
             let st = state::load(&path)?; // fail early with the usual "no zloop state" message
-            // 起来就秒退比不起来更糟：控制台只留一句 reason，`start` 却报告「started」。
+                                          // 起来就秒退比不起来更糟：控制台只留一句 reason，`start` 却报告「started」。
             if let Some(reason) = runner::immediate_stop_reason(&st, &args.options(), state::now()) {
                 eprintln!("{}", start_refusal(&st, &reason));
                 return Ok(1);
@@ -687,7 +728,13 @@ fn cmd_init(dir: &Option<PathBuf>, goal: &str, force: bool) -> Result<i32> {
     Ok(0)
 }
 
-fn cmd_plan(path: &Path, add: Vec<String>, file: Option<PathBuf>, replace: bool, from_loopx: Option<PathBuf>) -> Result<i32> {
+fn cmd_plan(
+    path: &Path,
+    add: Vec<String>,
+    file: Option<PathBuf>,
+    replace: bool,
+    from_loopx: Option<PathBuf>,
+) -> Result<i32> {
     let items = if let Some(p) = from_loopx {
         todo::parse_loopx_state(&std::fs::read_to_string(&p)?)
     } else {
@@ -890,11 +937,10 @@ fn cmd_done(
     let evidence = doc.evidence.clone();
     let note = note.unwrap_or_default();
     let result = state::transaction(path, |st| {
-        let (mut tick_rec, idx) =
-            match tick::apply_done(st, id, outcome, &note, block.as_deref(), next.as_deref(), &who) {
-                Ok(v) => v,
-                Err(e) => return Ok(Err(e)),
-            };
+        let (mut tick_rec, idx) = match tick::apply_done(st, id, outcome, &note, block.as_deref(), next.as_deref(), &who) {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
         let todo_snapshot = st.todos[idx].clone();
         let rel = log::write(root, st, &tick_rec, &todo_snapshot, &doc)?;
         // Only a finished todo owes a technical document; progress / fail / block rounds are exempt,
@@ -978,7 +1024,10 @@ fn cmd_feedback(path: &Path, id: &str, text: &str) -> Result<i32> {
         }
     };
     println!("feedback → {id}：{}", style::truncate(text, 60));
-    println!("下一轮的 `zloop context` 会带上{}", if pending > 1 { format!("（共 {pending} 条待处理）") } else { String::new() });
+    println!(
+        "下一轮的 `zloop context` 会带上{}",
+        if pending > 1 { format!("（共 {pending} 条待处理）") } else { String::new() }
+    );
     if todo::is_terminal(&status) {
         println!("（{id} 已经是 {status}；要让它重做：`zloop edit {id} --status open`）");
     }
@@ -1015,10 +1064,8 @@ fn cmd_edit(
         }
         if let Some(raw) = &blocked_by {
             let deps: Vec<String> = raw.split(',').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect();
-            let unknown: Vec<&String> = deps
-                .iter()
-                .filter(|d| d.as_str() != todo::USER && !st.todos.iter().any(|t| &t.id == *d))
-                .collect();
+            let unknown: Vec<&String> =
+                deps.iter().filter(|d| d.as_str() != todo::USER && !st.todos.iter().any(|t| &t.id == *d)).collect();
             if !unknown.is_empty() {
                 return Ok(Err(anyhow::anyhow!(
                     "unknown blocked_by ids: {}",
@@ -1126,7 +1173,15 @@ fn cmd_doctor(root: &Path, json: bool, c: style::Style) -> Result<i32> {
         return Ok(if report.errors > 0 { 1 } else { 0 });
     }
     println!();
-    println!("  {}", c.dim(&format!("体检 {} · 目标 {} 个 · 归档 {} 份", root.join(state::STATE_DIR).display(), report.goals, report.archived)));
+    println!(
+        "  {}",
+        c.dim(&format!(
+            "体检 {} · 目标 {} 个 · 归档 {} 份",
+            root.join(state::STATE_DIR).display(),
+            report.goals,
+            report.archived
+        ))
+    );
     if report.ok() {
         println!("  {}", c.green("没发现问题"));
         println!();
@@ -1144,7 +1199,12 @@ fn cmd_doctor(root: &Path, json: bool, c: style::Style) -> Result<i32> {
     println!();
     println!(
         "  {}",
-        c.dim(&format!("{} 个问题：{} 个要修、{} 个留意（doctor 只读，一个字都没改）", report.findings.len(), report.errors, report.warnings))
+        c.dim(&format!(
+            "{} 个问题：{} 个要修、{} 个留意（doctor 只读，一个字都没改）",
+            report.findings.len(),
+            report.errors,
+            report.warnings
+        ))
     );
     println!();
     Ok(if report.errors > 0 { 1 } else { 0 })
@@ -1259,15 +1319,12 @@ fn cmd_goal(root: &Path, cmd: GoalCmd, c: style::Style) -> Result<i32> {
             // 能不能归档要在问之前定：等人敲完 y 再说"其实不能"是最难受的顺序
             crate::goals::ensure_archivable(&row)?;
             if how.is_fuzzy() && !yes {
+                println!("将要归档 [{}] {} · {} {}/{}", row.id, row.text, goal_status_zh(&row.status), row.done, row.total);
                 println!(
-                    "将要归档 [{}] {} · {} {}/{}",
-                    row.id,
-                    row.text,
-                    goal_status_zh(&row.status),
-                    row.done,
-                    row.total
+                    "（{needle:?} 是按 {} 对上的，不是精确 id；免问：{}）",
+                    how.zh(),
+                    c.bold(&format!("zloop goal rm {} --yes", row.id))
                 );
-                println!("（{needle:?} 是按 {} 对上的，不是精确 id；免问：{}）", how.zh(), c.bold(&format!("zloop goal rm {} --yes", row.id)));
                 if !confirm("确认归档？")? {
                     println!("已取消，一个文件都没动");
                     return Ok(1);
@@ -1330,7 +1387,11 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     let pct = (finished * 100).checked_div(planned).unwrap_or(0);
     let spent = tick::spent_total(&st);
     let money = if spent > 0.0 {
-        let cap = if st.policy.max_total_usd > 0.0 { format!("（上限 ${:.2}）", st.policy.max_total_usd) } else { String::new() };
+        let cap = if st.policy.max_total_usd > 0.0 {
+            format!("（上限 ${:.2}）", st.policy.max_total_usd)
+        } else {
+            String::new()
+        };
         format!(" · 花了 ${spent:.2}{cap}")
     } else {
         String::new()
@@ -1370,7 +1431,7 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             /// 「进展」列：图标 + 状态词
             stat: String,
             finished: bool,
-            paint: u8, // 0 dim, 1 done, 2 active, 3 wait
+            paint: u8,                      // 0 dim, 1 done, 2 active, 3 wait
             sub: Vec<(String, String, u8)>, // (前缀, 内容, paint)
         }
         let mut rows: Vec<Row> = Vec::new();
@@ -1378,9 +1439,10 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             let running_now = st.in_progress.as_ref().map(|ip| ip.todo.as_str()) == Some(t.id.as_str());
             let waiting_on_you = t.blocked_by.iter().any(|b| b == todo::USER);
             // 和 todo::is_executable 同一口径：依赖还没 done 就算被挡着，与 status 是 open 还是 blocked 无关。
-            let pending_dep = t.blocked_by.iter().find(|dep| {
-                dep.as_str() != todo::USER && !st.todos.iter().any(|x| &x.id == *dep && x.status == "done")
-            });
+            let pending_dep = t
+                .blocked_by
+                .iter()
+                .find(|dep| dep.as_str() != todo::USER && !st.todos.iter().any(|x| &x.id == *dep && x.status == "done"));
             let is_next = next_id.as_deref() == Some(t.id.as_str());
             let (icon, word, paint): (&str, String, u8) = if t.status == "done" {
                 ("✅", "完成".into(), 1)
@@ -1456,9 +1518,12 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         let widest = shown
             .iter()
             .map(|r| style::width(&r.text))
-            .chain(shown.iter().flat_map(|r| r.sub.iter()).map(|(p, ct, _)| {
-                style::width(p) + usize::from(!p.ends_with('：')) + style::width(ct)
-            }))
+            .chain(
+                shown
+                    .iter()
+                    .flat_map(|r| r.sub.iter())
+                    .map(|(p, ct, _)| style::width(p) + usize::from(!p.ends_with('：')) + style::width(ct)),
+            )
             .max()
             .unwrap_or(0);
         // 框线开销：4 列各占 `│ 内容 ` = 宽度 + 3，末尾再一个 `│`
@@ -1573,7 +1638,10 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     } else if d.reason == "all_deferred" {
         format!("{deferred} 条待办全被延后了，一条都没完成 · 目标没结束，只是没活可跑")
     } else if st.goal.status == "done" || d.reason == "all_done" {
-        format!("{planned} 条待办全部完成，目标结束{}", if deferred > 0 { format!("（另有 {deferred} 条延后）") } else { String::new() })
+        format!(
+            "{planned} 条待办全部完成，目标结束{}",
+            if deferred > 0 { format!("（另有 {deferred} 条延后）") } else { String::new() }
+        )
     } else if st.goal.status == "paused" {
         "你按了暂停，待办原地保留".into()
     } else if d.should_run {
@@ -1646,7 +1714,10 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
                 acts.push(("看失败", "zloop log".into()));
                 acts.push(("重跑", "zloop start".into()));
             }
-            "progress_streak" => acts.push(("拆小", format!("zloop edit {} --text \"更小的一步\"", d.todo.as_ref().map(|t| t.id.as_str()).unwrap_or("<id>")))),
+            "progress_streak" => acts.push((
+                "拆小",
+                format!("zloop edit {} --text \"更小的一步\"", d.todo.as_ref().map(|t| t.id.as_str()).unwrap_or("<id>")),
+            )),
             "budget" => acts.push(("提额", "改 .zloop/state.json 的 policy.max_total_usd".into())),
             _ => {}
         }
@@ -1691,10 +1762,8 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
 
 fn cmd_sessions(root: &Path, path: &Path, host: Option<String>, json: bool) -> Result<i32> {
     let st = state::load(path)?;
-    let rows: Vec<_> = session::summarize(&st, root)
-        .into_iter()
-        .filter(|r| host.as_deref().map(|h| r.host == h).unwrap_or(true))
-        .collect();
+    let rows: Vec<_> =
+        session::summarize(&st, root).into_iter().filter(|r| host.as_deref().map(|h| r.host == h).unwrap_or(true)).collect();
     if json {
         let v: Vec<serde_json::Value> = rows
             .iter()
@@ -1817,7 +1886,11 @@ fn cmd_reflect(root: &Path, path: &Path, apply: bool, max_rules: usize, c: style
                 Some((n, rest)) if n.chars().all(|ch| ch.is_ascii_digit()) => rest,
                 _ => t,
             };
-            if t.is_empty() { String::new() } else { format!("- {t}") }
+            if t.is_empty() {
+                String::new()
+            } else {
+                format!("- {t}")
+            }
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1892,11 +1965,21 @@ fn cmd_stats(path: &Path, json: bool, c: style::Style) -> Result<i32> {
     if let Some(r) = crate::stats::roughest(&s) {
         rows.push((
             "最费劲",
-            format!("{} 返工 {} 次{}", r.id, r.rework, if r.blocks > 0 { format!("、被挡 {} 次", r.blocks) } else { String::new() }),
+            format!(
+                "{} 返工 {} 次{}",
+                r.id,
+                r.rework,
+                if r.blocks > 0 { format!("、被挡 {} 次", r.blocks) } else { String::new() }
+            ),
         ));
     }
     for (k, v) in &rows {
-        println!("  {}{}{}", c.dim(k), " ".repeat(8usize.saturating_sub(style::width(k))), style::truncate(v, text.saturating_sub(8)));
+        println!(
+            "  {}{}{}",
+            c.dim(k),
+            " ".repeat(8usize.saturating_sub(style::width(k))),
+            style::truncate(v, text.saturating_sub(8))
+        );
     }
 
     let show_cost = s.cost_usd > 0.0;
@@ -1938,15 +2021,17 @@ fn cmd_stats(path: &Path, json: bool, c: style::Style) -> Result<i32> {
             if show_cost {
                 r.push(if t.cost_usd > 0.0 { format!("${:.2}", t.cost_usd) } else { "—".into() });
             }
-            r.push(match (t.status.as_str(), t.first_try) {
-                ("done", true) => "一次过",
-                ("done", false) => "完成",
-                ("deferred", _) => "已延后",
-                ("blocked", _) => "等你回话",
-                _ if t.rounds > 0 => "在做",
-                _ => "没开始",
-            }
-            .to_string());
+            r.push(
+                match (t.status.as_str(), t.first_try) {
+                    ("done", true) => "一次过",
+                    ("done", false) => "完成",
+                    ("deferred", _) => "已延后",
+                    ("blocked", _) => "等你回话",
+                    _ if t.rounds > 0 => "在做",
+                    _ => "没开始",
+                }
+                .to_string(),
+            );
             r
         })
         .collect();
@@ -2036,8 +2121,7 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<
     // 参数先验，再取闸：`--keep-days 99999999999` 以前在这里 panic 退 101（A-8），
     // 而位数再多一点（i64 装不下）被 clap 拦下来给的是一句人话。算不出截止时间和
     // "根本不是个天数"是同一类输入错误，得给同一种交代。
-    let Some(cutoff) = chrono::Duration::try_days(keep_days.max(0)).and_then(|d| state::now().checked_sub_signed(d))
-    else {
+    let Some(cutoff) = chrono::Duration::try_days(keep_days.max(0)).and_then(|d| state::now().checked_sub_signed(d)) else {
         eprintln!("compact: --keep-days {keep_days} 太大了，算不出截止时间；用天数，比如 30");
         return Ok(2);
     };
@@ -2165,7 +2249,7 @@ fn cmd_replan(root: &Path, path: &Path, apply: bool, why: Option<String>) -> Res
 fn cmd_hook_stop(root: &Path, path: &Path) -> Result<i32> {
     let mut buf = String::new();
     let _ = std::io::stdin().read_to_string(&mut buf); // payload is informational only
-    // Under the runner each `claude -p` call is exactly one round; never chain todos there.
+                                                       // Under the runner each `claude -p` call is exactly one round; never chain todos there.
     if std::env::var_os("ZLOOP_RUNNER").is_some() {
         return Ok(0);
     }

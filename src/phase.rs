@@ -94,7 +94,10 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
         let host = ip.host.as_deref().unwrap_or("cli");
         let age_min = parse_iso(&ip.started_at).map(|s| (now - s).num_minutes()).unwrap_or(0);
         let stale = if state.policy.stale_after_min > 0 && age_min >= state.policy.stale_after_min {
-            format!(" ⚠ stale (>{}m, the session that took it may be gone; next `zloop next` re-hands it out)", state.policy.stale_after_min)
+            format!(
+                " ⚠ stale (>{}m, the session that took it may be gone; next `zloop next` re-hands it out)",
+                state.policy.stale_after_min
+            )
         } else {
             String::new()
         };

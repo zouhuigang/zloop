@@ -28,8 +28,7 @@ pub const WRITEBACK: [&str; 4] = ["done", "progress", "fail", "block"];
 /// 1. **循环已经停在那条 streak 上**时，人的任何一句话都算回应，清零；
 /// 2. 还在跑的时候，只有「`edit` 改的就是正在失败 / 正在原地踏步的那条 todo」才清零——
 ///    活真的换了，之前的结果不再算数。改 backlog 里**别的** todo 不算（A-20）。
-pub const OUTCOMES: [&str; 9] =
-    ["done", "progress", "fail", "block", "noop", "edit", "feedback", "reflect", "replan"];
+pub const OUTCOMES: [&str; 9] = ["done", "progress", "fail", "block", "noop", "edit", "feedback", "reflect", "replan"];
 pub const FEEDBACK: &str = "feedback";
 /// 回看的那一轮：不做 todo，只读账本 + 经验 + 反馈，给出整理建议。
 ///
@@ -158,7 +157,12 @@ fn fails_in_a_row(ticks: &[Tick], forgive_at: usize) -> usize {
 }
 
 pub fn noop_streak(ticks: &[Tick]) -> usize {
-    ticks.iter().rev().filter(|t| !transparent(&t.outcome) || t.outcome == "noop").take_while(|t| t.outcome == "noop").count()
+    ticks
+        .iter()
+        .rev()
+        .filter(|t| !transparent(&t.outcome) || t.outcome == "noop")
+        .take_while(|t| t.outcome == "noop")
+        .count()
 }
 
 /// Trailing consecutive `progress` ticks on `todo_id`; `noop` is transparent, anything else breaks it.
@@ -221,19 +225,10 @@ pub fn progress_streak(ticks: &[Tick], todo_id: &str, forgive_at: usize) -> usiz
 /// `next` 撞上别人的派活时给出的决定：不跑，但过一会儿可以再来问——
 /// 派活会因 `stale_after_min` 过期，所以自动续跑的循环能自己恢复，不必等人。
 pub fn hold_decision(state: &State) -> Decision {
-    Decision {
-        should_run: false,
-        reason: "held_by_other".into(),
-        todo: None,
-        interval_min: Some(interval(state, 1)),
-    }
+    Decision { should_run: false, reason: "held_by_other".into(), todo: None, interval_min: Some(interval(state, 1)) }
 }
 
-pub fn held_by_other(
-    state: &State,
-    who: &HostSession,
-    at: DateTime<FixedOffset>,
-) -> Option<crate::state::InProgress> {
+pub fn held_by_other(state: &State, who: &HostSession, at: DateTime<FixedOffset>) -> Option<crate::state::InProgress> {
     let ip = state.in_progress.as_ref()?;
     if ip.via != "next" || state.policy.stale_after_min <= 0 {
         return None;
@@ -245,9 +240,7 @@ pub fn held_by_other(
     if held == mine && ip.host.as_deref() == Some(who.host.as_str()) {
         return None;
     }
-    let stale = parse_iso(&ip.started_at)
-        .map(|s| (at - s).num_minutes() >= state.policy.stale_after_min)
-        .unwrap_or(true);
+    let stale = parse_iso(&ip.started_at).map(|s| (at - s).num_minutes() >= state.policy.stale_after_min).unwrap_or(true);
     (!stale).then(|| ip.clone())
 }
 
@@ -347,9 +340,7 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
 
     let runnable = todo::executable(state);
     if runnable.is_empty() {
-        let waiting_on_user = open
-            .iter()
-            .any(|&i| state.todos[i].blocked_by.iter().any(|d| d == todo::USER));
+        let waiting_on_user = open.iter().any(|&i| state.todos[i].blocked_by.iter().any(|d| d == todo::USER));
         let reason = if waiting_on_user { "user_gate" } else { "blocked" };
         return Decision {
             should_run: false,
@@ -372,11 +363,7 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
     }
     let counted = window_ticks(state, at);
     if policy.max_runs > 0 && counted.len() >= policy.max_runs {
-        let oldest = counted
-            .iter()
-            .filter_map(|t| parse_iso(&t.at).ok())
-            .min()
-            .unwrap_or(at);
+        let oldest = counted.iter().filter_map(|t| parse_iso(&t.at).ok()).min().unwrap_or(at);
         let span = window_span(policy);
         // `oldest` 是账本里读来的时间戳、`span` 是人手改的 policy 算出来的：两个都不可信，
         // 加起来越界就按「等满一个窗口」处理（下面还会再钳一次）。
@@ -406,13 +393,7 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
 
 // --- writes ---------------------------------------------------------------
 
-pub fn record(
-    state: &mut State,
-    outcome: &str,
-    todo_id: Option<&str>,
-    note: &str,
-    who: &HostSession,
-) -> Result<Tick> {
+pub fn record(state: &mut State, outcome: &str, todo_id: Option<&str>, note: &str, who: &HostSession) -> Result<Tick> {
     if !OUTCOMES.contains(&outcome) {
         bail!("invalid outcome {outcome:?}");
     }

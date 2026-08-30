@@ -339,11 +339,7 @@ pub fn find_root(start: Option<&Path>) -> PathBuf {
 fn parked_count(state_file: &Path) -> usize {
     let Some(dir) = state_file.parent().map(|p| p.join(crate::goals::GOALS_DIR)) else { return 0 };
     fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
-                .count()
-        })
+        .map(|rd| rd.flatten().filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false)).count())
         .unwrap_or(0)
 }
 
@@ -382,37 +378,21 @@ pub fn load(path: &Path) -> Result<State> {
             ))
             .into());
         }
-        return Err(StateError(format!(
-            "no zloop state at {} (run `zloop init \"<goal>\"` first)",
-            path.display()
-        ))
-        .into());
+        return Err(StateError(format!("no zloop state at {} (run `zloop init \"<goal>\"` first)", path.display())).into());
     }
     let raw = fs::read_to_string(path)?;
-    let value: Value = serde_json::from_str(&raw)
-        .map_err(|e| StateError(format!("corrupt state file {}: {e}", path.display())))?;
+    let value: Value =
+        serde_json::from_str(&raw).map_err(|e| StateError(format!("corrupt state file {}: {e}", path.display())))?;
     let version = value.get("version").and_then(Value::as_u64);
     if version != Some(VERSION) {
-        return Err(StateError(format!(
-            "unsupported state version in {} (expected {VERSION})",
-            path.display()
-        ))
-        .into());
+        return Err(StateError(format!("unsupported state version in {} (expected {VERSION})", path.display())).into());
     }
-    let missing: Vec<&str> = ["goal", "policy", "todos", "ticks", "next_id"]
-        .into_iter()
-        .filter(|k| value.get(k).is_none())
-        .collect();
+    let missing: Vec<&str> =
+        ["goal", "policy", "todos", "ticks", "next_id"].into_iter().filter(|k| value.get(k).is_none()).collect();
     if !missing.is_empty() {
-        return Err(StateError(format!(
-            "state file {} is missing keys: {}",
-            path.display(),
-            missing.join(", ")
-        ))
-        .into());
+        return Err(StateError(format!("state file {} is missing keys: {}", path.display(), missing.join(", "))).into());
     }
-    serde_json::from_value(value)
-        .map_err(|e| StateError(format!("invalid state file {}: {e}", path.display())).into())
+    serde_json::from_value(value).map_err(|e| StateError(format!("invalid state file {}: {e}", path.display())).into())
 }
 
 /// Atomic write: temp file + fsync + rename.
@@ -421,10 +401,7 @@ pub fn save(path: &Path, state: &mut State) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
-    ));
+    let tmp = path.with_file_name(format!("{}.tmp", path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()));
     {
         let mut fh = fs::File::create(&tmp)?;
         let mut body = serde_json::to_string_pretty(state)?;
@@ -437,10 +414,7 @@ pub fn save(path: &Path, state: &mut State) -> Result<()> {
 }
 
 pub fn lock_path(path: &Path) -> PathBuf {
-    path.with_file_name(format!(
-        "{}.lock",
-        path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
-    ))
+    path.with_file_name(format!("{}.lock", path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()))
 }
 
 /// 写命令等锁的上限。只读命令（`status` / `context` / `log` / `doctor` …）走 `load`，**根本不上锁**：
@@ -462,10 +436,7 @@ pub struct LockHolder {
 
 pub fn holder_path(path: &Path) -> PathBuf {
     let lock = lock_path(path);
-    lock.with_file_name(format!(
-        "{}.holder",
-        lock.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
-    ))
+    lock.with_file_name(format!("{}.holder", lock.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()))
 }
 
 /// 本进程正在做的事，进持有者记录用。`cli::run` 每次开头按子命令设一次，runner 每轮再细化成轮号。
@@ -560,12 +531,7 @@ pub fn locked<T>(path: &Path, timeout: Duration, f: impl FnOnce() -> Result<T>) 
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
+    let file = OpenOptions::new().create(true).read(true).write(true).truncate(false).open(&lock_path)?;
     let mut lock = fd_lock::RwLock::new(file);
     let deadline = Instant::now() + timeout;
     let guard = loop {

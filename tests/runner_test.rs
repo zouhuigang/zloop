@@ -50,7 +50,11 @@ fn run(d: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
         cmd.env(k, v);
     }
     let o = cmd.output().unwrap();
-    (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+    (
+        o.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&o.stdout).into_owned(),
+        String::from_utf8_lossy(&o.stderr).into_owned(),
+    )
 }
 
 /// 和 `run` 一样，但带上限：到点还没退出就 SIGKILL 再 panic（带上它最后说了什么）。
@@ -78,7 +82,11 @@ fn run_within(d: &Path, args: &[&str], env: &[(&str, &str)], limit: Duration) ->
     }
     let o = ch.wait_with_output().unwrap();
     let (out, err) = (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned());
-    assert!(!overran, "`zloop {}` 过了 {limit:?} 还没自己退出\n--- stdout ---\n{out}\n--- stderr ---\n{err}", args.join(" "));
+    assert!(
+        !overran,
+        "`zloop {}` 过了 {limit:?} 还没自己退出\n--- stdout ---\n{out}\n--- stderr ---\n{err}",
+        args.join(" ")
+    );
     (o.status.code().unwrap_or(-1), out, err)
 }
 
@@ -117,7 +125,11 @@ fn journal(d: &Path) -> Vec<serde_json::Value> {
 fn hung_host_is_killed_and_recorded_as_fail() {
     let fake = fake_host("sleep 30; echo '{\"session_id\":\"slow\",\"is_error\":false,\"result\":\"late\"}'");
     let d = project(&["[P0] hang"]);
-    let (code, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--timeout-min", "1", "--max-rounds", "1"], &[("PATH", &with_fake_path(&fake))]);
+    let (code, out, _) = run(
+        &d,
+        &["run", "--host", "claude", "--fast", "--timeout-min", "1", "--max-rounds", "1"],
+        &[("PATH", &with_fake_path(&fake))],
+    );
     assert_eq!(code, 0);
     assert!(out.contains("TIMED OUT (recorded fail)"), "{out}");
     let st = state::load(&state::state_path(&d)).unwrap();
@@ -175,7 +187,11 @@ echo "{\"session_id\":\"sess-$id\",\"is_error\":false,\"result\":\"ok\"}""#,
     let d = project(&["[P0] a", "[P0] b"]);
     let mark = tempfile::tempdir().unwrap().keep();
     // --no-replan：这条测的是会话谱系，别让信号触发的重估轮次混进 argv.log
-    let (code, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--no-replan"], &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())]);
+    let (code, out, _) = run(
+        &d,
+        &["run", "--host", "claude", "--fast", "--no-replan"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())],
+    );
     assert_eq!(code, 0, "{out}");
     let argv = fs::read_to_string(mark.join("argv.log")).unwrap();
     let calls: Vec<&str> = argv.lines().collect();
@@ -185,7 +201,11 @@ echo "{\"session_id\":\"sess-$id\",\"is_error\":false,\"result\":\"ok\"}""#,
     // --resume all: keeps one session across todos
     let d2 = project(&["[P0] a", "[P0] b"]);
     let mark2 = tempfile::tempdir().unwrap().keep();
-    run(&d2, &["run", "--host", "claude", "--fast", "--resume", "all", "--no-replan"], &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark2.to_str().unwrap())]);
+    run(
+        &d2,
+        &["run", "--host", "claude", "--fast", "--resume", "all", "--no-replan"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark2.to_str().unwrap())],
+    );
     let argv2 = fs::read_to_string(mark2.join("argv.log")).unwrap();
     let calls2: Vec<&str> = argv2.lines().collect();
     assert_eq!(calls2[2], "resume=sess-t1", "with --resume all, t2 continues t1's session: {argv2}");
@@ -193,7 +213,11 @@ echo "{\"session_id\":\"sess-$id\",\"is_error\":false,\"result\":\"ok\"}""#,
     // --resume none: never resumes
     let d3 = project(&["[P0] a"]);
     let mark3 = tempfile::tempdir().unwrap().keep();
-    run(&d3, &["run", "--host", "claude", "--fast", "--resume", "none"], &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark3.to_str().unwrap())]);
+    run(
+        &d3,
+        &["run", "--host", "claude", "--fast", "--resume", "none"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark3.to_str().unwrap())],
+    );
     let argv3 = fs::read_to_string(mark3.join("argv.log")).unwrap();
     assert!(argv3.lines().all(|l| l == "resume=none"), "{argv3}");
 }
@@ -217,8 +241,7 @@ echo "{\"session_id\":\"sess-$id\",\"is_error\":false,\"result\":\"ok\"}""#,
         let mark = tempfile::tempdir().unwrap().keep();
         let mut args = vec!["run", "--host", "claude", "--fast", "--no-replan"];
         args.extend_from_slice(extra);
-        let (code, out, _) =
-            run(&d, &args, &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())]);
+        let (code, out, _) = run(&d, &args, &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())]);
         assert_eq!(code, 0, "{out}");
         let argv = fs::read_to_string(mark.join("argv.log")).unwrap();
         let calls: Vec<&str> = argv.lines().collect();
@@ -241,8 +264,12 @@ echo '{"session_id":"w","is_error":false,"result":"ok"}'"#,
     let d = project(&["[P0] gated"]);
     run(&d, &["done", "t1", "--block", "waiting for a decision"], &[]);
     // --exit-on-wait: old behaviour, exits at once
-    let (_, out, _) =
-        run_within(&d, &["run", "--host", "claude", "--fast", "--exit-on-wait"], &[("PATH", &with_fake_path(&fake))], Duration::from_secs(20));
+    let (_, out, _) = run_within(
+        &d,
+        &["run", "--host", "claude", "--fast", "--exit-on-wait"],
+        &[("PATH", &with_fake_path(&fake))],
+        Duration::from_secs(20),
+    );
     assert!(out.contains("runner: stop (user_gate)"), "{out}");
 
     // default: keeps polling; unblock from "another terminal" after 2.5s and it finishes the todo
@@ -421,7 +448,8 @@ zloop feedback "$id" "顺便说一句：下次先跑 lint" >/dev/null 2>&1
 echo '{"session_id":"c2","is_error":false,"result":"ok","total_cost_usd":0.4321,"num_turns":9,"duration_ms":8100}'"#,
     );
     let d = project(&["[P0] a"]);
-    let (code, out, err) = run(&d, &["run", "--host", "claude", "--fast", "--no-replan"], &[("PATH", &with_fake_path(&fake))]);
+    let (code, out, err) =
+        run(&d, &["run", "--host", "claude", "--fast", "--no-replan"], &[("PATH", &with_fake_path(&fake))]);
     assert_eq!(code, 0, "{out}{err}");
     let st = state::load(&state::state_path(&d)).unwrap();
     let kinds: Vec<&str> = st.ticks.iter().map(|t| t.outcome.as_str()).collect();
@@ -448,7 +476,11 @@ echo '{"session_id":"b","is_error":false,"result":"ok"}'"#,
     );
     let d = project(&["[P0] a"]);
     let mark = tempfile::tempdir().unwrap().keep();
-    run(&d, &["run", "--host", "claude", "--fast", "--max-budget-usd", "0.50"], &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())]);
+    run(
+        &d,
+        &["run", "--host", "claude", "--fast", "--max-budget-usd", "0.50"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())],
+    );
     let argv = fs::read_to_string(mark.join("argv.log")).unwrap();
     assert!(argv.contains("--max-budget-usd 0.50"), "{argv}");
     assert!(argv.contains("--allowedTools Bash(zloop:*),Read,Edit,Write,MultiEdit,Glob,Grep"), "{argv}");
@@ -506,7 +538,9 @@ echo '{"session_id":"bg","is_error":false,"result":"ok"}'"#,
     // wait (up to 15 s) for at least one round to land, then stop
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     while std::time::Instant::now() < deadline {
-        if state::load(&state::state_path(&d)).unwrap().ticks.iter().any(|t| t.outcome == "done") { break; }
+        if state::load(&state::state_path(&d)).unwrap().ticks.iter().any(|t| t.outcome == "done") {
+            break;
+        }
         thread::sleep(Duration::from_millis(250));
     }
     let (code, out, _) = run(&d, &["stop"], &[]);
@@ -580,7 +614,11 @@ echo '{"session_id":"c","is_error":false,"result":"ok","total_cost_usd":0.1234,"
     );
     let d = project(&["[P0] a"]);
     let mark = tempfile::tempdir().unwrap().keep();
-    let (code, out, _) = run(&d, &["run", "--host", "claude", "--fast"], &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())]);
+    let (code, out, _) = run(
+        &d,
+        &["run", "--host", "claude", "--fast"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())],
+    );
     assert_eq!(code, 0, "{out}");
     let st = state::load(&state::state_path(&d)).unwrap();
     let t = &st.ticks[0];
@@ -590,7 +628,9 @@ echo '{"session_id":"c","is_error":false,"result":"ok","total_cost_usd":0.1234,"
     assert!(out.contains("$0.12"), "{out}");
     let st = zloop::state::load(&zloop::state::state_path(&d)).unwrap();
     let (logs, _) = zloop::log::entries(&d, &st, None, 5).unwrap();
-    assert!(fs::read_to_string(&logs[0].0).unwrap().contains("- cost: $0.1234   turns: 7   duration: 4s   (runner settlement)"));
+    assert!(fs::read_to_string(&logs[0].0)
+        .unwrap()
+        .contains("- cost: $0.1234   turns: 7   duration: 4s   (runner settlement)"));
 }
 
 #[test]
@@ -603,8 +643,12 @@ fn wait_and_stop_trigger_notifications() {
     state::save(&p, &mut st).unwrap();
     run(&d, &["done", "t1", "--block", "which db?"], &[]);
     // exit-on-wait: one "stop" notification
-    let (_, out, _) =
-        run_within(&d, &["run", "--host", "claude", "--fast", "--exit-on-wait"], &[("PATH", &with_fake_path(&fake))], Duration::from_secs(20));
+    let (_, out, _) = run_within(
+        &d,
+        &["run", "--host", "claude", "--fast", "--exit-on-wait"],
+        &[("PATH", &with_fake_path(&fake))],
+        Duration::from_secs(20),
+    );
     assert!(out.contains("runner: stop (user_gate)"), "{out}");
     let log = fs::read_to_string(d.join("notify.log")).unwrap();
     assert!(log.contains("\"event\":\"stop\"") && log.contains("user_gate"), "{log}");
@@ -642,7 +686,8 @@ echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
     fs::write(d.join(".gitignore"), ".zloop/\n").unwrap();
     git(&["add", "-A"]);
     git(&["commit", "-q", "-m", "init"]);
-    let (code, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--git-commit"], &[("PATH", &with_fake_path(&fake))]);
+    let (code, out, _) =
+        run(&d, &["run", "--host", "claude", "--fast", "--git-commit"], &[("PATH", &with_fake_path(&fake))]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(out.matches("runner: git checkpoint").count(), 2, "{out}");
     let log = String::from_utf8_lossy(&git(&["log", "--oneline"]).stdout).to_string();
@@ -680,7 +725,8 @@ echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
     fs::write(d.join("staged.txt"), "someone else staged this\n").unwrap();
     git(&["add", "staged.txt"]);
 
-    let (code, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--git-commit"], &[("PATH", &with_fake_path(&fake))]);
+    let (code, out, _) =
+        run(&d, &["run", "--host", "claude", "--fast", "--git-commit"], &[("PATH", &with_fake_path(&fake))]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(out.matches("runner: git checkpoint").count(), 2, "{out}");
 
@@ -754,7 +800,8 @@ echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
         }
         false
     });
-    let (code, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--git-commit"], &[("PATH", &with_fake_path(&fake))]);
+    let (code, out, _) =
+        run(&d, &["run", "--host", "claude", "--fast", "--git-commit"], &[("PATH", &with_fake_path(&fake))]);
     assert!(neighbour.join().unwrap(), "邻居没等到 runner 入睡，这个用例没测到东西");
     assert_eq!(code, 0, "{out}");
     assert_eq!(out.matches("runner: git checkpoint").count(), 2, "{out}");
@@ -858,7 +905,11 @@ fn git_repo(d: &Path) -> impl Fn(&[&str]) -> std::process::Output + '_ {
 fn hook_that_hangs_once(path: &Path, tail: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mark = path.with_extension("fired");
-    fs::write(path, format!("#!/bin/sh\n[ -e '{}' ] || {{ : > '{}'; sleep 30; }}\n{tail}\n", mark.display(), mark.display())).unwrap();
+    fs::write(
+        path,
+        format!("#!/bin/sh\n[ -e '{}' ] || {{ : > '{}'; sleep 30; }}\n{tail}\n", mark.display(), mark.display()),
+    )
+    .unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
@@ -894,7 +945,11 @@ echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
     // `settled` 保持 false ⇒ 基线没重拍 ⇒ 第一轮的产物没被划给别人，跟着第二轮一起进历史
     let head = String::from_utf8_lossy(&git(&["show", "--name-only", "--format=", "HEAD"]).stdout).to_string();
     assert!(head.contains("t1.txt") && head.contains("t2.txt"), "两轮的产物一个都不能丢：{head}");
-    assert_eq!(String::from_utf8_lossy(&git(&["log", "--oneline"]).stdout).lines().count(), 2, "只该有 init + 一次 checkpoint");
+    assert_eq!(
+        String::from_utf8_lossy(&git(&["log", "--oneline"]).stdout).lines().count(),
+        2,
+        "只该有 init + 一次 checkpoint"
+    );
 }
 
 /// A-14 回归：开工前那次 `git status` 卡在 `core.fsmonitor` 上（网络文件系统 stall 同一格）。
@@ -1095,10 +1150,20 @@ echo '{"session_id":"p","is_error":false,"result":"ok"}'"#,
     st.policy.preflight_cmd = Some("echo broken env >&2; exit 1".into());
     state::save(&p, &mut st).unwrap();
     let mark = tempfile::tempdir().unwrap().keep();
-    let (_, out, _) = run(&d, &["run", "--host", "claude", "--fast"], &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())]);
+    let (_, out, _) = run(
+        &d,
+        &["run", "--host", "claude", "--fast"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark.to_str().unwrap())],
+    );
     assert!(out.contains("runner: stop (fail_streak)"), "{out}");
     let st = state::load(&p).unwrap();
-    assert_eq!(st.ticks.iter().filter(|t| t.outcome == "fail" && t.note.contains("preflight failed") && t.note.contains("broken env")).count(), 3);
+    assert_eq!(
+        st.ticks
+            .iter()
+            .filter(|t| t.outcome == "fail" && t.note.contains("preflight failed") && t.note.contains("broken env"))
+            .count(),
+        3
+    );
     assert!(!mark.join("preflight_seen").exists(), "host must not run when preflight fails");
     assert!(journal(&d).iter().any(|e| e["event"] == "preflight_failed"));
     // passing preflight → its summary reaches the host prompt
@@ -1108,7 +1173,11 @@ echo '{"session_id":"p","is_error":false,"result":"ok"}'"#,
     st.policy.preflight_cmd = Some("echo env ok".into());
     state::save(&p2, &mut st).unwrap();
     let mark2 = tempfile::tempdir().unwrap().keep();
-    let (_, out, _) = run(&d2, &["run", "--host", "claude", "--fast"], &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark2.to_str().unwrap())]);
+    let (_, out, _) = run(
+        &d2,
+        &["run", "--host", "claude", "--fast"],
+        &[("PATH", &with_fake_path(&fake)), ("TMPDIR_MARK", mark2.to_str().unwrap())],
+    );
     assert!(out.contains("runner: stop (done)"), "{out}");
     assert!(mark2.join("preflight_seen").exists(), "prompt should carry the preflight summary");
 }
@@ -1230,7 +1299,9 @@ fn watchdog_restores_default_after_kill_9_and_holders_are_reference_counted() {
     let (code, out, err) = run(&b, &["start", "--fast", "--timeout-min", "120"], &vars);
     assert_eq!(code, 0, "{out}{err}");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline && fs::read_dir(e.home.join(".zloop/awake")).map(|r| r.count()).unwrap_or(0) < 2 {
+    while std::time::Instant::now() < deadline
+        && fs::read_dir(e.home.join(".zloop/awake")).map(|r| r.count()).unwrap_or(0) < 2
+    {
         thread::sleep(Duration::from_millis(200));
     }
     assert_eq!(pm_state(&e), "1");
@@ -1491,7 +1562,8 @@ esac"#,
     assert!(st.todos[0].blocked_by.contains(&"user".to_string()), "t1 全程挂在人身上");
     // 挂起那一轮响一次；后面几轮等的还是同一个人，不该再烧模型轮次
     assert_eq!(
-        replans, 1,
+        replans,
+        1,
         "同一批人一直在被等，只该重估一次（实到 {replans} 次 / {work} 轮活）: {:?}",
         st.ticks.iter().map(|t| &t.outcome).collect::<Vec<_>>()
     );
@@ -1503,8 +1575,13 @@ esac"#,
 fn auto_replan_swaps_the_route_mid_run_and_keeps_going() {
     // 用户要的那一幕，端到端：5 条 todo，做到第 2 条发现整条路线的前提没了，
     // 重估那一轮**真的把清单换掉**，然后接着把新清单跑完。
-    let d = project(&["[P0] 量最慢三处 :: 有数", "[P0] 加缓存 :: 快 500ms", "[P0] 复测 :: 基准过",
-                      "[P1] 补基准 :: bench 跑得出", "[P1] 写文档 :: README 有一节"]);
+    let d = project(&[
+        "[P0] 量最慢三处 :: 有数",
+        "[P0] 加缓存 :: 快 500ms",
+        "[P0] 复测 :: 基准过",
+        "[P1] 补基准 :: bench 跑得出",
+        "[P1] 写文档 :: README 有一节",
+    ]);
     let mark = tempfile::tempdir().unwrap().keep();
     // 干活轮次：第 2 条写回时说「后续走不通」；重估轮次：真的调 replan --apply
     let fake = fake_host(
@@ -1538,8 +1615,12 @@ esac"#,
 
     let st = state::load(&state::state_path(&d)).unwrap();
     // 做过的两条原样留着，被换掉的三条不在了，新路线跑完了
-    assert_eq!(st.todos.iter().filter(|t| t.id == "t1" || t.id == "t2").filter(|t| t.status == "done").count(), 2,
-               "做过的原样留着: {:?}", st.todos);
+    assert_eq!(
+        st.todos.iter().filter(|t| t.id == "t1" || t.id == "t2").filter(|t| t.status == "done").count(),
+        2,
+        "做过的原样留着: {:?}",
+        st.todos
+    );
     assert!(!st.todos.iter().any(|t| t.id == "t3"), "被换掉的不该还在: {:?}", st.todos);
     assert!(st.todos.iter().any(|t| t.text.contains("零拷贝")), "新路线排上了: {:?}", st.todos);
     assert!(st.todos.iter().all(|t| matches!(t.status.as_str(), "done" | "deferred")), "新清单也跑完了: {:?}", st.todos);
@@ -1548,8 +1629,10 @@ esac"#,
     // journal 里留得下"计划在第几轮被改成几条"
     let applied: Vec<_> = journal(&d).into_iter().filter(|e| e["event"] == "replan_applied").collect();
     assert_eq!(applied.len(), 1, "改了一次: {applied:?}");
-    assert!(applied[0]["open_after"].as_u64().unwrap() > applied[0]["open_before"].as_u64().unwrap(),
-            "3 条换成 4 条: {applied:?}");
+    assert!(
+        applied[0]["open_after"].as_u64().unwrap() > applied[0]["open_before"].as_u64().unwrap(),
+        "3 条换成 4 条: {applied:?}"
+    );
 
     // 提示词里要给出落地的命令和护栏，否则模型不知道怎么落地
     let prompt = fs::read_to_string(mark.join("replan-prompt")).unwrap();
@@ -1589,7 +1672,11 @@ esac"#,
 
     let j = journal(&d);
     let applied = j.iter().filter(|e| e["event"] == "replan_applied").count();
-    assert!(applied <= zloop::runner::MAX_AUTO_REPLANS as usize, "最多改 {} 次就该停，实际 {applied} 次", zloop::runner::MAX_AUTO_REPLANS);
+    assert!(
+        applied <= zloop::runner::MAX_AUTO_REPLANS as usize,
+        "最多改 {} 次就该停，实际 {applied} 次",
+        zloop::runner::MAX_AUTO_REPLANS
+    );
     assert_eq!(j.iter().filter(|e| e["event"] == "replan_giveup").count(), 1, "要留下放弃记录: {j:?}");
     assert!(j.iter().any(|e| e["event"] == "stop" && e["reason"] == "replan_diverged"), "停机理由要写清: {j:?}");
     // 关键：真的停了，不是跑满 30 轮
@@ -1597,7 +1684,11 @@ esac"#,
     assert!(rounds < 30, "该提前停，不该跑满 30 轮（实际 {rounds} 轮）");
     // 停下来的时候计划还在，没被改成半截
     let st = state::load(&state::state_path(&d)).unwrap();
-    assert!(st.todos.iter().filter(|t| !matches!(t.status.as_str(), "done" | "deferred")).count() > 0, "停机时清单还在: {:?}", st.todos);
+    assert!(
+        st.todos.iter().filter(|t| !matches!(t.status.as_str(), "done" | "deferred")).count() > 0,
+        "停机时清单还在: {:?}",
+        st.todos
+    );
 }
 
 #[test]
@@ -1716,7 +1807,8 @@ fn timeout_collects_the_background_grandchildren_too() {
     state::save(&p, &mut st).unwrap();
 
     let started = std::time::Instant::now();
-    let (_, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--timeout-min", "2"], &[("PATH", &with_fake_path(&fake))]);
+    let (_, out, _) =
+        run(&d, &["run", "--host", "claude", "--fast", "--timeout-min", "2"], &[("PATH", &with_fake_path(&fake))]);
     let elapsed = started.elapsed();
 
     assert!(out.contains("preflight timed out"), "{out}");

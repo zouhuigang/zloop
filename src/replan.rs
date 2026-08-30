@@ -64,7 +64,8 @@ pub fn signals(state: &State) -> Vec<Signal> {
         if todo::is_terminal(&t.status) {
             continue;
         }
-        let n = state.ticks.iter().filter(|k| k.outcome == tick::FEEDBACK && k.todo.as_deref() == Some(t.id.as_str())).count();
+        let n =
+            state.ticks.iter().filter(|k| k.outcome == tick::FEEDBACK && k.todo.as_deref() == Some(t.id.as_str())).count();
         if n == 0 {
             continue;
         }
@@ -94,10 +95,7 @@ pub fn signals(state: &State) -> Vec<Signal> {
     let s = stats::compute(state);
     if s.rounds >= REWORK_MIN_ROUNDS && s.rework_rate >= REWORK_AT {
         let who = stats::roughest(&s).map(|r| format!("（最费劲的是 {}）", r.id)).unwrap_or_default();
-        out.push(Signal {
-            kind: "rework",
-            detail: format!("返工率 {}%{who}", (s.rework_rate * 100.0).round() as i64),
-        });
+        out.push(Signal { kind: "rework", detail: format!("返工率 {}%{who}", (s.rework_rate * 100.0).round() as i64) });
     }
 
     // 计划被自己推翻了：某一轮写回时说了「后续走不通」（`zloop done --rethink`）。
@@ -114,7 +112,10 @@ pub fn signals(state: &State) -> Vec<Signal> {
     for t in &state.ticks[since..] {
         if let Some(r) = t.rethink.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
             let who = t.todo.as_deref().unwrap_or("-");
-            out.push(Signal { kind: "rethink", detail: format!("{who} 那一轮说后续走不通：{}", crate::style::truncate(r, 80)) });
+            out.push(Signal {
+                kind: "rethink",
+                detail: format!("{who} 那一轮说后续走不通：{}", crate::style::truncate(r, 80)),
+            });
         }
     }
 
@@ -204,17 +205,23 @@ pub fn packet(state: &State) -> String {
         out.push_str("\n## 干活的人说后续走不通（原话）\n\n");
         out.push_str("_这几轮**可能全都成功了**——走不通的不是那一轮，是它推翻的那个前提。_\n");
         for t in &doubts {
-            out.push_str(&format!("- {}：{}\n", t.todo.as_deref().unwrap_or("-"), t.rethink.as_deref().unwrap_or("").replace('\n', " ")));
+            out.push_str(&format!(
+                "- {}：{}\n",
+                t.todo.as_deref().unwrap_or("-"),
+                t.rethink.as_deref().unwrap_or("").replace('\n', " ")
+            ));
         }
     }
 
     out.push_str("\n## 你要做的\n\n");
     out.push_str("1. 对着**最终目标**看剩下这些任务：还能把目标做成吗？漏了什么？哪条已经没意义了？\n");
-    out.push_str("2. 默认只提**最小改动**——改哪条的文本 / 加哪条 / 删（延后）哪条 / 把哪条拆开。\
+    out.push_str(
+        "2. 默认只提**最小改动**——改哪条的文本 / 加哪条 / 删（延后）哪条 / 把哪条拆开。\
                   **别重开一张清单**：原计划里还成立的部分要留着（plan repair 优于 full replan）。\n\
                   \x20  **唯一的例外**：上面「后续走不通」那一节里，被推翻的如果是整条路线的前提，\
                   那就照新的现状重排——给一条死路打补丁不叫最小改动。\
-                  是打补丁还是重排，说清你按哪种判断的。\n");
+                  是打补丁还是重排，说清你按哪种判断的。\n",
+    );
     out.push_str("3. 逐条说清为什么改，讲给用户听。\n");
     out.push_str("4. **人点头之后**才动，用现成的命令：\n");
     out.push_str("   - 加：`zloop plan --add \"[P1] 新任务 :: 验收标准\"`\n");
@@ -266,12 +273,7 @@ pub struct Applied {
 /// 把新清单落到账本上。**只换未完成且没在等人的那部分**，其余原样保留。
 ///
 /// 违反护栏就整体拒绝并指名是哪一条——半途改一半的计划比不改更糟。
-pub fn apply(
-    state: &mut State,
-    path: &std::path::Path,
-    items: &[(u8, String)],
-    why: &str,
-) -> anyhow::Result<Applied> {
+pub fn apply(state: &mut State, path: &std::path::Path, items: &[(u8, String)], why: &str) -> anyhow::Result<Applied> {
     // 护栏：得有理由。审计的时候要能看出这次改动想解决什么。
     if why.trim().is_empty() {
         anyhow::bail!("护栏「说清为什么」：--why 不能是空的——事后没人看得出这次重排想解决什么");
@@ -314,10 +316,7 @@ pub fn apply(
     }
 
     // 改之前先留一份。这是账本里唯一一处"批量丢弃用户可见内容"的操作。
-    let backup = path.with_file_name(format!(
-        "state.json.bak-{}",
-        crate::state::now_iso().replace([':', '+'], "")
-    ));
+    let backup = path.with_file_name(format!("state.json.bak-{}", crate::state::now_iso().replace([':', '+'], "")));
     std::fs::copy(path, &backup)?;
 
     let kept: Vec<String> = state.todos.iter().filter(|t| is_pinned(t)).map(|t| t.id.clone()).collect();

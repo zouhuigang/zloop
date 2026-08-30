@@ -155,7 +155,10 @@ fn last_journal_event(root: &Path) -> Option<Value> {
 fn stop(root: &Path, reason: &str) -> Result<i32> {
     let r = crate::awake::release(std::process::id());
     if r.changed.is_some() || r.holders > 0 {
-        journal_append(root, &json!({"event": "awake_off", "holders_left": r.holders, "restored_default": r.changed == Some(false), "at": state::now_iso()}))?;
+        journal_append(
+            root,
+            &json!({"event": "awake_off", "holders_left": r.holders, "restored_default": r.changed == Some(false), "at": state::now_iso()}),
+        )?;
     }
     journal_append(root, &json!({"event": "stop", "reason": reason, "at": state::now_iso()}))?;
     crate::daemon::clear_pid(root);
@@ -198,7 +201,16 @@ fn preflight(root: &Path, cmd: &str, timeout: Duration) -> std::result::Result<S
     match run_with_timeout(c, timeout, "sh") {
         Ok(cap) => {
             let combined = format!("{}\n{}", cap.stdout, cap.stderr);
-            let tail: String = combined.lines().rev().filter(|l| !l.trim().is_empty()).take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" | ");
+            let tail: String = combined
+                .lines()
+                .rev()
+                .filter(|l| !l.trim().is_empty())
+                .take(5)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" | ");
             if cap.timed_out {
                 Err(format!("preflight timed out: {}", tail.chars().take(200).collect::<String>()))
             } else if cap.status.map(|s| s.success()).unwrap_or(false) {
@@ -320,7 +332,8 @@ fn git_checkpoint(root: &Path, todo_id: &str, note: &str, baseline: &mut DirtySn
         return cp;
     }
     cp.files = ours.iter().map(|p| p.to_string()).collect();
-    cp.sha = git_capture(root, &["rev-parse", "--short", "HEAD"], None).map(|o| String::from_utf8_lossy(&o).trim().to_string());
+    cp.sha =
+        git_capture(root, &["rev-parse", "--short", "HEAD"], None).map(|o| String::from_utf8_lossy(&o).trim().to_string());
     // 提交成功之后基线才有资格重拍。重拍不成（git 这会儿挂了）就留着旧的：我们的东西
     // 已经进了 commit，树里不再有我们欠着的，`settled` 照样为真，下一轮开工前会再试一次。
     if let Some(fresh) = git_dirty(root) {
@@ -455,9 +468,8 @@ fn blocked_summary(st: &State) -> String {
 /// 宿主超时/失败时 runner 自己补的那条 `fail`（`tick::record("fail", …, who)`）用的是
 /// 本轮宿主报回来的 session，是 `WRITEBACK` 成员——谱系不会因为一轮没写回就断掉。
 fn pick_session(state: &State, host: Host, todo_id: &str, mode: ResumeMode) -> Option<String> {
-    let host_round = |t: &&state::Tick| {
-        t.host.as_deref() == Some(host.as_str()) && t.session.is_some() && tick::is_writeback(&t.outcome)
-    };
+    let host_round =
+        |t: &&state::Tick| t.host.as_deref() == Some(host.as_str()) && t.session.is_some() && tick::is_writeback(&t.outcome);
     match mode {
         ResumeMode::None => None,
         ResumeMode::All => state.ticks.iter().rev().find(host_round).and_then(|t| t.session.clone()),
@@ -626,7 +638,12 @@ pub(crate) struct CapturedBytes {
 ///
 /// `stdin_bytes` 为 `Some` 时把这些字节喂给子进程的 stdin 再关掉（EOF）。
 /// `group` 决定超时/叫停时收得掉谁、收不掉谁，见 [`Group`]。
-pub(crate) fn run_capture(mut cmd: Command, timeout: Duration, group: Group, stdin_bytes: Option<Vec<u8>>) -> Result<CapturedBytes> {
+pub(crate) fn run_capture(
+    mut cmd: Command,
+    timeout: Duration,
+    group: Group,
+    stdin_bytes: Option<Vec<u8>>,
+) -> Result<CapturedBytes> {
     let what = cmd.get_program().to_string_lossy().into_owned();
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin_bytes.is_some() {
@@ -720,7 +737,14 @@ fn looks_rate_limited(text: &str) -> bool {
     RATE_LIMIT_MARKERS.iter().any(|m| lower.contains(m))
 }
 
-fn run_claude(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, timeout: Duration, may_replan: bool) -> Result<HostResult> {
+fn run_claude(
+    root: &Path,
+    prompt: &str,
+    resume: Option<&str>,
+    opts: &Options,
+    timeout: Duration,
+    may_replan: bool,
+) -> Result<HostResult> {
     let mut cmd = Command::new("claude");
     cmd.current_dir(root).arg("-p").arg(prompt).arg("--output-format").arg("json");
     if let Some(sid) = resume {
@@ -760,7 +784,14 @@ fn run_claude(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, t
     })
 }
 
-fn run_codex(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, timeout: Duration, may_replan: bool) -> Result<HostResult> {
+fn run_codex(
+    root: &Path,
+    prompt: &str,
+    resume: Option<&str>,
+    opts: &Options,
+    timeout: Duration,
+    may_replan: bool,
+) -> Result<HostResult> {
     let last_msg = root.join(state::STATE_DIR).join("runner").join("codex-last-message.txt");
     if let Some(p) = last_msg.parent() {
         fs::create_dir_all(p)?;
@@ -810,13 +841,20 @@ fn run_codex(root: &Path, prompt: &str, resume: Option<&str>, opts: &Options, ti
 }
 
 fn secs(units: u32, fast: bool) -> u64 {
-    if fast { units as u64 } else { units as u64 * 60 }
+    if fast {
+        units as u64
+    } else {
+        units as u64 * 60
+    }
 }
 
 /// Record when the runner will wake up so `zloop status` can show "sleeping until …".
 fn journal_sleep(root: &Path, units: u32, fast: bool, reason: &str) -> Result<()> {
     let until = state::now() + chrono::Duration::seconds(secs(units, fast) as i64);
-    journal_append(root, &json!({"event": "sleep", "until": state::format_iso(&until), "reason": reason, "at": state::now_iso()}))
+    journal_append(
+        root,
+        &json!({"event": "sleep", "until": state::format_iso(&until), "reason": reason, "at": state::now_iso()}),
+    )
 }
 
 fn slowest_interval(state: &State) -> u32 {
@@ -902,10 +940,16 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
     if opts.keep_awake && crate::awake::supported() {
         let acq = crate::awake::acquire(root, std::process::id());
         awake_guard.armed = true;
-        journal_append(root, &json!({"event": "awake_on", "lid": acq.lid, "caffeinate_pid": acq.caffeinate_pid, "at": state::now_iso()}))?;
+        journal_append(
+            root,
+            &json!({"event": "awake_on", "lid": acq.lid, "caffeinate_pid": acq.caffeinate_pid, "at": state::now_iso()}),
+        )?;
         match (&acq.hint, acq.lid) {
             (Some(h), _) => println!("runner: keep-awake: {h}"),
-            (None, true) => println!("runner: keep-awake: lid-close sleep disabled while this runner lives (caffeinate pid {:?})", acq.caffeinate_pid),
+            (None, true) => println!(
+                "runner: keep-awake: lid-close sleep disabled while this runner lives (caffeinate pid {:?})",
+                acq.caffeinate_pid
+            ),
             (None, false) => {}
         }
     }
@@ -924,8 +968,8 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
     let mut grew_in_a_row: u32 = 0;
     let mut stop_after_replan: Option<String> = None;
     let mut notified: Option<String> = None; // dedupe: one notification per distinct wait/limit situation
-    // 基线以外的脏东西 = 不是我们干的。每轮 checkpoint 只提交这条线之后的变化，
-    // 别人的在制品不会被卷进「zloop tN: <我的 note>」。
+                                             // 基线以外的脏东西 = 不是我们干的。每轮 checkpoint 只提交这条线之后的变化，
+                                             // 别人的在制品不会被卷进「zloop tN: <我的 note>」。
     let mut git_baseline = DirtySnapshot::new();
     // 基线是不是「结清」的：树里已经没有我们欠着没提交的东西。为真才允许重拍基线。
     // 起跑那一刻按结清算——第一轮开工前会拍下第一张。
@@ -981,7 +1025,10 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
 
         // 攒够 N 轮就回看一次。只在两轮 todo 之间插入，所以它不占 todo 轮次，
         // 也不会因为 `rounds_done` 没变而连着触发（`last_reflect` 记住上次是在第几轮插的）。
-        if opts.reflect_every > 0 && rounds_done > 0 && rounds_done.is_multiple_of(opts.reflect_every) && last_reflect != Some(rounds_done)
+        if opts.reflect_every > 0
+            && rounds_done > 0
+            && rounds_done.is_multiple_of(opts.reflect_every)
+            && last_reflect != Some(rounds_done)
         {
             last_reflect = Some(rounds_done);
             let text = format!(
@@ -1032,7 +1079,10 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                         tick::record(st, "fail", Some(&todo.id), &format!("runner: {why}"), &who)?;
                         Ok(())
                     })?;
-                    journal_append(root, &json!({"event": "preflight_failed", "round": round_no, "todo": todo.id, "at": state::now_iso()}))?;
+                    journal_append(
+                        root,
+                        &json!({"event": "preflight_failed", "round": round_no, "todo": todo.id, "at": state::now_iso()}),
+                    )?;
                     let st = state::load(&path)?;
                     let d = tick::decide(&st, state::now());
                     match wait_plan(&st, &d, &opts) {
@@ -1040,8 +1090,8 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                         Some((m, reason)) => {
                             journal_sleep(root, m, opts.fast, &reason)?;
                             if !sleep_interruptible(Duration::from_secs(secs(m, opts.fast))) {
-                        return stop(root, "sigterm");
-                    }
+                                return stop(root, "sigterm");
+                            }
                             continue;
                         }
                     }
@@ -1152,22 +1202,41 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
         if rate_limited {
             let st = state::load(&path)?;
             let m = slowest_interval(&st);
-            println!("runner: round {round_no} host rate-limited · not counted · sleeping {} {} · {}", m,
-                     if opts.fast { "s" } else { "min" }, result.output.lines().next().unwrap_or("").chars().take(100).collect::<String>());
+            println!(
+                "runner: round {round_no} host rate-limited · not counted · sleeping {} {} · {}",
+                m,
+                if opts.fast { "s" } else { "min" },
+                result.output.lines().next().unwrap_or("").chars().take(100).collect::<String>()
+            );
             if notified.as_deref() != Some("rate_limited") {
-                notify(root, &st, "rate_limited", &format!("{} {} 后重试：{}", m, if opts.fast { "秒" } else { "分钟" },
-                    result.output.lines().next().unwrap_or("").chars().take(120).collect::<String>()));
+                notify(
+                    root,
+                    &st,
+                    "rate_limited",
+                    &format!(
+                        "{} {} 后重试：{}",
+                        m,
+                        if opts.fast { "秒" } else { "分钟" },
+                        result.output.lines().next().unwrap_or("").chars().take(120).collect::<String>()
+                    ),
+                );
                 notified = Some("rate_limited".into());
             }
             journal_sleep(root, m, opts.fast, "host_rate_limited")?;
             if !sleep_interruptible(Duration::from_secs(secs(m, opts.fast))) {
-                        return stop(root, "sigterm");
-                    }
+                return stop(root, "sigterm");
+            }
             continue;
         }
         println!(
             "runner: round {round_no} {} · {}",
-            if wrote_back { "written back" } else if result.timed_out { "TIMED OUT (recorded fail)" } else { "NO WRITEBACK (recorded fail)" },
+            if wrote_back {
+                "written back"
+            } else if result.timed_out {
+                "TIMED OUT (recorded fail)"
+            } else {
+                "NO WRITEBACK (recorded fail)"
+            },
             result.output.lines().next().unwrap_or("").chars().take(120).collect::<String>()
         );
         if let Some(sid) = &result.session {
@@ -1184,8 +1253,11 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 let shown: Vec<&str> = cp.held_back.iter().take(5).map(String::as_str).collect();
                 let more = if cp.held_back.len() > 5 { format!(" 等 {} 个", cp.held_back.len()) } else { String::new() };
                 println!("runner: 没提交 {}{more} · runner 起跑前它们就是改过的，别人的在制品拆不开", shown.join(" "));
-                journal_append(root, &json!({"event": "commit_held_back", "round": round_no, "todo": todo.id,
-                                             "paths": cp.held_back, "at": state::now_iso()}))?;
+                journal_append(
+                    root,
+                    &json!({"event": "commit_held_back", "round": round_no, "todo": todo.id,
+                                             "paths": cp.held_back, "at": state::now_iso()}),
+                )?;
             }
             if let Some(sha) = cp.sha {
                 // 提交了哪几个，不只是提交了几个：轮内并发那一格没法靠快照判，
@@ -1193,8 +1265,11 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 let shown: Vec<&str> = cp.files.iter().take(5).map(String::as_str).collect();
                 let more = if cp.files.len() > 5 { format!(" 等 {} 个", cp.files.len()) } else { String::new() };
                 println!("runner: git checkpoint {sha} · {} 个文件：{}{more}", cp.files.len(), shown.join(" "));
-                journal_append(root, &json!({"event": "commit", "round": round_no, "todo": todo.id, "sha": sha,
-                                             "files": cp.files.len(), "paths": cp.files, "at": state::now_iso()}))?;
+                journal_append(
+                    root,
+                    &json!({"event": "commit", "round": round_no, "todo": todo.id, "sha": sha,
+                                             "files": cp.files.len(), "paths": cp.files, "at": state::now_iso()}),
+                )?;
             }
         }
         // 同上：checkpoint 里的 git 被 SIGTERM 收掉时，叫停这件事只有这儿看得见——
@@ -1236,7 +1311,10 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                         .to_string()
                 };
                 let text = format!("{}{tail}", crate::replan::packet(&st));
-                journal_append(root, &json!({"event": "replan", "round": round_no, "signals": why, "at": state::now_iso()}))?;
+                journal_append(
+                    root,
+                    &json!({"event": "replan", "round": round_no, "signals": why, "at": state::now_iso()}),
+                )?;
                 let result = match opts.host {
                     Host::Codex => run_codex(root, &text, None, &opts, timeout, opts.auto_replan)?,
                     _ => run_claude(root, &text, None, &opts, timeout, opts.auto_replan)?,
@@ -1262,9 +1340,11 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 // 计划到底动没动，不听宿主自称，看账本。
                 let after = state::load(&path)?;
                 let open_after = crate::todo::remaining(&after);
-                let changed = after.todos.iter().filter(|t| !crate::todo::is_terminal(&t.status)).any(|t| {
-                    !st.todos.iter().any(|o| o.id == t.id)
-                });
+                let changed = after
+                    .todos
+                    .iter()
+                    .filter(|t| !crate::todo::is_terminal(&t.status))
+                    .any(|t| !st.todos.iter().any(|o| o.id == t.id));
                 if !changed {
                     println!("runner: 重估建议写进账本 · {rel}（没有动任何 todo）");
                 } else {
@@ -1284,13 +1364,15 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                             "连着 {grew_in_a_row} 次重排都把清单改长了（这次 {open_before} → {open_after}）——在发散，不是在收敛"
                         ));
                     } else if auto_replans >= MAX_AUTO_REPLANS {
-                        stop_after_replan =
-                            Some(format!("自主改了 {auto_replans} 次计划还没走上正轨，多半不是计划的问题"));
+                        stop_after_replan = Some(format!("自主改了 {auto_replans} 次计划还没走上正轨，多半不是计划的问题"));
                     }
                 }
                 if let Some(reason) = stop_after_replan.take() {
                     println!("runner: 停下来等人 —— {reason}");
-                    journal_append(root, &json!({"event": "replan_giveup", "round": round_no, "why": reason, "at": state::now_iso()}))?;
+                    journal_append(
+                        root,
+                        &json!({"event": "replan_giveup", "round": round_no, "why": reason, "at": state::now_iso()}),
+                    )?;
                     stop(root, "replan_diverged")?;
                     return Ok(0);
                 }
@@ -1309,8 +1391,8 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
             Some((m, reason)) => {
                 journal_sleep(root, m, opts.fast, &reason)?;
                 if !sleep_interruptible(Duration::from_secs(secs(m, opts.fast))) {
-                        return stop(root, "sigterm");
-                    }
+                    return stop(root, "sigterm");
+                }
             }
         }
     }

@@ -80,10 +80,7 @@ pub fn fresh_id(root: &Path, text: &str) -> String {
             return slug;
         }
     }
-    (1..)
-        .map(|n| format!("g{n}"))
-        .find(|c| !used.iter().any(|u| u == c))
-        .unwrap_or_else(|| "g".into())
+    (1..).map(|n| format!("g{n}")).find(|c| !used.iter().any(|u| u == c)).unwrap_or_else(|| "g".into())
 }
 
 /// 读不出来的目标（损坏 / 版本不匹配）**也要出现在清单里**：静默隐藏会让用户以为目标丢了。
@@ -201,7 +198,8 @@ pub fn resolve_match(root: &Path, needle: &str) -> Result<(Row, Match)> {
             0 => continue,
             1 => return Ok((pick[0].clone(), how)),
             _ => {
-                let names: Vec<String> = pick.iter().map(|r| format!("{} ({})", r.id, crate::style::truncate(&r.text, 24))).collect();
+                let names: Vec<String> =
+                    pick.iter().map(|r| format!("{} ({})", r.id, crate::style::truncate(&r.text, 24))).collect();
                 bail!("{needle:?} 对上了 {} 个目标：{}。用 id 说清楚", pick.len(), names.join(" / "));
             }
         }
@@ -257,11 +255,7 @@ pub fn park(root: &Path) -> Result<Option<Row>> {
     fs::create_dir_all(&dir)?;
     // id 要和文件名一一对应：空的、带怪字符的、或者撞了停车位的，都换一个。
     let clean = sanitize_id(&id_hint);
-    let id = if clean.is_empty() || dir.join(format!("{clean}.json")).exists() {
-        fresh_id(root, &text_hint)
-    } else {
-        clean
-    };
+    let id = if clean.is_empty() || dir.join(format!("{clean}.json")).exists() { fresh_id(root, &text_hint) } else { clean };
     let target = dir.join(format!("{id}.json"));
     match loaded {
         Ok(mut st) if id != id_hint => {
@@ -271,8 +265,7 @@ pub fn park(root: &Path) -> Result<Option<Row>> {
             fs::remove_file(&cur)?;
         }
         _ => {
-            fs::rename(&cur, &target)
-                .with_context(|| format!("停放 {} → {}", cur.display(), target.display()))?;
+            fs::rename(&cur, &target).with_context(|| format!("停放 {} → {}", cur.display(), target.display()))?;
         }
     }
     Ok(row_of(&target, false))
@@ -406,9 +399,8 @@ pub fn parked_holder(root: &Path, todo_id: &str, who: &crate::session::HostSessi
         if st.policy.stale_after_min <= 0 {
             continue; // 保护被关掉了
         }
-        let stale = state::parse_iso(&ip.started_at)
-            .map(|s| (now - s).num_minutes() >= st.policy.stale_after_min)
-            .unwrap_or(true);
+        let stale =
+            state::parse_iso(&ip.started_at).map(|s| (now - s).num_minutes() >= st.policy.stale_after_min).unwrap_or(true);
         if !stale {
             return Some(row);
         }

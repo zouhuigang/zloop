@@ -250,7 +250,10 @@ fn compact_dumps_are_not_mistaken_for_broken_archives() {
     assert_eq!(zloop(d, &["next"]).code, 0);
     assert_eq!(zloop(d, &["done", "t1", "--note", "ok", "--approach", "做了 a"]).code, 0);
     assert_eq!(zloop(d, &["compact", "--keep-days", "0"]).code, 0);
-    assert!(fs::read_dir(d.join(".zloop/archive")).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("compact-")));
+    assert!(fs::read_dir(d.join(".zloop/archive"))
+        .unwrap()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().starts_with("compact-")));
 
     let (ks, code) = kinds(d);
     assert!(ks.is_empty(), "{ks:?}");

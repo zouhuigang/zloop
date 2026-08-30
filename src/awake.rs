@@ -145,7 +145,11 @@ pub fn acquire(root: &Path, pid: u32) -> Acquired {
         };
     }
     if register(pid, root).is_err() {
-        return Acquired { caffeinate_pid, lid: false, hint: Some("could not record awake holder; lid-close sleep left unchanged".into()) };
+        return Acquired {
+            caffeinate_pid,
+            lid: false,
+            hint: Some("could not record awake holder; lid-close sleep left unchanged".into()),
+        };
     }
     let lid = match sleep_disabled() {
         Some(true) => true,
@@ -156,7 +160,11 @@ pub fn acquire(root: &Path, pid: u32) -> Acquired {
     } else {
         unregister(pid);
     }
-    Acquired { caffeinate_pid, lid, hint: if lid { None } else { Some("`sudo pmset -a disablesleep 1` failed; lid-close sleep left unchanged".into()) } }
+    Acquired {
+        caffeinate_pid,
+        lid,
+        hint: if lid { None } else { Some("`sudo pmset -a disablesleep 1` failed; lid-close sleep left unchanged".into()) },
+    }
 }
 
 /// Called by the runner on every exit path.
@@ -181,7 +189,10 @@ fn spawn_watchdog(pid: u32) -> Option<u32> {
         exe.display()
     );
     let mut cmd = Command::new("sh");
-    cmd.args(["-c", &script, "zloop-awake-watchdog", &pid.to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(["-c", &script, "zloop-awake-watchdog", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     crate::daemon::detach_cmd(&mut cmd);
     cmd.spawn().ok().map(|c| c.id())
 }

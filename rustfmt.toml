@@ -1,0 +1,8 @@
+# 这份仓库本来就是 ~125 列的密排风格：默认的 max_width=100 会把 29 个文件全判成不合规，
+# 等于没有格式闸。这里把闸门配成"贴着现有风格"，而不是反过来让代码去迁就默认值。
+max_width = 125
+
+# rustfmt 默认还会用一组"小启发式"（fn_call_width=60、chain_width=60、struct_lit_width=18 …）
+# 把没超 max_width 的调用/链式/结构体字面量也强行拆行——那会把现有的密排代码炸成 2400 行新增。
+# Max = 所有子宽度都等于 max_width，只有真的超过 125 列才换行。
+use_small_heuristics = "Max"

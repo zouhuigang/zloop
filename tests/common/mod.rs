@@ -13,7 +13,10 @@ use zloop::todo;
 /// `hook-stop` takes its pass-through branch and prints nothing. Each test decides its own
 /// environment; anything meaningful is set explicitly by the test itself.
 pub fn scrub_ambient_env(cmd: &mut Command) -> &mut Command {
-    cmd.env_remove("CLAUDE_CODE_SESSION_ID").env_remove("CLAUDECODE").env_remove("CODEX_THREAD_ID").env_remove("ZLOOP_RUNNER")
+    cmd.env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CLAUDECODE")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("ZLOOP_RUNNER")
 }
 
 pub fn now_utc() -> DateTime<FixedOffset> {

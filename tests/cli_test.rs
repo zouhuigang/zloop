@@ -58,13 +58,23 @@ fn end_to_end() {
     assert_eq!(payload["round"], 0);
     assert_eq!(payload["interval_min"], 3);
 
-    let o = zloop(d, &["done", "t1", "--note", "DESIGN.md written", "--next", "review design", "--evidence", "line1\nline2", "--no-doc"], None, &[]);
+    let o = zloop(
+        d,
+        &["done", "t1", "--note", "DESIGN.md written", "--next", "review design", "--evidence", "line1\nline2", "--no-doc"],
+        None,
+        &[],
+    );
     assert_eq!(o.code, 0, "{}", o.err);
     assert!(o.out.starts_with("t1 done: DESIGN.md written"));
     assert!(o.out.contains("next: t4 [P0] review design"));
     assert!(o.out.contains("log: .zloop/log/"));
 
-    let o = zloop(d, &["done", "t4", "--outcome", "fail", "--note", "reviewer away", "--pitfall", "评审人休假，先跳过"], None, &[]);
+    let o = zloop(
+        d,
+        &["done", "t4", "--outcome", "fail", "--note", "reviewer away", "--pitfall", "评审人休假，先跳过"],
+        None,
+        &[],
+    );
     assert_eq!(o.code, 0);
     assert!(o.out.contains("t4 fail"));
 
@@ -163,7 +173,12 @@ fn session_is_captured_from_host_env() {
     let d = dir.path();
     zloop(d, &["init", "g"], None, &[]);
     zloop(d, &["plan", "--add", "[P0] a", "--add", "[P1] b"], None, &[]);
-    let o = zloop(d, &["done", "t1", "--note", "x", "--no-doc"], None, &[("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555555555555")]);
+    let o = zloop(
+        d,
+        &["done", "t1", "--note", "x", "--no-doc"],
+        None,
+        &[("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555555555555")],
+    );
     assert_eq!(o.code, 0, "{}", o.err);
     let o = zloop(d, &["done", "t2", "--outcome", "progress", "--note", "y"], None, &[("CODEX_THREAD_ID", "thread-abc")]);
     assert_eq!(o.code, 0, "{}", o.err);
@@ -246,7 +261,10 @@ fn context_survives_absurdly_small_budgets() {
             assert!(has("## 下一条") && has("## 怎么继续"), "budget={budget} 先丢了保护区/收尾：{text:?}");
         }
         if has("## 下一条") {
-            assert!(has("## 当前判断") && has("## 本项目的约定") && has("## 目标"), "budget={budget} 保护区被穿了：{text:?}");
+            assert!(
+                has("## 当前判断") && has("## 本项目的约定") && has("## 目标"),
+                "budget={budget} 保护区被穿了：{text:?}"
+            );
         }
         if has("## 当前判断") {
             assert!(has("## 本项目的约定") && has("## 目标"), "budget={budget} 保护区被穿了：{text:?}");
@@ -579,8 +597,11 @@ fn a_clock_jump_into_the_future_is_capped_and_visible() {
     fs::create_dir_all(&j).unwrap();
     let wake = chrono::Local::now() + chrono::Duration::minutes(minutes as i64);
     let until = wake.to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-    fs::write(j.join("journal.jsonl"), format!("{{\"event\":\"sleep\",\"until\":\"{until}\",\"reason\":\"throttled\",\"at\":\"x\"}}\n"))
-        .unwrap();
+    fs::write(
+        j.join("journal.jsonl"),
+        format!("{{\"event\":\"sleep\",\"until\":\"{until}\",\"reason\":\"throttled\",\"at\":\"x\"}}\n"),
+    )
+    .unwrap();
     let o = zloop(d, &["status"], None, &[]);
     let day = wake.format("%m-%d").to_string();
     assert!(o.out.contains("睡到"), "{}", o.out);
@@ -612,7 +633,10 @@ fn phase_tracks_the_round() {
     assert!(v.as_object().unwrap().len() <= 10);
     let st = state::load(&state::state_path(d)).unwrap();
     let ip = st.in_progress.as_ref().unwrap();
-    assert_eq!((ip.todo.as_str(), ip.via.as_str(), ip.host.as_deref(), ip.session.as_deref()), ("t1", "next", Some("claude"), Some("sess-p")));
+    assert_eq!(
+        (ip.todo.as_str(), ip.via.as_str(), ip.host.as_deref(), ip.session.as_deref()),
+        ("t1", "next", Some("claude"), Some("sess-p"))
+    );
     let o = zloop(d, &["status"], None, &[]);
     assert!(o.out.contains("执行中") && o.out.contains("claude 正在做 t1") && o.out.contains("第 1 轮"), "{}", o.out);
     assert!(zloop(d, &["context"], None, &[]).out.contains("阶段：executing t1"));
@@ -623,20 +647,30 @@ fn phase_tracks_the_round() {
     zloop(d, &["done", "t2", "--block", "?"], None, &[]);
     assert!(zloop(d, &["context"], None, &[]).out.contains("阶段：waiting (user_gate) · retry in 10 min"));
     assert!(zloop(d, &["status"], None, &[]).out.contains("等你回答 · 10 分钟后重试"));
-    for _ in 0..3 { zloop(d, &["next"], None, &[]); }
+    for _ in 0..3 {
+        zloop(d, &["next"], None, &[]);
+    }
     assert!(zloop(d, &["context"], None, &[]).out.contains("阶段：stopped (user_gate)"));
     assert!(zloop(d, &["status"], None, &[]).out.contains("等你决定"));
     let j = d.join(".zloop").join("runner");
     fs::create_dir_all(&j).unwrap();
     let until = (chrono::Local::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-    fs::write(j.join("journal.jsonl"), format!("{{\"event\":\"sleep\",\"until\":\"{until}\",\"reason\":\"ready\",\"at\":\"x\"}}\n")).unwrap();
+    fs::write(
+        j.join("journal.jsonl"),
+        format!("{{\"event\":\"sleep\",\"until\":\"{until}\",\"reason\":\"ready\",\"at\":\"x\"}}\n"),
+    )
+    .unwrap();
     assert!(zloop(d, &["context"], None, &[]).out.contains("runner sleeping until"));
     // 此刻所有 todo 都在等人回话，所以标题让位给「等你决定」，休眠时间退到明细行。
     let o = zloop(d, &["status"], None, &[]);
     assert!(o.out.contains("等你决定") && o.out.contains("睡到"), "{}", o.out);
     zloop(d, &["edit", "t2", "--status", "open"], None, &[]);
     assert!(zloop(d, &["status"], None, &[]).out.contains("休眠中"), "有活可干时才轮到休眠当标题");
-    fs::write(j.join("journal.jsonl"), "{\"event\":\"begin\",\"round\":4,\"todo\":\"t2\",\"host\":\"claude\",\"at\":\"2026-08-27T00:00:00+08:00\"}\n").unwrap();
+    fs::write(
+        j.join("journal.jsonl"),
+        "{\"event\":\"begin\",\"round\":4,\"todo\":\"t2\",\"host\":\"claude\",\"at\":\"2026-08-27T00:00:00+08:00\"}\n",
+    )
+    .unwrap();
     assert!(zloop(d, &["context"], None, &[]).out.contains("runner round 4 on t2"));
     assert!(zloop(d, &["status"], None, &[]).out.contains("第 4 轮做 t2"), "{}", zloop(d, &["status"], None, &[]).out);
 }
@@ -648,7 +682,10 @@ fn spawned_zloop_never_inherits_the_ambient_session() {
     // ticks get stamped with the outer session id) and the suite is red for no real reason.
     let mut cmd = Command::new("/bin/sh");
     cmd.args(["-c", r#"printf '%s' "${ZLOOP_RUNNER-_}${CLAUDECODE-_}${CLAUDE_CODE_SESSION_ID-_}${CODEX_THREAD_ID-_}""#]);
-    cmd.env("ZLOOP_RUNNER", "1").env("CLAUDECODE", "1").env("CLAUDE_CODE_SESSION_ID", "sess").env("CODEX_THREAD_ID", "thread");
+    cmd.env("ZLOOP_RUNNER", "1")
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", "sess")
+        .env("CODEX_THREAD_ID", "thread");
     common::scrub_ambient_env(&mut cmd);
     let o = cmd.output().unwrap();
     assert_eq!(String::from_utf8_lossy(&o.stdout), "____", "scrub_ambient_env 漏掉了一个变量");
@@ -903,12 +940,22 @@ fn done_refuses_to_finish_without_a_technical_document() {
     // with the document it goes through and every section is rendered
     let o = zloop(
         d,
-        &["done", "t1", "--note", "done at last",
-          "--approach", "先量基线再改：bench.sh 跑 3 次取中位数，只对最慢的一步做懒加载",
-          "--decision", "不引入缓存层，成本高于收益",
-          "--decision", "懒加载放在入口而不是每个 use 处",
-          "--pitfall", "release 与 debug 差 3 倍，基线必须用 release",
-          "--evidence", "cargo test 64 passed"],
+        &[
+            "done",
+            "t1",
+            "--note",
+            "done at last",
+            "--approach",
+            "先量基线再改：bench.sh 跑 3 次取中位数，只对最慢的一步做懒加载",
+            "--decision",
+            "不引入缓存层，成本高于收益",
+            "--decision",
+            "懒加载放在入口而不是每个 use 处",
+            "--pitfall",
+            "release 与 debug 差 3 倍，基线必须用 release",
+            "--evidence",
+            "cargo test 64 passed",
+        ],
         None,
         &[],
     );
@@ -957,8 +1004,18 @@ fn doc_assembles_rounds_into_one_document() {
     let d = dir.path();
     zloop(d, &["init", "把启动时间降到 1 秒"], None, &[]);
     zloop(d, &["plan", "--add", "[P0] 量基线 :: bench.sh 连跑 3 次", "--add", "[P1] 懒加载"], None, &[]);
-    zloop(d, &["done", "t1", "--outcome", "progress", "--note", "第一步", "--approach", "先写 bench.sh"], None, &[("CLAUDE_CODE_SESSION_ID", "sess-doc")]);
-    zloop(d, &["done", "t1", "--note", "基线 3.2s", "--approach", "取中位数避免抖动", "--pitfall", "debug 模式差 3 倍"], None, &[("CLAUDE_CODE_SESSION_ID", "sess-doc")]);
+    zloop(
+        d,
+        &["done", "t1", "--outcome", "progress", "--note", "第一步", "--approach", "先写 bench.sh"],
+        None,
+        &[("CLAUDE_CODE_SESSION_ID", "sess-doc")],
+    );
+    zloop(
+        d,
+        &["done", "t1", "--note", "基线 3.2s", "--approach", "取中位数避免抖动", "--pitfall", "debug 模式差 3 倍"],
+        None,
+        &[("CLAUDE_CODE_SESSION_ID", "sess-doc")],
+    );
     zloop(d, &["done", "t2", "--note", "懒加载完成", "--no-doc"], None, &[]);
 
     let o = zloop(d, &["doc", "t1"], None, &[]);
@@ -1134,7 +1191,11 @@ fn status_headline_names_the_state_and_colour_is_opt_in() {
     let o = zloop(d, &["status"], None, &[]);
     assert!(o.out.contains("等你决定"), "{}", o.out);
     assert!(o.out.contains("↳ 用哪个库？"), "the blocking question is shown inline: {}", o.out);
-    assert!(o.out.contains("等你回话") && o.out.contains("答完敲 zloop edit t1 --status open"), "解锁命令贴在那条 todo 自己下面: {}", o.out);
+    assert!(
+        o.out.contains("等你回话") && o.out.contains("答完敲 zloop edit t1 --status open"),
+        "解锁命令贴在那条 todo 自己下面: {}",
+        o.out
+    );
     assert!(o.out.contains("答完敲 zloop edit t2 --status open"), "每条被挡住的都有自己的命令: {}", o.out);
     // 被 --block 的轮次不欠文档
     assert!(!o.out.contains("只有结果记录"), "block rounds owe no document: {}", o.out);
@@ -1588,7 +1649,12 @@ fn feedback_breaks_the_fail_streak() {
     zloop(d, &["init", "难搞的活"], None, &[]);
     zloop(d, &["plan", "--add", "[P0] 难搞的活"], None, &[]);
     for i in 1..=3 {
-        zloop(d, &["done", "t1", "--outcome", "fail", "--note", &format!("第{i}次失败"), "--pitfall", "同一条路走不通"], None, &[]);
+        zloop(
+            d,
+            &["done", "t1", "--outcome", "fail", "--note", &format!("第{i}次失败"), "--pitfall", "同一条路走不通"],
+            None,
+            &[],
+        );
     }
     let o = zloop(d, &["next"], None, &[]);
     assert!(o.out.contains("fail_streak"), "{}", o.out);
@@ -1619,7 +1685,8 @@ fn the_session_line_points_at_whoever_worked_last() {
     // 秒级时间戳可能撞在一起，手工拉开：A 早 → B 中 → A 晚
     let p = state::state_path(d);
     let mut st = state::load(&p).unwrap();
-    for (i, at) in ["2026-08-28T10:00:00+08:00", "2026-08-28T11:00:00+08:00", "2026-08-28T12:00:00+08:00"].iter().enumerate() {
+    for (i, at) in ["2026-08-28T10:00:00+08:00", "2026-08-28T11:00:00+08:00", "2026-08-28T12:00:00+08:00"].iter().enumerate()
+    {
         st.ticks[i].at = (*at).into();
     }
     state::save(&p, &mut st).unwrap();
@@ -1683,7 +1750,12 @@ fn stats_counts_match_the_ledger() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     zloop(d, &["init", "有返工有失败的目标"], None, &[]);
-    zloop(d, &["plan", "--add", "[P0] 顺利的", "--add", "[P0] 反复改的", "--add", "[P1] 会失败的", "--add", "[P2] 要问人的"], None, &[]);
+    zloop(
+        d,
+        &["plan", "--add", "[P0] 顺利的", "--add", "[P0] 反复改的", "--add", "[P1] 会失败的", "--add", "[P2] 要问人的"],
+        None,
+        &[],
+    );
     zloop(d, &["done", "t1", "--note", "一遍过", "--approach", "直接写完"], None, &[]);
     zloop(d, &["done", "t2", "--outcome", "progress", "--note", "改了一半"], None, &[]);
     zloop(d, &["done", "t2", "--outcome", "progress", "--note", "又一半"], None, &[]);
@@ -1749,7 +1821,8 @@ fn reflect_gathers_the_material_and_only_lands_when_you_say_so() {
 
     let o = zloop(d, &["reflect"], None, &[]);
     assert_eq!(o.code, 0, "{}{}", o.out, o.err);
-    for want in ["## 现有约定", "## 现有经验", "## 失败与卡住过的地方", "## 我当时怎么说 vs 你怎么回的", "## 你要做的"] {
+    for want in ["## 现有约定", "## 现有经验", "## 失败与卡住过的地方", "## 我当时怎么说 vs 你怎么回的", "## 你要做的"]
+    {
         assert!(o.out.contains(want), "材料包缺 {want}: {}", o.out);
     }
     assert!(o.out.contains("工具链版本不对") && o.out.contains("先升工具链再说"), "{}", o.out);
@@ -1761,7 +1834,12 @@ fn reflect_gathers_the_material_and_only_lands_when_you_say_so() {
     assert_eq!(zloop(d, &["reflect"], None, &[]).out, o.out, "reflect 是只读的");
 
     // 人点头之后落地；模型抄回来的编号和短横线都要容忍
-    let o = zloop(d, &["reflect", "--apply"], Some("1. bench 脚本必须用 release 模式跑，debug 差 3 倍\n- 不要碰 migrations/\n\n"), &[]);
+    let o = zloop(
+        d,
+        &["reflect", "--apply"],
+        Some("1. bench 脚本必须用 release 模式跑，debug 差 3 倍\n- 不要碰 migrations/\n\n"),
+        &[],
+    );
     assert_eq!(o.code, 0, "{}{}", o.out, o.err);
     assert!(o.out.contains("经验 2 → 2 条") && o.out.contains("备份"), "{}", o.out);
     // 经验行保留时间戳（约定不需要——它不轮换，日期没有意义）
@@ -1769,8 +1847,11 @@ fn reflect_gathers_the_material_and_only_lands_when_you_say_so() {
     assert!(notes.contains("bench 脚本必须用 release") && notes.contains("不要碰 migrations/"), "{notes}");
     assert!(!notes.contains("bench.sh 要在"), "被合并掉的那条不该还在: {notes}");
     assert_eq!(zloop::notes::read(d).lessons.len(), 2, "没写小标题就全算经验");
-    let backups: Vec<_> = fs::read_dir(d.join(".zloop")).unwrap().flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("NOTES.md.bak-")).collect();
+    let backups: Vec<_> = fs::read_dir(d.join(".zloop"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("NOTES.md.bak-"))
+        .collect();
     assert_eq!(backups.len(), 1, "改之前先备份");
     // 下一轮就带上新的
     assert!(zloop(d, &["context"], None, &[]).out.contains("不要碰 migrations/"));
@@ -1959,8 +2040,11 @@ fn remember_rule_pins_a_convention_without_a_reflect_cycle() {
     assert_eq!(n.rules.len(), 2);
     assert_eq!(n.lessons.len(), 1, "经验没被动过");
     // 加约定是纯增量，不该像 reflect --apply 那样每次留一份备份
-    let baks = fs::read_dir(d.join(".zloop")).unwrap().flatten()
-        .filter(|e| e.file_name().to_string_lossy().contains(".bak-")).count();
+    let baks = fs::read_dir(d.join(".zloop"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
+        .count();
     assert_eq!(baks, 0, "增量操作不备份");
     // 重写文件不能把经验的原始时刻抹掉
     assert!(fs::read_to_string(d.join(".zloop/NOTES.md")).unwrap().contains(&stamp), "时间戳要原样保留");
@@ -1985,11 +2069,18 @@ fn prose_arguments_accept_text_that_starts_with_a_dash() {
 
     let o = zloop(
         d,
-        &["done", "t1",
-          "--note", "--rule 只给人用",
-          "--approach", "--force 会归档旧目标",
-          "--decision", "--apply 那条路径会删东西",
-          "--pitfall", "-x 开头的一句话"],
+        &[
+            "done",
+            "t1",
+            "--note",
+            "--rule 只给人用",
+            "--approach",
+            "--force 会归档旧目标",
+            "--decision",
+            "--apply 那条路径会删东西",
+            "--pitfall",
+            "-x 开头的一句话",
+        ],
         None,
         &[],
     );
@@ -2019,7 +2110,12 @@ fn done_only_nudges_a_replan_when_the_ledger_says_something_is_off() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     zloop(d, &["init", "把冷启动降到 1 秒"], None, &[]);
-    zloop(d, &["plan", "--add", "[P0] 找最慢的三处", "--add", "[P0] 加缓存", "--add", "[P1] 补基准 :: bench.sh 跑得出数"], None, &[]);
+    zloop(
+        d,
+        &["plan", "--add", "[P0] 找最慢的三处", "--add", "[P0] 加缓存", "--add", "[P1] 补基准 :: bench.sh 跑得出数"],
+        None,
+        &[],
+    );
 
     // 一切顺利：一个字都不多说
     let o = zloop(d, &["done", "t1", "--note", "定位到 3 处", "--approach", "tracing 打点"], None, &[]);
@@ -2066,13 +2162,39 @@ fn replan_apply_swaps_the_route_without_touching_history() {
     zloop(d, &["init", "把冷启动降到 1 秒"], None, &[]);
     zloop(
         d,
-        &["plan", "--add", "[P0] 量最慢三处 :: 有数", "--add", "[P0] 加缓存 :: 快 500ms",
-          "--add", "[P0] 复测 :: 基准过", "--add", "[P1] 补基准 :: bench 跑得出", "--add", "[P1] 写文档 :: README 有一节"],
-        None, &[],
+        &[
+            "plan",
+            "--add",
+            "[P0] 量最慢三处 :: 有数",
+            "--add",
+            "[P0] 加缓存 :: 快 500ms",
+            "--add",
+            "[P0] 复测 :: 基准过",
+            "--add",
+            "[P1] 补基准 :: bench 跑得出",
+            "--add",
+            "[P1] 写文档 :: README 有一节",
+        ],
+        None,
+        &[],
     );
     zloop(d, &["done", "t1", "--note", "慢在同步读配置", "--approach", "打点", "--no-doc"], None, &[]);
-    zloop(d, &["done", "t2", "--note", "只省 30ms", "--approach", "LRU", "--no-doc",
-               "--rethink", "瓶颈在反序列化，后三条前提没了"], None, &[]);
+    zloop(
+        d,
+        &[
+            "done",
+            "t2",
+            "--note",
+            "只省 30ms",
+            "--approach",
+            "LRU",
+            "--no-doc",
+            "--rethink",
+            "瓶颈在反序列化，后三条前提没了",
+        ],
+        None,
+        &[],
+    );
 
     let plan = "[P0] 量反序列化耗时 :: 有逐字段耗时表
                 [P0] 换零拷贝路径 :: 快 300ms 以上
@@ -2139,8 +2261,15 @@ fn replan_apply_never_deletes_a_question_that_is_waiting_on_you() {
     zloop(d, &["plan", "--add", "[P0] a :: 验a", "--add", "[P0] b :: 验b"], None, &[]);
     zloop(d, &["done", "t1", "--outcome", "progress", "--block", "用 A 方案还是 B 方案？", "--note", "等人"], None, &[]);
 
-    let o = zloop(d, &["replan", "--apply", "--why", "换个路线"], Some("[P0] 新路线 :: 验新
-"), &[]);
+    let o = zloop(
+        d,
+        &["replan", "--apply", "--why", "换个路线"],
+        Some(
+            "[P0] 新路线 :: 验新
+",
+        ),
+        &[],
+    );
     assert_eq!(o.code, 0, "{}{}", o.out, o.err);
     let st = state::load(&state::state_path(d)).unwrap();
     let t1 = st.todos.iter().find(|t| t.id == "t1").unwrap();
@@ -2227,23 +2356,44 @@ fn a_successful_round_can_still_say_the_rest_of_the_plan_is_dead() {
     zloop(d, &["init", "把冷启动降到 1 秒"], None, &[]);
     zloop(
         d,
-        &["plan", "--add", "[P0] 量出最慢的三处", "--add", "[P0] 给最慢那处加缓存",
-          "--add", "[P0] 复测", "--add", "[P1] 补基准", "--add", "[P1] 写文档"],
+        &[
+            "plan",
+            "--add",
+            "[P0] 量出最慢的三处",
+            "--add",
+            "[P0] 给最慢那处加缓存",
+            "--add",
+            "[P0] 复测",
+            "--add",
+            "[P1] 补基准",
+            "--add",
+            "[P1] 写文档",
+        ],
         None,
         &[],
     );
     zloop(d, &["done", "t1", "--note", "慢在同步读 3 个大配置", "--approach", "打点", "--no-doc"], None, &[]);
 
     // 顺利做完第二条，把结论写进 note 里——zloop 读不出来，照旧沉默
-    let o = zloop(d, &["done", "t2", "--note", "加了缓存只省 30ms，瓶颈在反序列化", "--approach", "LRU", "--no-doc"], None, &[]);
+    let o =
+        zloop(d, &["done", "t2", "--note", "加了缓存只省 30ms，瓶颈在反序列化", "--approach", "LRU", "--no-doc"], None, &[]);
     assert!(!o.out.contains("计划可能要调整"), "光写在 note 里 zloop 认不出来，不该假装认得出: {}", o.out);
     assert!(!zloop(d, &["replan"], None, &[]).out.contains("[rethink]"), "没说出口就没有信号");
 
     // 说出口：一句 --rethink 就够
     let o = zloop(
         d,
-        &["done", "t3", "--note", "复测确认", "--approach", "基准", "--no-doc",
-          "--rethink", "瓶颈在反序列化，t4/t5 全建立在「缓存有效」这个前提上，前提没了"],
+        &[
+            "done",
+            "t3",
+            "--note",
+            "复测确认",
+            "--approach",
+            "基准",
+            "--no-doc",
+            "--rethink",
+            "瓶颈在反序列化，t4/t5 全建立在「缓存有效」这个前提上，前提没了",
+        ],
         None,
         &[],
     );
@@ -2293,7 +2443,8 @@ fn a_finished_todo_no_longer_counts_as_waiting_on_you() {
     zloop(d, &["plan", "--add", "[P0] 换二进制", "--add", "[P1] 收尾验收"], None, &[]);
 
     // t1 卡在人身上：该响
-    let o = zloop(d, &["done", "t1", "--outcome", "progress", "--block", "现在装还是跑完再装？", "--note", "等人"], None, &[]);
+    let o =
+        zloop(d, &["done", "t1", "--outcome", "progress", "--block", "现在装还是跑完再装？", "--note", "等人"], None, &[]);
     assert!(o.out.contains("t1 在等你回话"), "挂起时要提醒: {}", o.out);
     assert!(zloop(d, &["replan"], None, &[]).out.contains("[blocked]"), "材料包里也要有");
 

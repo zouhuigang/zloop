@@ -112,11 +112,7 @@ pub fn compute(state: &State) -> Stats {
 
 /// 最费劲的那条：返工最多，其次失败最多。用来回答"哪一步最不顺"。
 pub fn roughest(stats: &Stats) -> Option<&TodoStat> {
-    stats
-        .todos
-        .iter()
-        .filter(|t| t.rework > 0 || t.blocks > 0)
-        .max_by_key(|t| (t.rework, t.fails, t.blocks))
+    stats.todos.iter().filter(|t| t.rework > 0 || t.blocks > 0).max_by_key(|t| (t.rework, t.fails, t.blocks))
 }
 
 /// 还没做完的条数（和 `status` 用同一口径：deferred 算了结）。

@@ -105,7 +105,10 @@ fn parse_loopx_state_keeps_only_open_items() {
 #[test]
 fn plan_line_acceptance_syntax() {
     let mut st = state::default_state("g", "g");
-    let items = todo::parse_plan("[P0] build api :: all CRUD endpoints return 200 and tests pass\n[P1] no acceptance here\n[P2] weird :: \n", 1);
+    let items = todo::parse_plan(
+        "[P0] build api :: all CRUD endpoints return 200 and tests pass\n[P1] no acceptance here\n[P2] weird :: \n",
+        1,
+    );
     todo::add(&mut st, &items, false);
     assert_eq!(st.todos[0].text, "build api");
     assert_eq!(st.todos[0].acceptance.as_deref(), Some("all CRUD endpoints return 200 and tests pass"));
