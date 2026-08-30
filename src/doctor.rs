@@ -326,7 +326,7 @@ fn check_ledger(root: &Path, gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
             .filter(|d| d.as_str() != crate::todo::USER)
             // 重复 id 只认第一条，和 `todo::index_of` / `is_executable` 保持一致
             .filter_map(|d| st.todos.iter().find(|x| &x.id == d))
-            .filter(|dep| !can_still_finish(&dep.status))
+            .filter(|dep| !crate::todo::can_still_finish(&dep.status))
             .map(|dep| {
                 if dep.status == "deferred" {
                     format!("{}（已延后）", dep.id)
@@ -380,15 +380,6 @@ fn check_ledger(root: &Path, gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
             ));
         }
     }
-}
-
-/// 这条 todo 还有没有机会走到 `done`——`dead_blocked_by` 判「依赖是不是死的」就看这个。
-///
-/// `open` 会被派出去；`blocked` 等的是人，人一答 `edit --status open` 就回到队列里；
-/// `done` 本来就满足依赖。剩下的两种走不到：`deferred` 被 `open_ordered` 过滤掉，
-/// 手改进来的野状态（`cancelled`）过不了 `is_executable` 的 `status == "open"`。
-fn can_still_finish(status: &str) -> bool {
-    matches!(status, "open" | "blocked" | "done")
 }
 
 /// 依赖成了环：`t1 ← t2 ← t1`。

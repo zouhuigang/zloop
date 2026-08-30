@@ -13,6 +13,18 @@ pub fn is_terminal(status: &str) -> bool {
     matches!(status, "done" | "deferred")
 }
 
+/// 这条 todo 还有没有机会走到 `done`——「等它的那条会不会永远轮不到」就看这个。
+///
+/// `open` 会被派出去；`blocked` 等的是人，人一答 `edit --status open` 就回到队列里；
+/// `done` 本来就满足依赖。剩下的两种走不到：`deferred` 被 [`open_ordered`] 过滤掉，
+/// 手改进来的野状态（`cancelled`）过不了 [`is_executable`] 的 `status == "open"`。
+///
+/// `doctor` 的 `dead_blocked_by` 和 `status` 清单里的「等不到」共用这一个定义——
+/// 分成两份写过一次就会走散：一块屏幕报警、另一块说一切正常。
+pub fn can_still_finish(status: &str) -> bool {
+    matches!(status, "open" | "blocked" | "done")
+}
+
 /// Parse one plan line: optional bullet, optional `[Pn]` prefix, then text.
 pub fn parse_line(line: &str, default_priority: u8) -> Option<(u8, String)> {
     let mut text = line.trim();

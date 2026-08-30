@@ -1445,6 +1445,11 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             paint: u8,                      // 0 dim, 1 done, 2 active, 3 wait
             sub: Vec<(String, String, u8)>, // (前缀, 内容, paint)
         }
+        // 附注缩进两格并挂一个 `↳`：不缩的话它和上一行一样顶格，看上去是两条并列的
+        // 记录，而不是同一条的下半截。缩进**在这里**加不在打印时加——列宽是照
+        // `sub` 的内容算的，打印时才加前缀的话，算出来的宽度装不下自己（踩过：
+        // 「验收：tests green」被截成「验收：tests …」）。溢出到表外时再按它剥掉缩进。
+        const IND: &str = "  ↳ ";
         let mut rows: Vec<Row> = Vec::new();
         for (i, t) in st.todos.iter().enumerate() {
             let running_now = st.in_progress.as_ref().map(|ip| ip.todo.as_str()) == Some(t.id.as_str());
@@ -1454,6 +1459,16 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
                 .blocked_by
                 .iter()
                 .find(|dep| dep.as_str() != todo::USER && !st.todos.iter().any(|x| &x.id == *dep && x.status == "done"));
+            // 等的那条还会不会有 done 的一天。三种走不到：依赖根本不在清单里
+            // （`compact` 把它搬走了，doctor 的 `dangling_blocked_by`）、依赖已延后、
+            // 依赖的状态被手改成 zloop 不认的词（后两种是 doctor 的 `dead_blocked_by`）。
+            // 以前这三种和「正常排队」在这一列长得一模一样，都是一行灰的 `⏳ 等 t1`——
+            // doctor 退 1 大喊永远轮不到，天天看的这块屏一个字都不说。
+            let dep_dead = pending_dep.and_then(|dep| match st.todos.iter().find(|x| &x.id == dep) {
+                None => Some(format!("zloop edit {} --blocked-by ''", t.id)), // 指不到的 id：只能断开
+                Some(x) if !todo::can_still_finish(&x.status) => Some(format!("zloop edit {dep} --status open")),
+                Some(_) => None,
+            });
             let is_next = next_id.as_deref() == Some(t.id.as_str());
             let (icon, word, paint): (&str, String, u8) = if t.status == "done" {
                 ("✅", "完成".into(), 1)
@@ -1463,6 +1478,9 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
                 ("🔄", "执行中".into(), 2)
             } else if waiting_on_you {
                 ("❗", "等你回话".into(), 3)
+            } else if let (Some(dep), true) = (pending_dep, dep_dead.is_some()) {
+                // 等一条永远不会 done 的：这不是排队，是死等，得和 `⏳` 分开看
+                ("⛔", format!("等不到 {dep}"), 3)
             } else if let Some(dep) = pending_dep {
                 // id 现在每行都看得见，所以直接说等哪条，不用再绕一层步骤号
                 ("⏳", format!("等 {dep}"), 0)
@@ -1471,17 +1489,16 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             } else {
                 ("○", "排队中".into(), 0)
             };
-            // 附注缩进两格并挂一个 `↳`：不缩的话它和上一行一样顶格，看上去是两条并列的
-            // 记录，而不是同一条的下半截。缩进**在这里**加不在打印时加——列宽是照
-            // `sub` 的内容算的，打印时才加前缀的话，算出来的宽度装不下自己（踩过：
-            // 「验收：tests green」被截成「验收：tests …」）。
-            const IND: &str = "  ↳ ";
             let mut sub = Vec::new();
             if waiting_on_you && !t.note.is_empty() {
                 sub.push(("  ↳".into(), t.note.clone(), 3));
             }
             if waiting_on_you {
                 sub.push((format!("{IND}答完敲"), format!("zloop edit {} --status open", t.id), 4));
+            }
+            // 死等的那条同样欠一个出口：光说「等不到 t4」还是不知道该敲什么
+            if let Some(fix) = dep_dead {
+                sub.push((format!("{IND}解开敲"), fix, 4));
             }
             if let Some(a) = &t.acceptance {
                 if t.status != "done" {
@@ -1579,8 +1596,10 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             pad(head[3], w_st),
         );
         println!("  {}", rule("├", "┼", "┤"));
-        // 表格宽度装不下的命令：半条命令比放到表外更糟，所以攒起来印在表下面
-        let mut spill: Vec<(String, String)> = Vec::new();
+        // 表格宽度装不下的命令：半条命令比放到表外更糟，所以攒起来印在表下面。
+        // 带上各自的引导词（`答完敲` / `解开敲`）——溢出的不止「等你回话」一种了，
+        // 写死一个词会把「解开死等」印成「答完敲」，指着人去回一个没人问过的问题。
+        let mut spill: Vec<(String, String, String)> = Vec::new();
         // 已完成的那一段和「从这里往下还没做」之间画一道线。
         // 15 行同样粗细的框线连在一起就是一堵墙——眼睛需要一个落点，
         // 而这个落点天然就是"做完的到此为止"。
@@ -1608,7 +1627,7 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             for (prefix, content, paint) in &r.sub {
                 let room = w_tx.saturating_sub(style::width(prefix) + usize::from(!prefix.ends_with('：')));
                 if *paint == 4 && style::width(content) > room {
-                    spill.push((r.id.clone(), content.clone()));
+                    spill.push((r.id.clone(), prefix.strip_prefix(IND).unwrap_or(prefix).to_string(), content.clone()));
                     continue;
                 }
                 let content = style::truncate(content, room);
@@ -1633,8 +1652,8 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             note_row(&format!("… 后面还有 {tail} 步 · zloop status --json 看全部"));
         }
         println!("  {}", rule("└", "┴", "┘"));
-        for (id, cmd) in &spill {
-            println!("  {} {}", c.dim(&format!("{id} 答完敲")), c.bold(cmd));
+        for (id, label, cmd) in &spill {
+            println!("  {} {}", c.dim(&format!("{id} {label}")), c.bold(cmd));
         }
     }
 

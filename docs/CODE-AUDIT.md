@@ -1799,3 +1799,66 @@ zloop doctor             → 没发现问题（exit 0）
 | `doctor_test::depending_on_a_deferred_todo_is_reported_like_a_dangling_one` | 先钉住 `reason=blocked` 这个前提，再要求 doctor 报 `dead_blocked_by` + exit 1；`edit t1 --status open` 之后立刻闭嘴、`next` 重新有活干 | `[]`（findings 空） |
 | `doctor_test::depending_on_a_todo_with_an_unknown_status_is_reported_too` | 手改成 `"cancelled"` 的那一半，且要把野状态原样印进 `what` | `[]` |
 | `doctor_test::a_live_dependency_is_not_a_dead_end` | 反向：依赖还开着 / 依赖在等人（`done --block`）/ 两条都 deferred，一个字都不该报，doctor 退 0 | 照常绿（它防的是误报） |
+
+## 13. 第十一轮：两条小尾巴
+
+### T36-①（低）`tests/scratch_t33.rs` 被误提交进仓库 — 已清
+
+t33 那一轮留下的观察用脚手架，文件里两行注释自己写着「未被 git 跟踪、该 `rm` 掉」，
+结果 `git add -A` 连它一起带进了 71a74d6。内容只有那两行注释，编译产物是一个空的
+测试二进制——不影响任何结果，但它是一句**写在仓库里的假话**（"未被 git 跟踪"），
+下一个人照着读会以为工作区脏了。`git rm tests/scratch_t33.rs`，没有别的动作。
+
+### T36-②（中）`status` 对「永远等不到」和「正常排队」用同一个词 — 已修
+
+A-22 的收尾里写了一句「面板上更误导」，当时只修了 `doctor`。这一轮把那句话补完。
+
+`status` 的进展列对**三种命完全不同**的等待印同一个东西——一行灰的 `⏳ 等 tN`：
+
+| 依赖那条的状态 | 会不会有 done 的一天 | 修复前的进展列 | doctor |
+|---|---|---|---|
+| `open` / `blocked` | 会，迟早轮得到 | `⏳ 等 t1` | 不报（正常形状） |
+| `deferred` | 不会（不进 `open_ordered`） | `⏳ 等 t4` | `dead_blocked_by`，exit 1 |
+| 手改的野状态（`cancelled`） | 不会（过不了 `is_executable`） | `⏳ 等 t4` | `dead_blocked_by`，exit 1 |
+| 不在清单里（`compact` 搬走了） | 不会 | `⏳ 等 t1` | `dangling_blocked_by`，exit 1 |
+
+复现（四条真命令，不手搓状态）：
+
+```
+zloop plan --add "[P0] 做基础" --add "[P1] 等基础" --add "[P2] 等一条延后的" --add "[P2] 会被延后"
+zloop edit t2 --blocked-by t1 ; zloop edit t3 --blocked-by t4 ; zloop edit t4 --status deferred
+zloop status   → │ 2 │ t2 │ 等基础       │ ⏳ 等 t1 │      ← 正常排队
+                 │ 3 │ t3 │ 等一条延后的 │ ⏳ 等 t4 │      ← 永远轮不到，长得一模一样
+zloop doctor   → ✗ t3 依赖 t4（已延后）…（exit 1）
+```
+
+**评估结论：标出来。** 两块屏的读者不是同一批人——`doctor` 是**起了疑**才会去跑的，
+而 `status` 是**每天都看**的那一块。三行长得一样，人根本没有起疑的由头，
+也就永远走不到 `doctor` 那一步；`next` 那头只会说 `blocked` + "隔一阵重试"，
+更像在正常等待。这不是审美问题：它决定的是**这个问题要多久才被发现**。
+
+改法（`cli.rs::status`）：
+
+- 判据**不重写一份**，`can_still_finish` 从 `doctor.rs` 提到 `todo.rs` 变公开，
+  两处共用一个定义。分两份写过一次就会走散：一块屏幕报警、另一块说一切正常。
+- 死等的那行印 `⛔ 等不到 t4`，paint 用 3（黄）。**换词不换色不行**——管道 / `NO_COLOR`
+  下颜色一个字都不剩，得让文本自己把话说完。
+- 底下挂一条出口命令（`↳ 解开敲 …`），和「等你回话」的 `↳ 答完敲 …` 同一套。
+  给哪条命令跟着 doctor 走：依赖还在就 `edit <dep> --status open`（捡回来），
+  依赖已经不在了只能 `edit <t> --blocked-by ''`（断开）——**不能反过来**，
+  让人去改一条已经不存在的 todo 是死路。
+- 顺带修了溢出行：窄窗口下装不下的命令会被攒到表外印，而那段代码把引导词写死成
+  「答完敲」。多了第二种命令之后，`解开敲 zloop edit t4 --status open` 会被印成
+  「t3 答完敲 …」，指着人去回一个没人问过的问题。改成 `spill` 自带引导词。
+
+回归测试 `cli_test::status_tells_a_dead_wait_apart_from_a_normal_queue`：
+先用 `doctor` exit 1 钉住「这确实是死等」的前提，再验四件事——
+活依赖仍是 `⏳ 等 t1`、死依赖变 `⛔ 等不到 t4` 且不再出现 `⏳ 等 t4`、
+出口命令在、捡回来之后 `⛔` 立刻消失；野状态和 `compact` 搬走两种走法各验一遍
+（后者要求给的是「断开」而不是「捡回来」）。外加表格宽度一致 + 46/60/80/100 列不折行。
+撤掉这个分支立刻变红：
+
+```
+panicked at tests/cli_test.rs:1248: 等一条已延后的依赖要说出来:
+  │    3 │ t3 │ 等一条延后的 │ ⏳ 等 t4 │
+```

@@ -1223,6 +1223,80 @@ fn status_headline_names_the_state_and_colour_is_opt_in() {
     assert!(!o.out.contains('░'), "a finished bar is entirely full: {}", o.out);
 }
 
+/// 「永远等不到」在天天看的那块屏上必须和「排队中」长得不一样。
+///
+/// 修复前：`⏳ 等 t1` 一个词包住三种命——依赖还开着（迟早轮到）、依赖已延后、依赖压根
+/// 不在清单里。后两种 `doctor` 退 1 大喊"永远轮不到"，`status` 却一个字不说，
+/// 而 `status` 才是人每天看的那一块。三行同样是灰的 `⏳ 等 tN`，人没有任何理由去跑 doctor。
+#[test]
+fn status_tells_a_dead_wait_apart_from_a_normal_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "alpha"], None, &[]);
+    zloop(
+        d,
+        &["plan", "--add", "[P0] 做基础", "--add", "[P1] 等基础", "--add", "[P2] 等一条延后的", "--add", "[P2] 会被延后"],
+        None,
+        &[],
+    );
+    zloop(d, &["edit", "t2", "--blocked-by", "t1"], None, &[]);
+    zloop(d, &["edit", "t3", "--blocked-by", "t4"], None, &[]);
+    assert_eq!(zloop(d, &["edit", "t4", "--status", "deferred"], None, &[]).code, 0);
+    // 先钉住前提：doctor 认定 t3 永远轮不到（少了这句，下面验的只是个没后果的字样）
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 1, "前提没了：doctor 得先认定这是死等");
+
+    let o = zloop(d, &["status", "--no-color"], None, &[]);
+    // 活着的依赖照旧：t1 还开着，t2 只是在排队
+    assert!(o.out.contains("⏳ 等 t1"), "活着的依赖还是普通排队: {}", o.out);
+    // 死掉的那条要换个说法，光换颜色不算——管道/NO_COLOR 下颜色一个字都不剩
+    assert!(o.out.contains("⛔ 等不到 t4"), "等一条已延后的依赖要说出来: {}", o.out);
+    assert!(!o.out.contains("⏳ 等 t4"), "别再和正常排队共用一个词: {}", o.out);
+    // 说了"等不到"还欠一个出口：敲什么才解得开
+    assert!(o.out.contains("解开敲") && o.out.contains("zloop edit t4 --status open"), "要给出解开的命令: {}", o.out);
+    // 表格每一行宽度必须一致，且窄窗口不折行——新的一列更宽，这两条最容易在这里破
+    let widths: Vec<usize> =
+        o.out.lines().filter(|l| l.contains('│') || l.contains('┌') || l.contains('└')).map(zloop::style::width).collect();
+    assert!(widths.windows(2).all(|w| w[0] == w[1]), "表格各行宽度不齐: {widths:?}");
+    for cols in [46usize, 60, 80, 100] {
+        let o = zloop(d, &["status"], None, &[("COLUMNS", &cols.to_string())]);
+        for line in o.out.lines() {
+            assert!(zloop::style::width(line) <= cols, "{cols} 列下这行超宽 ({}): {line:?}", zloop::style::width(line));
+        }
+    }
+    // 窄到装不下命令时，它连着自己的引导词一起溢到表外——不能印成"答完敲"
+    let narrow = zloop(d, &["status", "--no-color"], None, &[("COLUMNS", "46")]);
+    assert!(narrow.out.contains("t3 解开敲 zloop edit t4 --status open"), "溢出行要带对引导词: {}", narrow.out);
+
+    // 把依赖捡回来，那一行立刻回到普通排队
+    assert_eq!(zloop(d, &["edit", "t4", "--status", "open"], None, &[]).code, 0);
+    let o = zloop(d, &["status", "--no-color"], None, &[]);
+    assert!(!o.out.contains('⛔') && o.out.contains("⏳ 等 t4"), "依赖捡回来了还在喊死等: {}", o.out);
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 0);
+
+    // 野状态（手改进来的 `cancelled`）是同一种死法
+    let p = d.join(".zloop/state.json");
+    let mut st: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    st["todos"][3]["status"] = serde_json::json!("cancelled");
+    fs::write(&p, serde_json::to_string_pretty(&st).unwrap()).unwrap();
+    let o = zloop(d, &["status", "--no-color"], None, &[]);
+    assert!(o.out.contains("⛔ 等不到 t4"), "野状态也派不出去，一样是死等: {}", o.out);
+
+    // 依赖被 `compact` 搬走（这条 `edit --blocked-by` 拦得住、compact 拦不住）：
+    // 只剩断开一条路，所以给的命令也得是断开，不能是"把 t1 捡回来"——t1 已经不在了
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "beta"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 做基础", "--add", "[P1] 等基础"], None, &[]);
+    zloop(d, &["edit", "t2", "--blocked-by", "t1"], None, &[]);
+    zloop(d, &["next"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "ok", "--approach", "做了 a"], None, &[]);
+    assert_eq!(zloop(d, &["compact", "--keep-days", "0"], None, &[]).code, 0);
+    let o = zloop(d, &["status", "--no-color"], None, &[]);
+    assert!(o.out.contains("⛔ 等不到 t1"), "依赖被搬走了同样永远轮不到: {}", o.out);
+    assert!(o.out.contains("zloop edit t2 --blocked-by ''"), "指不到的 id 只能断开: {}", o.out);
+    assert!(!o.out.contains("zloop edit t1 --status open"), "别让人去改一条已经不存在的 todo: {}", o.out);
+}
+
 // ---------- 多目标 ----------
 
 #[test]
