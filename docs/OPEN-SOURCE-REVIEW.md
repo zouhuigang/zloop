@@ -108,7 +108,7 @@ Ralph 靠 `--max-iterations` 停下、Anthropic 靠人开下一个 session、Cod
 |---|---|---|---|
 | `zloop remember "…"` | Beads `bd remember`、Anthropic progress notes 里的"教训" | 追加到 `.zloop/NOTES.md`；`context` 新增「经验」段（最近 5 条）；heartbeat 第 3 条提示模型用它 | `cli_test::remember_pause_resume_and_compact` |
 | `zloop pause` / `resume` | Codex `/goal pause|resume` | 改 `goal.status`；runner 下次检查即 `stop (paused)` 并通知 | 同上 |
-| `run --git-commit` | Anthropic：每 session 一次 commit | 写回后 `git add -A -- .` → `git reset -- .zloop` → 有暂存才 commit `zloop <todo>: <note>`；journal 记 `commit`。踩坑：pathspec 里显式写被忽略的 `.zloop` 会让 `git add` 退出 1 | `runner_test::git_commit_checkpoints_each_round_excluding_zloop_dir` |
+| `run --git-commit` | Anthropic：每 session 一次 commit | 起跑时给工作树拍快照（路径 → 大小:mtime，`.zloop/` 除外）；写回后只提交**这条线之后变化的路径**，用 `--pathspec-from-file` 显式点名 commit `zloop <todo>: <note>`；journal 记 `commit` / `commit_held_back`。踩坑：`git add -A -- .` 会把别人的在制品和索引里已暂存的东西一起卷进来（A-12）；pathspec 里显式写被忽略的 `.zloop` 会让 `git add` 退出 1 | `runner_test::git_commit_checkpoints_each_round_excluding_zloop_dir`、`::git_checkpoint_leaves_foreign_work_in_progress_out`、`::git_checkpoint_reclaims_work_left_by_a_round_that_never_wrote_back` |
 | policy `preflight_cmd` | Anthropic：session 开头跑 `init.sh` + 基线验证 | runner 每轮前 `sh -c`（受 `--timeout-min` 约束）；失败 → 记 `fail`、不调宿主、journal `preflight_failed`；通过 → 摘要进 prompt | `runner_test::preflight_failure_records_fail_and_success_reaches_the_host` |
 | `zloop compact --keep-days N` | Beads 记忆衰减 | 把 done/deferred 超 N 天的 todo 及其 tick 移到 `.zloop/archive/compact-<ts>.json` | `cli_test::remember_pause_resume_and_compact` |
 

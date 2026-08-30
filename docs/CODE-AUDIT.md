@@ -665,3 +665,63 @@ $ zloop edit t1 --status open && zloop next --json → ready / t1
 - **负数 policy 造成下溢**：`max_runs: -5` 在反序列化阶段就被拒（"expected usize"），
   exit 1 且信息清楚，压根进不了调度器。
 - **0 条 todo 被当成"全部完成"**：报的是 `unplanned`，措辞也对。这条以前是 bug，已经修过了。
+
+---
+
+## 7. 第五轮：实景撞上的
+
+不是扫出来的——是这次长跑自己踩的。审查会话和无头 runner 共用一个工作树，
+`--git-commit` 的 checkpoint 当场把对方没写完的代码提交了。
+
+### A-12（高）`--git-commit` 的 checkpoint 提交整个工作树 — 已修
+
+`runner.rs` 原来的 `git_checkpoint`：
+
+```rust
+git(&["add", "-A", "--", "."])?;
+let _ = git(&["reset", "-q", "--", ".zloop"]);
+git(&["commit", "-q", "-m", &format!("zloop {todo_id}: {note}")])?;
+```
+
+`add -A -- .` 是**整棵树**。runner 并不知道哪些改动是这一轮的 agent 干的，于是
+工作树里任何别人的在制品——另一个会话改了一半的文件、还没 `add` 的实验、
+甚至编译不过的半截函数——都会被卷进一条消息写着"zloop t16: <我这一轮干了什么>"的提交。
+提交消息说的是这条 todo，内容却是两个人的。runner 只打印一行 `git checkpoint <sha>`，
+不说它到底装了什么。
+
+还有一条更隐蔽的：`git commit` 会把**索引里已经暂存的一切**带走。别人 `git add` 完
+还没 commit 的东西，即使这一轮谁都没碰过它，也会被 checkpoint 顺手提交掉。
+
+**复现**（`runner_test::git_checkpoint_leaves_foreign_work_in_progress_out`）：起跑前在树里
+留三样别人的东西——未跟踪的 `broken.rs`（编译不过）、已跟踪 `shared.rs` 的半截改动、
+`git add` 过的 `staged.txt`——然后让 runner 带 `--git-commit` 跑两轮。撤掉修复：
+
+```
+assertion `left == right` failed
+  left: ["broken.rs", "shared.rs", "staged.txt", "t1.txt"]
+ right: ["t1.txt"]
+```
+
+三样全在"zloop t1: wrote t1.txt"这条提交里。
+
+**修法**：runner 起跑时给工作树拍一张快照（路径 → 大小:mtime，`.zloop/` 除外），
+checkpoint 只提交这条线之后变化的路径，且用 `--pathspec-from-file` 显式点名
+（顺带解决索引里别人暂存物的问题，也不受 argv 长度限制）。三类路径三种处理：
+
+| 快照里的状态 | 处理 |
+| --- | --- |
+| 快照里没有 → 我们在场时冒出来的 | 提交 |
+| 在快照里且没变 → 别人的在制品，没人动过 | 留着不管 |
+| 在快照里但变了 → 两个人的改动缠在一个文件里 | **不提交**，打印+记账本 `commit_held_back` |
+
+第三类拆不开，所以宁可不提交也不能把别人的半成品塞进我的提交——但必须**出声**，
+这正是原来最糟的地方：它一声不吭。
+
+快照**只在 commit 成功后**刷新，不是每轮刷新。差别在于那些没写回的轮次：
+agent 干了活但 host 没写回 → 不 checkpoint → 改动留在树里。如果按轮刷新快照，
+下一轮就会把它当成"这轮开始前就脏的"外人东西永远扔掉。
+`runner_test::git_checkpoint_reclaims_work_left_by_a_round_that_never_wrote_back`
+钉住这一条（它在旧代码上也是绿的——它防的是修复本身跑偏，不是复现 bug）。
+
+**已知边界**：runner 跑着的时候别人**新建**的文件仍然分不出来（快照里没有 = 算我们的）。
+要根治得每轮重新拍快照，而那会牺牲上面"认领上一轮遗留"的能力。取舍留在这边。

@@ -813,7 +813,7 @@ zloop notify           # 群里收到"zloop 通知测试"即配置正确
 
 之后 runner 在**等你决定**（某条 todo 被 `--block`）、**限流退避**、**停机**（除 `--max-rounds`）时各推一条，同一情形不重复。不用飞书的话 `notify_cmd` 随便接：`"notify_cmd": "osascript -e \"display notification \\\"$ZLOOP_TEXT\\\"\""`。
 
-**runner 参数**（`start` / `run`）：`--host claude|codex`、`--timeout-min 30`、`--max-budget-usd`（仅 claude，单轮上限；总上限用 policy `max_total_usd`）、`--resume todo|all|none`、`--exit-on-wait`（等人时退出而不轮询，配合外部定时器用）、`--git-commit`（每轮写回后 `git commit`，排除 `.zloop/`）、`--max-rounds N`、`--fast`（间隔按秒，演示用）、`--allow-all`。
+**runner 参数**（`start` / `run`）：`--host claude|codex`、`--timeout-min 30`、`--max-budget-usd`（仅 claude，单轮上限；总上限用 policy `max_total_usd`）、`--resume todo|all|none`、`--exit-on-wait`（等人时退出而不轮询，配合外部定时器用）、`--git-commit`（每轮写回后 `git commit`，只装这个 runner 起跑之后变化的文件，排除 `.zloop/`）、`--max-rounds N`、`--fast`（间隔按秒，演示用）、`--allow-all`。
 
 ### 9. 从 loopx 迁移
 
@@ -1710,7 +1710,7 @@ macOS 上 runner 活着期间会**顶住合盖休眠**（`caffeinate` + 有 sudo
 | `--resume todo\|all\|none` | `todo` | 会话复用：同一条 todo 才 resume / 一直 resume / 每轮全新 |
 | `--max-budget-usd <金额>` | — | 传给 `claude -p --max-budget-usd`，每轮的花费上限 |
 | `--exit-on-wait` | 关 | 等人时直接退出，而不是按最慢间隔慢速轮询 |
-| `--git-commit` | 关 | 每个写回过的轮次之后自动 `git commit`（排除 `.zloop/`） |
+| `--git-commit` | 关 | 每个写回过的轮次之后自动 `git commit`；只装**这个 runner 起跑之后**变化的文件（排除 `.zloop/`），起跑时就脏着的在制品留着不动，拆不开的会打印出来 |
 | `--allow-all` | 关 | 绕过宿主的权限询问（`--dangerously-skip-permissions` / `danger-full-access`） |
 | `--fast` | 关 | 把"分钟"当"秒"，只用来演示和测试 |
 | `--reflect-every <N>` | `0` | 每 N 个 todo 轮次插一轮回看（见 [`reflect`](#zloop-reflect)）；不占轮次、不改 NOTES |

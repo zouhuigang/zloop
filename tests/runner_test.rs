@@ -417,6 +417,93 @@ echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
     assert!(journal(&d).iter().filter(|e| e["event"] == "commit").count() == 2);
 }
 
+/// 复现 t16：runner 跑着的时候工作树里有别人的在制品（还编译不过），
+/// checkpoint 不许把它卷进「zloop tN: <我的 note>」，而且卷不进去的要说出来。
+#[test]
+fn git_checkpoint_leaves_foreign_work_in_progress_out() {
+    let fake = fake_host(
+        r#"id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+echo "work for $id" > "$id.txt"
+# 第二轮我们也去动那个已经脏了的文件：两个人的改动缠在同一个文件里，拆不开
+if [ "$id" = t2 ]; then echo "// ours too" >> shared.rs; fi
+zloop done "$id" --note "wrote $id.txt" --approach "fake host round" >/dev/null 2>&1
+echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
+    );
+    let d = project(&["[P0] a", "[P0] b"]);
+    let git = |args: &[&str]| Command::new("git").args(args).current_dir(&d).output().unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    fs::write(d.join(".gitignore"), ".zloop/\n").unwrap();
+    fs::write(d.join("shared.rs"), "fn ok() {}\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "init"]);
+
+    // 起跑前留下别人的在制品：一处未跟踪的坏改动 + 一处已跟踪文件的改动 + 一处已经 add 过的
+    fs::write(d.join("broken.rs"), "fn nope( <<< this does not compile\n").unwrap();
+    fs::write(d.join("shared.rs"), "fn ok() {}\nfn half_written(\n").unwrap();
+    fs::write(d.join("staged.txt"), "someone else staged this\n").unwrap();
+    git(&["add", "staged.txt"]);
+
+    let (code, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--git-commit"], &[("PATH", &with_fake_path(&fake))]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out.matches("runner: git checkpoint").count(), 2, "{out}");
+
+    // 两条 checkpoint 都只装自己那一轮的产物
+    let files = |rev: &str| String::from_utf8_lossy(&git(&["show", "--name-only", "--format=", rev]).stdout).to_string();
+    assert_eq!(files("HEAD~1").split_whitespace().collect::<Vec<_>>(), ["t1.txt"], "{}", files("HEAD~1"));
+    assert_eq!(files("HEAD").split_whitespace().collect::<Vec<_>>(), ["t2.txt"], "{}", files("HEAD"));
+
+    // 别人的东西一条都没进历史（staged.txt 还留在索引里等它的主人提交），也没被顺手改掉
+    let committed = String::from_utf8_lossy(&git(&["log", "--format=", "--name-only"]).stdout).to_string();
+    assert!(!committed.contains("broken.rs") && !committed.contains("staged.txt"), "{committed}");
+    assert!(String::from_utf8_lossy(&git(&["ls-files"]).stdout).contains("staged.txt"), "别人 add 过的不该被 reset 掉");
+    assert_eq!(fs::read_to_string(d.join("shared.rs")).unwrap(), "fn ok() {}\nfn half_written(\n// ours too\n");
+    assert_eq!(
+        String::from_utf8_lossy(&git(&["show", "HEAD:shared.rs"]).stdout).to_string(),
+        "fn ok() {}\n",
+        "别人半截的改动不该被提交"
+    );
+
+    // 拆不开的那次要出声，而且要进账本
+    assert!(out.contains("runner: 没提交 shared.rs"), "{out}");
+    let j = journal(&d);
+    let held: Vec<_> = j.iter().filter(|e| e["event"] == "commit_held_back").collect();
+    assert_eq!(held.len(), 1, "{j:?}");
+    assert_eq!(held[0]["paths"][0], "shared.rs");
+    assert_eq!(j.iter().filter(|e| e["event"] == "commit").count(), 2);
+}
+
+/// 上一轮没写回（没 checkpoint）留下的改动是**我们自己的**，下一轮要认领回来，
+/// 不能因为「这一轮开始时它就脏着」被当成别人的在制品扔掉。
+#[test]
+fn git_checkpoint_reclaims_work_left_by_a_round_that_never_wrote_back() {
+    let fake = fake_host(
+        r#"id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+# 第一轮干了活却没写回 → runner 记 fail、不 checkpoint，产物留在树里；第二轮才写回
+if [ -e first_round_done ]; then
+  zloop done "$id" --note "wrote $id.txt" --approach "fake host round" >/dev/null 2>&1
+else
+  echo "work for $id" > "$id.txt"; touch first_round_done
+fi
+echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
+    );
+    let d = project(&["[P0] a"]);
+    let git = |args: &[&str]| Command::new("git").args(args).current_dir(&d).output().unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    fs::write(d.join(".gitignore"), ".zloop/\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "init"]);
+    let (_, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--git-commit"], &[("PATH", &with_fake_path(&fake))]);
+    assert!(out.contains("NO WRITEBACK") && out.contains("runner: git checkpoint"), "{out}");
+    // 第一轮的产物没随第一轮提交（那一轮没写回），第二轮的 checkpoint 要把它认领回来
+    let head = String::from_utf8_lossy(&git(&["show", "--name-only", "--format=", "HEAD"]).stdout).to_string();
+    assert!(head.contains("t1.txt"), "{head} · {out}");
+    assert!(!out.contains("没提交"), "{out}");
+}
+
 #[test]
 fn preflight_failure_records_fail_and_success_reaches_the_host() {
     let fake = fake_host(

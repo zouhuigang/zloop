@@ -212,31 +212,135 @@ fn preflight(root: &Path, cmd: &str, timeout: Duration) -> std::result::Result<S
 }
 
 /// Stage everything except `.zloop/` and commit, only inside a repo with real changes. Returns the short sha.
-fn git_checkpoint(root: &Path, todo_id: &str, note: &str) -> Option<String> {
+/// Everything dirty outside `.zloop/` at one instant: path → identity (size:mtime, or the
+/// porcelain code once the file is gone). Comparing two of these across a round separates
+/// what the host just did from work-in-progress that was already sitting in the tree.
+type DirtySnapshot = std::collections::BTreeMap<String, String>;
+
+fn git_dirty(root: &Path) -> DirtySnapshot {
+    let mut snap = DirtySnapshot::new();
+    // -uall lists untracked files one by one (plain porcelain collapses them to "?? dir/");
+    // -z leaves paths unquoted and NUL-separated, so spaces and unicode survive intact.
+    let Some(out) = Command::new("git").args(["status", "--porcelain", "-z", "-uall"]).current_dir(root).output().ok() else {
+        return snap;
+    };
+    if !out.status.success() {
+        return snap;
+    }
+    let mut fields = out.stdout.split(|b| *b == 0);
+    while let Some(entry) = fields.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (code, path) = entry.split_at(3);
+        let code = String::from_utf8_lossy(code).trim().to_string();
+        if code.starts_with('R') || code.starts_with('C') {
+            fields.next(); // a rename/copy carries its source in the next field
+        }
+        // A path git prints in bytes we cannot name back is left out entirely: feeding a
+        // mangled pathspec to `git add` fails the *whole* checkpoint, and one unnameable
+        // file is not worth losing the round's commit over.
+        let Ok(path) = std::str::from_utf8(path) else { continue };
+        if path == ".zloop" || path.starts_with(".zloop/") {
+            continue;
+        }
+        snap.insert(path.to_string(), file_id(&root.join(path), &code));
+    }
+    snap
+}
+
+/// Size + mtime. Anything the host wrote during the round differs; anything nobody touched matches.
+fn file_id(p: &Path, code: &str) -> String {
+    match fs::metadata(p).and_then(|m| Ok((m.len(), m.modified()?))) {
+        Ok((len, t)) => {
+            let ns = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            format!("{len}:{ns}")
+        }
+        Err(_) => format!("gone:{code}"),
+    }
+}
+
+/// What a round's checkpoint took, and what it deliberately refused to take.
+#[derive(Default)]
+struct Checkpoint {
+    sha: Option<String>,
+    files: usize,
+    /// Paths that were already dirty before this runner started *and* changed during the round.
+    /// Someone else's edits and ours are interleaved in the same file and cannot be split, so
+    /// they stay out of a commit whose message names this todo.
+    held_back: Vec<String>,
+}
+
+/// One commit per round holding **only** what changed since `baseline`.
+///
+/// This used to be `git add -A -- .`, which swept the entire work tree in: a concurrent session's
+/// half-written (or non-compiling) edits landed under "zloop tN: <our note>", and the runner
+/// printed nothing but a sha. Now the baseline says what was already dirty, and the commit names
+/// its paths explicitly — which also keeps anything a foreign session left *staged* out of it.
+/// On success `baseline` is refreshed: whatever is still dirty after the commit is not ours.
+fn git_checkpoint(root: &Path, todo_id: &str, note: &str, baseline: &mut DirtySnapshot) -> Checkpoint {
+    let mut cp = Checkpoint::default();
     let git = |args: &[&str]| Command::new("git").args(args).current_dir(root).output().ok();
-    if !git(&["rev-parse", "--is-inside-work-tree"])?.status.success() {
-        return None;
+    if !git(&["rev-parse", "--is-inside-work-tree"]).is_some_and(|o| o.status.success()) {
+        return cp;
     }
-    // Anything changed outside .zloop/? (porcelain lines look like "?? path" / " M path")
-    let status = git(&["status", "--porcelain"])?;
-    let dirty = String::from_utf8_lossy(&status.stdout)
-        .lines()
-        .any(|l| l.len() > 3 && !l[3..].trim_start_matches('"').starts_with(".zloop"));
-    if !dirty {
-        return None;
+    let now = git_dirty(root);
+    let mut ours: Vec<&str> = Vec::new();
+    for (path, id) in &now {
+        match baseline.get(path) {
+            None => ours.push(path),                    // appeared while we were driving → ours
+            Some(before) if before == id => {}          // foreign WIP nobody touched → leave it dirty
+            Some(_) => cp.held_back.push(path.clone()), // foreign WIP the round also wrote → unsplittable
+        }
     }
-    // Never name .zloop in a pathspec: git exits 1 when an ignored path is mentioned explicitly.
-    git(&["add", "-A", "--", "."])?;
-    let _ = git(&["reset", "-q", "--", ".zloop"]); // unstage it if it was not ignored
-    if git(&["diff", "--cached", "--quiet"])?.status.success() {
-        return None; // nothing staged after all
+    if ours.is_empty() {
+        return cp;
+    }
+    let pathspec: Vec<u8> = ours.iter().flat_map(|p| p.as_bytes().iter().copied().chain([0])).collect();
+    // --pathspec-from-file has no argv limit and needs no quoting; .zloop never reaches it
+    // (git exits 1 when an ignored path is named explicitly).
+    if !git_pathspec(root, &["add", "--pathspec-from-file=-", "--pathspec-file-nul"], &pathspec) {
+        return cp;
     }
     let msg = format!("zloop {todo_id}: {}", if note.is_empty() { "round" } else { note });
-    if !git(&["commit", "-q", "-m", &msg])?.status.success() {
-        return None;
+    if !git_pathspec(root, &["commit", "-q", "-m", &msg, "--pathspec-from-file=-", "--pathspec-file-nul"], &pathspec) {
+        return cp;
     }
-    let sha = git(&["rev-parse", "--short", "HEAD"])?;
-    Some(String::from_utf8_lossy(&sha.stdout).trim().to_string())
+    cp.files = ours.len();
+    cp.sha = git(&["rev-parse", "--short", "HEAD"])
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    *baseline = git_dirty(root);
+    cp
+}
+
+/// Runs git with a NUL-separated pathspec on stdin. The list is small enough that the write
+/// never fills the pipe, so writing before reading cannot deadlock.
+fn git_pathspec(root: &Path, args: &[&str], paths: &[u8]) -> bool {
+    let child = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn();
+    let Ok(mut child) = child else { return false };
+    if let Some(mut w) = child.stdin.take() {
+        if w.write_all(paths).is_err() {
+            return false;
+        }
+    }
+    match child.wait_with_output() {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            let why = String::from_utf8_lossy(&o.stderr);
+            if let Some(line) = why.lines().find(|l| !l.trim().is_empty()) {
+                eprintln!("runner: git {} 失败：{line}", args[0]);
+            }
+            false
+        }
+        Err(_) => false,
+    }
 }
 
 /// Releases the keep-awake hold on *every* way out of `run()` — clean return, `?` error, or panic.
@@ -572,6 +676,10 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
     let mut grew_in_a_row: u32 = 0;
     let mut stop_after_replan: Option<String> = None;
     let mut notified: Option<String> = None; // dedupe: one notification per distinct wait/limit situation
+    // 起跑那一刻工作树里已经脏的东西 = 不是我们干的。每轮 checkpoint 只提交这条线之后的变化，
+    // 别人的在制品不会被卷进「zloop tN: <我的 note>」。**只在 commit 成功后**刷新：
+    // 某一轮没写回、没提交，那一轮的改动要留着给下一轮认领，不能当成外人的。
+    let mut git_baseline = if opts.git_commit { git_dirty(root) } else { DirtySnapshot::new() };
     loop {
         if stop_requested() {
             return stop(root, "sigterm");
@@ -791,9 +899,18 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
         if opts.git_commit && wrote_back {
             let st = state::load(&path)?;
             let note = st.ticks.last().map(|t| t.note.clone()).unwrap_or_default();
-            if let Some(sha) = git_checkpoint(root, &todo.id, &note) {
-                println!("runner: git checkpoint {sha}");
-                journal_append(root, &json!({"event": "commit", "round": round_no, "todo": todo.id, "sha": sha, "at": state::now_iso()}))?;
+            let cp = git_checkpoint(root, &todo.id, &note, &mut git_baseline);
+            if !cp.held_back.is_empty() {
+                let shown: Vec<&str> = cp.held_back.iter().take(5).map(String::as_str).collect();
+                let more = if cp.held_back.len() > 5 { format!(" 等 {} 个", cp.held_back.len()) } else { String::new() };
+                println!("runner: 没提交 {}{more} · runner 起跑前它们就是改过的，别人的在制品拆不开", shown.join(" "));
+                journal_append(root, &json!({"event": "commit_held_back", "round": round_no, "todo": todo.id,
+                                             "paths": cp.held_back, "at": state::now_iso()}))?;
+            }
+            if let Some(sha) = cp.sha {
+                println!("runner: git checkpoint {sha} · {} 个文件", cp.files);
+                journal_append(root, &json!({"event": "commit", "round": round_no, "todo": todo.id, "sha": sha,
+                                             "files": cp.files, "at": state::now_iso()}))?;
             }
         }
         // 写回之后按信号插一轮重估：只在账本读得出偏离时跑，一轮活最多跟一次，
