@@ -211,7 +211,6 @@ fn preflight(root: &Path, cmd: &str, timeout: Duration) -> std::result::Result<S
     }
 }
 
-/// Stage everything except `.zloop/` and commit, only inside a repo with real changes. Returns the short sha.
 /// Everything dirty outside `.zloop/` at one instant: path → identity (size:mtime, or the
 /// porcelain code once the file is gone). Comparing two of these across a round separates
 /// what the host just did from work-in-progress that was already sitting in the tree.
@@ -264,11 +263,15 @@ fn file_id(p: &Path, code: &str) -> String {
 #[derive(Default)]
 struct Checkpoint {
     sha: Option<String>,
-    files: usize,
-    /// Paths that were already dirty before this runner started *and* changed during the round.
+    files: Vec<String>,
+    /// Paths that were already dirty before the baseline was taken *and* changed during the round.
     /// Someone else's edits and ours are interleaved in the same file and cannot be split, so
     /// they stay out of a commit whose message names this todo.
     held_back: Vec<String>,
+    /// True when the work tree holds nothing of ours anymore: everything that appeared since the
+    /// baseline is either committed, or there was nothing to commit. Only then may the caller
+    /// re-take the baseline — see the round-start re-snapshot in `run`.
+    settled: bool,
 }
 
 /// One commit per round holding **only** what changed since `baseline`.
@@ -278,6 +281,12 @@ struct Checkpoint {
 /// printed nothing but a sha. Now the baseline says what was already dirty, and the commit names
 /// its paths explicitly — which also keeps anything a foreign session left *staged* out of it.
 /// On success `baseline` is refreshed: whatever is still dirty after the commit is not ours.
+///
+/// The rule "not in the baseline ⇒ ours" is only as good as how fresh the baseline is, so the
+/// caller re-takes it at the top of every round it safely can (`Checkpoint::settled`). What no
+/// snapshot can settle is a file a neighbour creates *while our host is running*: both wrote in
+/// the same window and the tree records no author. That one is committed as ours — which is why
+/// the committed paths get printed and journalled, so it can at least be spotted afterwards.
 fn git_checkpoint(root: &Path, todo_id: &str, note: &str, baseline: &mut DirtySnapshot) -> Checkpoint {
     let mut cp = Checkpoint::default();
     let git = |args: &[&str]| Command::new("git").args(args).current_dir(root).output().ok();
@@ -294,6 +303,7 @@ fn git_checkpoint(root: &Path, todo_id: &str, note: &str, baseline: &mut DirtySn
         }
     }
     if ours.is_empty() {
+        cp.settled = true; // 没有一件是我们的 → 树里也没有我们欠着的东西
         return cp;
     }
     let pathspec: Vec<u8> = ours.iter().flat_map(|p| p.as_bytes().iter().copied().chain([0])).collect();
@@ -306,11 +316,12 @@ fn git_checkpoint(root: &Path, todo_id: &str, note: &str, baseline: &mut DirtySn
     if !git_pathspec(root, &["commit", "-q", "-m", &msg, "--pathspec-from-file=-", "--pathspec-file-nul"], &pathspec) {
         return cp;
     }
-    cp.files = ours.len();
+    cp.files = ours.iter().map(|p| p.to_string()).collect();
     cp.sha = git(&["rev-parse", "--short", "HEAD"])
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     *baseline = git_dirty(root);
+    cp.settled = true;
     cp
 }
 
@@ -676,10 +687,12 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
     let mut grew_in_a_row: u32 = 0;
     let mut stop_after_replan: Option<String> = None;
     let mut notified: Option<String> = None; // dedupe: one notification per distinct wait/limit situation
-    // 起跑那一刻工作树里已经脏的东西 = 不是我们干的。每轮 checkpoint 只提交这条线之后的变化，
-    // 别人的在制品不会被卷进「zloop tN: <我的 note>」。**只在 commit 成功后**刷新：
-    // 某一轮没写回、没提交，那一轮的改动要留着给下一轮认领，不能当成外人的。
-    let mut git_baseline = if opts.git_commit { git_dirty(root) } else { DirtySnapshot::new() };
+    // 基线以外的脏东西 = 不是我们干的。每轮 checkpoint 只提交这条线之后的变化，
+    // 别人的在制品不会被卷进「zloop tN: <我的 note>」。
+    let mut git_baseline = DirtySnapshot::new();
+    // 基线是不是「结清」的：树里已经没有我们欠着没提交的东西。为真才允许重拍基线。
+    // 起跑那一刻按结清算——第一轮开工前会拍下第一张。
+    let mut git_baseline_settled = opts.git_commit;
     loop {
         if stop_requested() {
             return stop(root, "sigterm");
@@ -704,6 +717,19 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
             }
         }
         notified = None; // a runnable round resets the dedupe window
+
+        // 开工前重拍一次基线。上一轮收尾到这一刻这段时间里（睡眠、等人、回看之间），
+        // 我们一个宿主都没在跑，所以这时候新冒出来的脏东西一件都不是我们的。
+        // 不重拍的话，起跑时拍的那一张会一直用到停机：邻居在长跑中途新建的文件，
+        // 因为「基线里没有」就被下一次 checkpoint 认成我们的（t16 只挡住了起跑前就脏着的）。
+        //
+        // **只在上一轮结清了才重拍**，这是这里唯一的取舍：某一轮没写回、或者 add/commit
+        // 失败，那一轮的产物还躺在树里等下一轮认领，基线一重拍它们就被永远划给别人、
+        // 再也提交不了。宁可多认（提错了还能从 git 里挑出来），不可漏认（活直接丢）。
+        if git_baseline_settled {
+            git_baseline = git_dirty(root);
+            git_baseline_settled = false; // 马上就要放宿主进来写了
+        }
 
         // 攒够 N 轮就回看一次。只在两轮 todo 之间插入，所以它不占 todo 轮次，
         // 也不会因为 `rounds_done` 没变而连着触发（`last_reflect` 记住上次是在第几轮插的）。
@@ -900,6 +926,7 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
             let st = state::load(&path)?;
             let note = st.ticks.last().map(|t| t.note.clone()).unwrap_or_default();
             let cp = git_checkpoint(root, &todo.id, &note, &mut git_baseline);
+            git_baseline_settled = cp.settled;
             if !cp.held_back.is_empty() {
                 let shown: Vec<&str> = cp.held_back.iter().take(5).map(String::as_str).collect();
                 let more = if cp.held_back.len() > 5 { format!(" 等 {} 个", cp.held_back.len()) } else { String::new() };
@@ -908,9 +935,13 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                                              "paths": cp.held_back, "at": state::now_iso()}))?;
             }
             if let Some(sha) = cp.sha {
-                println!("runner: git checkpoint {sha} · {} 个文件", cp.files);
+                // 提交了哪几个，不只是提交了几个：轮内并发那一格没法靠快照判，
+                // 邻居的文件万一混进来，只有这行和账本能让人事后认出来。
+                let shown: Vec<&str> = cp.files.iter().take(5).map(String::as_str).collect();
+                let more = if cp.files.len() > 5 { format!(" 等 {} 个", cp.files.len()) } else { String::new() };
+                println!("runner: git checkpoint {sha} · {} 个文件：{}{more}", cp.files.len(), shown.join(" "));
                 journal_append(root, &json!({"event": "commit", "round": round_no, "todo": todo.id, "sha": sha,
-                                             "files": cp.files, "at": state::now_iso()}))?;
+                                             "files": cp.files.len(), "paths": cp.files, "at": state::now_iso()}))?;
             }
         }
         // 写回之后按信号插一轮重估：只在账本读得出偏离时跑，一轮活最多跟一次，

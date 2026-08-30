@@ -474,8 +474,74 @@ echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
     assert_eq!(j.iter().filter(|e| e["event"] == "commit").count(), 2);
 }
 
+/// 复现 t17：t16 的基线是**起跑那一刻**拍的，之后再没重拍过。于是邻居在两轮之间
+/// （runner 正在睡、一个宿主都没跑）新建的文件，因为「基线里没有」被下一轮的
+/// checkpoint 认成我们的，提进「zloop tN: <我的 note>」。
+#[test]
+fn git_checkpoint_leaves_out_a_file_a_neighbour_creates_between_rounds() {
+    let fake = fake_host(
+        r#"id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+echo "work for $id" > "$id.txt"
+zloop done "$id" --note "wrote $id.txt" --approach "fake host round" >/dev/null 2>&1
+echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
+    );
+    let d = project(&["[P0] a", "[P0] b"]);
+    let git = |args: &[&str]| Command::new("git").args(args).current_dir(&d).output().unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    fs::write(d.join(".gitignore"), ".zloop/\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "init"]);
+    // 两轮之间睡 3 秒（--fast 下 1 分 = 1 秒），邻居有足够的窗口落笔
+    let p = state::state_path(&d);
+    let mut st = state::load(&p).unwrap();
+    st.policy.intervals_min = vec![3, 3, 3];
+    state::save(&p, &mut st).unwrap();
+
+    // 邻居：等 runner 自己在账本上写下「我要睡了」（第一轮收尾之后才有这条，
+    // 那时 checkpoint 早已跑完、基线也刷过了），再趁它睡着新建一个文件。
+    // 别拿「commit 出现在 git log 里」当信号：commit 落地到基线刷新之间只有几毫秒，
+    // 抢进那道缝里写，文件会被算进新基线——测的就不是要测的那件事了。
+    let neighbour_dir = d.clone();
+    let neighbour = thread::spawn(move || {
+        for _ in 0..1200 {
+            let asleep = fs::read_to_string(neighbour_dir.join(".zloop/runner/journal.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .any(|e| e["event"] == "sleep");
+            if asleep {
+                fs::write(neighbour_dir.join("neighbour.rs"), "fn theirs( <<< still typing\n").unwrap();
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        false
+    });
+    let (code, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--git-commit"], &[("PATH", &with_fake_path(&fake))]);
+    assert!(neighbour.join().unwrap(), "邻居没等到 runner 入睡，这个用例没测到东西");
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out.matches("runner: git checkpoint").count(), 2, "{out}");
+
+    // 第二轮只装自己的产物；邻居那半截还留在树里等它的主人
+    let files = |rev: &str| String::from_utf8_lossy(&git(&["show", "--name-only", "--format=", rev]).stdout).to_string();
+    assert_eq!(files("HEAD").split_whitespace().collect::<Vec<_>>(), ["t2.txt"], "{} · {out}", files("HEAD"));
+    let committed = String::from_utf8_lossy(&git(&["log", "--format=", "--name-only"]).stdout).to_string();
+    assert!(!committed.contains("neighbour.rs"), "邻居在两轮之间新建的文件被卷进了提交：{committed}");
+    assert!(d.join("neighbour.rs").exists(), "也不该把它删了或改了");
+    // 它是别人的在制品，我们没碰过 → 不属于「拆不开」那一类，不该报
+    assert!(!out.contains("没提交 neighbour.rs"), "{out}");
+    // 提交了哪几个要说出来（轮内并发判不了，只能靠事后能认出来）
+    assert!(out.contains("git checkpoint") && out.contains("t2.txt"), "{out}");
+    let commits: Vec<_> = journal(&d).into_iter().filter(|e| e["event"] == "commit").collect();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[1]["paths"][0], "t2.txt");
+}
+
 /// 上一轮没写回（没 checkpoint）留下的改动是**我们自己的**，下一轮要认领回来，
 /// 不能因为「这一轮开始时它就脏着」被当成别人的在制品扔掉。
+/// 这条正好是上面那条的反面：基线只有在「上一轮结清了」才允许重拍。
 #[test]
 fn git_checkpoint_reclaims_work_left_by_a_round_that_never_wrote_back() {
     let fake = fake_host(
