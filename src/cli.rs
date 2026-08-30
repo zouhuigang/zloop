@@ -1358,7 +1358,8 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     // **id** 是创建时发的（t1…tN），而 `done --next` 会把后继插在当前这条后面——
     // 于是第 4 步可能是 t8。以前只给没做完的行显示 id，看的人只能猜，正是误解的来源。
     /// 清单最多印这么多行（**行**不是条：带验收的那条占两行）。
-    const MAX_LINES: usize = 14;
+    /// 给得宽松——用户要的是全貌，截尾是最后手段。
+    const MAX_LINES: usize = 40;
     if !st.todos.is_empty() {
         let next_id = d.todo.as_ref().map(|t| t.id.clone());
         struct Row {
@@ -1396,18 +1397,21 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             } else {
                 ("○", "排队中".into(), 0)
             };
+            // 附注缩进两格并挂一个 `↳`：不缩的话它和上一行一样顶格，看上去是两条并列的
+            // 记录，而不是同一条的下半截。缩进**在这里**加不在打印时加——列宽是照
+            // `sub` 的内容算的，打印时才加前缀的话，算出来的宽度装不下自己（踩过：
+            // 「验收：tests green」被截成「验收：tests …」）。
+            const IND: &str = "  ↳ ";
             let mut sub = Vec::new();
             if waiting_on_you && !t.note.is_empty() {
-                sub.push(("↳".into(), t.note.clone(), 3));
+                sub.push(("  ↳".into(), t.note.clone(), 3));
             }
             if waiting_on_you {
-                sub.push(("答完敲".into(), format!("zloop edit {} --status open", t.id), 4));
+                sub.push((format!("{IND}答完敲"), format!("zloop edit {} --status open", t.id), 4));
             }
-            // 验收只给**当前这一步**：排队中的那几条即使印出来也一定被截断，
-            // 一行读不全的验收标准不是信息，是噪音——想看全的敲 `zloop next` / `--json`。
             if let Some(a) = &t.acceptance {
-                if paint == 2 {
-                    sub.push(("验收：".into(), a.clone(), 0));
+                if t.status != "done" {
+                    sub.push((format!("{IND}验收："), a.clone(), 0));
                 }
             }
             rows.push(Row {
@@ -1421,27 +1425,19 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
             });
         }
 
-        // 折叠。两条原则：
-        //
-        // 1. **预算按印出来的行数算，不按 todo 条数**。有的行带附注（验收、等你回话的原话），
-        //    一条 todo 可能占两三行——按条数记账会算漏，正好 15 条时一条都不折、却印出 22 行。
-        // 2. **做完的没有阅读价值**，只留最近一条当上下文，其余收成一句「前面 N 步都做完了」。
-        //    要翻历史有 `zloop log`，状态栏该回答的是"现在在哪、接下来做什么"。
+        // 只有清单大到一屏塞不下才截尾，**而且只截尾**——做完的那些照样列出来。
+        // 用户要看的就是全貌；把「完成 完成 完成」收起来是替他做决定，不是帮忙。
+        // 预算按**印出来的行数**算，不按 todo 条数：带验收的一条占两行，
+        // 按条数记账会算漏（旧的 MAX_ROWS=15 遇上正好 15 条时一行不截，却印了 22 行）。
         let lines_of = |r: &Row| 1 + r.sub.len();
-        let first_open = rows.iter().position(|r| !r.finished).unwrap_or(rows.len());
-        // 留 1 条做过的当上下文；剩下的折掉（少于 2 条就不值得折，折了反而多一行）
-        let folded = first_open.saturating_sub(1);
-        let folded = if folded >= 2 { folded } else { 0 };
-        let mut shown = &rows[folded..];
+        let mut shown = &rows[..];
         let mut tail = 0;
-        // 折起来那一行本身也占预算
-        let mut budget = MAX_LINES.saturating_sub(usize::from(folded > 0));
+        let mut budget = MAX_LINES;
         let mut keep = 0;
         for r in shown {
             let need = lines_of(r);
             if keep > 0 && budget < need + 1 {
-                // +1 给「后面还有 N 步」那一行留位置
-                break;
+                break; // +1 给「后面还有 N 步」那一行留位置
             }
             budget = budget.saturating_sub(need);
             keep += 1;
@@ -1508,19 +1504,14 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         println!("  {}", rule("├", "┼", "┤"));
         // 表格宽度装不下的命令：半条命令比放到表外更糟，所以攒起来印在表下面
         let mut spill: Vec<(String, String)> = Vec::new();
-        if folded > 0 {
-            let stat = format!("✅ {folded} 条");
-            println!(
-                "  {bar_ch} {} {bar_ch} {} {bar_ch} {}{} {bar_ch} {}{} {bar_ch}",
-                " ".repeat(w_n),
-                " ".repeat(w_id),
-                c.dim(&style::truncate("前面都做完了 · zloop log 看做了什么", w_tx)),
-                pad(&style::truncate("前面都做完了 · zloop log 看做了什么", w_tx), w_tx),
-                c.dim(&stat),
-                pad(&stat, w_st),
-            );
-        }
-        for r in shown {
+        // 已完成的那一段和「从这里往下还没做」之间画一道线。
+        // 15 行同样粗细的框线连在一起就是一堵墙——眼睛需要一个落点，
+        // 而这个落点天然就是"做完的到此为止"。
+        let split = shown.iter().position(|r| !r.finished).filter(|&i| i > 0 && i < shown.len());
+        for (i, r) in shown.iter().enumerate() {
+            if split == Some(i) {
+                println!("  {}", rule("├", "┼", "┤"));
+            }
             let body = style::truncate(&r.text, w_tx);
             let n = r.n.to_string();
             let (body_p, stat_p) = (pad(&body, w_tx), pad(&r.stat, w_st));
