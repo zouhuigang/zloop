@@ -68,7 +68,13 @@ pub fn send(state: &State, root: &Path, kind: &str, text: &str) -> Result<bool> 
         // 都还得靠外面这个闸。带闸的那份实现只有一处，就是 `runner::run_capture`。
         sent |= accepted(
             "webhook",
-            crate::runner::run_capture(c, timeout(), crate::runner::Group::Own, Some(body.into_bytes())),
+            crate::runner::run_capture(
+                c,
+                timeout(),
+                crate::runner::Group::Own,
+                crate::runner::Stop::Honor,
+                Some(body.into_bytes()),
+            ),
         );
     }
     if let Some(cmd) = &state.policy.notify_cmd {
@@ -77,7 +83,13 @@ pub fn send(state: &State, root: &Path, kind: &str, text: &str) -> Result<bool> 
         c.arg("-c").arg(cmd).env("ZLOOP_EVENT", kind).env("ZLOOP_TEXT", text).env("ZLOOP_ROOT", root).current_dir(root);
         sent |= accepted(
             "command",
-            crate::runner::run_capture(c, timeout(), crate::runner::Group::Own, Some(event.into_bytes())),
+            crate::runner::run_capture(
+                c,
+                timeout(),
+                crate::runner::Group::Own,
+                crate::runner::Stop::Honor,
+                Some(event.into_bytes()),
+            ),
         );
     }
     Ok(sent)

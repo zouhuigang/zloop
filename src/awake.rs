@@ -8,10 +8,12 @@
 //!     runner dies, so even `kill -9` restores the default.
 //! On non-macOS platforms every function is a no-op.
 
+use crate::runner::{CapturedBytes, Group, Stop};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 pub const SUDOERS_FILE: &str = "/etc/sudoers.d/zloop-pmset";
 
@@ -23,12 +25,49 @@ pub fn holders_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".zloop").join("awake"))
 }
 
+/// 一条电源命令允许跑多久。`pmset` / `sudo -n` 正常都是几十毫秒；5 秒已经宽松到
+/// 「还没回来就是不打算回来了」。**不复用 `--timeout-min`**（那是给宿主的，动辄几十分钟），
+/// 也不复用 `git_timeout()`（那 60 秒是留给 `pre-commit` 钩子的，这里没有钩子这回事）。
+fn probe_timeout() -> Duration {
+    crate::runner::env_secs("ZLOOP_AWAKE_TIMEOUT_SECS", 5)
+}
+
+/// 跑一条电源命令，**带闸**（`runner::run_capture`）。
+///
+/// 这一层为什么需要闸：`pmset` 要跟 `powerd` 说话，`sudo` 要过一遍 sudoers 解析和目录服务
+/// （公司 Mac 绑了 AD/LDAP 时 `sudo` 会等网络）。任何一处 stall 都会让裸 `.output()` 无限期
+/// 等下去，而这几条命令**全在收尾路径上**：`stop()` 第一件事就是 `awake::release()`，
+/// 它挂住 = runner 不记 `stop`、不清 pid 文件、退不出去，跟通知那一下挂住是同一种死法
+/// （A-14 / T21）。
+///
+/// `Stop::Ignore` 不是疏忽，是这里的**必要条件**：见 [`Stop`]，`zloop stop` 的 SIGTERM 先置位、
+/// 之后才走到这儿，认叫停就等于永远恢复不了默认值。`Group::Own` 同理——被外面整组 `killpg`
+/// 时，这条「把设置改回去」的命令必须能从那一刀底下活下来把活干完。
+///
+/// `None` = 这一次没跑成（起不来 / 超时）。调用方一律当「读不出来 / 没成功」——
+/// 每个调用方本来就有这个分支。
+fn power_cmd(cmd: Command, what: &str) -> Option<CapturedBytes> {
+    match crate::runner::run_capture(cmd, probe_timeout(), Group::Own, Stop::Ignore, None) {
+        Ok(c) if c.timed_out => {
+            eprintln!("awake: `{what}` 超过 {:?} 没回来，已整组收掉；这次当读不出来", probe_timeout());
+            None
+        }
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!("awake: `{what}` 起不来：{e}");
+            None
+        }
+    }
+}
+
 /// Current `SleepDisabled` value from `pmset -g` (None when unknown / not macOS).
 pub fn sleep_disabled() -> Option<bool> {
     if !supported() {
         return None;
     }
-    let out = Command::new("pmset").arg("-g").output().ok()?;
+    let mut c = Command::new("pmset");
+    c.arg("-g");
+    let out = power_cmd(c, "pmset -g")?;
     let text = String::from_utf8_lossy(&out.stdout);
     text.lines().find_map(|l| {
         let l = l.trim();
@@ -41,25 +80,17 @@ pub fn sudo_ok() -> bool {
     if !supported() {
         return false;
     }
-    Command::new("sudo")
-        .args(["-n", "pmset", "-g"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let mut c = Command::new("sudo");
+    c.args(["-n", "pmset", "-g"]);
+    power_cmd(c, "sudo -n pmset -g").and_then(|c| c.status).map(|s| s.success()).unwrap_or(false)
 }
 
 fn set_sleep_disabled(on: bool) -> bool {
-    Command::new("sudo")
-        .args(["-n", "pmset", "-a", "disablesleep", if on { "1" } else { "0" }])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let mut c = Command::new("sudo");
+    c.args(["-n", "pmset", "-a", "disablesleep", if on { "1" } else { "0" }]);
+    // 超时 → false = 「没改成」。宁可让调用方走「改不动」那条分支（撤掉 holder、打提示），
+    // 也不能报告一个没发生的改动。
+    power_cmd(c, "sudo -n pmset -a disablesleep").and_then(|c| c.status).map(|s| s.success()).unwrap_or(false)
 }
 
 /// Runners currently holding the awake setting: (pid, project root). Dead pids are cleaned up.
@@ -173,6 +204,9 @@ pub fn release(pid: u32) -> Reconcile {
     reconcile()
 }
 
+/// **故意不走 `run_capture`**：这个进程要活到 runner 死为止（`-w <pid>`），在这里等它退出
+/// 就是在这里等到长跑结束。detach 出去、拿到 pid 就走，是它唯一正确的起法。
+/// 它也不需要闸——我们从不等它，挂不住我们。
 fn spawn_caffeinate(pid: u32) -> Option<u32> {
     let mut cmd = Command::new("caffeinate");
     cmd.args(["-i", "-s", "-w", &pid.to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -181,6 +215,9 @@ fn spawn_caffeinate(pid: u32) -> Option<u32> {
 }
 
 /// `while kill -0 <pid>; do sleep N; done; zloop awake reconcile` — detached so it outlives the runner.
+///
+/// 和 `spawn_caffeinate` 同理，**故意不走 `run_capture`**：它的全部职责就是比 runner 活得久
+/// （`kill -9` 之后替我们恢复默认值）。等它退出 = 等到它已经没用了。
 fn spawn_watchdog(pid: u32) -> Option<u32> {
     let poll = std::env::var("ZLOOP_AWAKE_POLL_SECS").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "15".into());
     let exe = std::env::current_exe().ok()?;
@@ -242,13 +279,12 @@ pub fn brief() -> Option<(String, bool)> {
     }
 }
 
-/// 现在靠电池吗？读不出来就当没在（宁可不说，也别瞎警告）。
+/// 现在靠电池吗？读不出来就当没在（宁可不说，也别瞎警告）——超时也算读不出来。
 fn on_battery() -> bool {
-    Command::new("pmset")
-        .args(["-g", "batt"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
+    let mut c = Command::new("pmset");
+    c.args(["-g", "batt"]);
+    power_cmd(c, "pmset -g batt")
+        .filter(|o| o.status.map(|s| s.success()).unwrap_or(false))
         .map(|o| String::from_utf8_lossy(&o.stdout).contains("'Battery Power'"))
         .unwrap_or(false)
 }
@@ -269,9 +305,12 @@ pub fn install_sudoers() -> Result<PathBuf> {
     let rule = sudoers_rule(&user);
     let tmp = std::env::temp_dir().join(format!("zloop-pmset.{}", std::process::id()));
     fs::write(&tmp, &rule)?;
-    let check = Command::new("visudo").args(["-c", "-f"]).arg(&tmp).output();
-    if let Ok(o) = check {
-        if !o.status.success() {
+    let mut c = Command::new("visudo");
+    c.args(["-c", "-f"]).arg(&tmp);
+    // `visudo -c` 只读一个文件、不问任何问题，所以它走闸；读不出来（超时/起不来）就当
+    // 「没能检查」，跟原来 `Err` 那条分支一样放行——真正的判官是下面的 `sudo install`。
+    if let Some(o) = power_cmd(c, "visudo -c") {
+        if !o.status.map(|s| s.success()).unwrap_or(false) {
             let msg = String::from_utf8_lossy(&o.stderr);
             if !msg.contains("permission") && !msg.contains("Permission") {
                 bail!("visudo rejected the rule: {}", msg.trim());
@@ -279,6 +318,10 @@ pub fn install_sudoers() -> Result<PathBuf> {
         }
     }
     println!("installing {SUDOERS_FILE} (you may be asked for your password):\n{rule}");
+    // **故意不走 `run_capture`**：这一下会在终端上问密码。闸会把 stdin 接到 `/dev/null`、
+    // 把 stdout/stderr 接成管道，密码提示到不了人眼前，人打的字也进不去——装上闸等于把
+    // `zloop install --sudoers` 弄坏。「人在键盘前想多久」也没有合理的超时可定。
+    // 它只在人手敲这一条命令时跑，不在 runner 的任何路径上，挂住也只挂住人自己那个终端。
     let status = Command::new("sudo")
         .args(["install", "-o", "root", "-g", "wheel", "-m", "0440"])
         .arg(&tmp)

@@ -369,7 +369,7 @@ pub(crate) fn env_secs(key: &str, default: u64) -> Duration {
 fn git_capture(root: &Path, args: &[&str], stdin_bytes: Option<Vec<u8>>) -> Option<Vec<u8>> {
     let mut c = Command::new("git");
     c.args(args).current_dir(root);
-    let cap = match run_capture(c, git_timeout(), Group::Own, stdin_bytes) {
+    let cap = match run_capture(c, git_timeout(), Group::Own, Stop::Honor, stdin_bytes) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("runner: git {} 起不来：{e}", args[0]);
@@ -542,6 +542,23 @@ pub(crate) enum Group {
     Inherit,
 }
 
+/// 这个子进程认不认 `zloop stop`——**收尾动作必须不认**。
+///
+/// * `Honor`：`stop_requested()` 一置位就整组收掉。**干活的**子进程都该这样，`zloop stop`
+///   才叫得动（A-6 / A-14）：宿主、git 检查点、通知，都是这一档。
+/// * `Ignore`：只认超时，不认叫停。**恢复系统设置这一类收尾动作只能这样**——`zloop stop`
+///   发的 SIGTERM 先把标志置上，之后才走到 `stop()` → `awake::release()`。那几条 `pmset`
+///   探针要是也认叫停，会在第一次轮询里被自己杀掉：`sleep_disabled()` 读不出来、
+///   `set_sleep_disabled()` 报失败，于是 `SleepDisabled=1` 原地留着没人恢复——
+///   「装了闸」把功能弄没了。超时那一半仍然在，所以它照样挂不住。
+///
+/// 判据是**这条命令是不是在替我们收拾现场**：是 → `Ignore`，其余一律 `Honor`。
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Stop {
+    Honor,
+    Ignore,
+}
+
 /// 往一个 pid（正数）或**整个进程组**（负数）发信号。
 #[cfg(unix)]
 fn signal_to(target: i32, sig: i32) {
@@ -632,16 +649,24 @@ pub(crate) struct CapturedBytes {
 
 /// 起一个子进程并**把闸装上**：进程组 + 超时 + `zloop stop` + 排水上限，一处实现。
 ///
-/// 每一个 zloop 起的子进程都必须走这里。裸 `.output()` / `wait_with_output()` 是无限期的
-/// 阻塞等待，既不看超时也不看 `stop_requested()`——git 钩子一挂住，runner 就跟着挂住，
-/// 而且 SIGTERM 叫不动（A-6 / A-14 是同一种死法的两条路）。
+/// **每一个 zloop 起的、要等它退出的子进程都必须走这里。** 裸 `.output()` /
+/// `wait_with_output()` / `.status()` 是无限期的阻塞等待，既不看超时也不看
+/// `stop_requested()`——git 钩子一挂住，runner 就跟着挂住，而且 SIGTERM 叫不动
+/// （A-6 / A-14 是同一种死法的两条路）。
+///
+/// 只有两类子进程有资格留在外面，而且必须在原地写明理由（见 `awake.rs`，docs/CODE-AUDIT.md §18）：
+/// **detach 出去、故意比我们活得久的**（`caffeinate`、看门狗——这里等它退出就是等到天亮），
+/// 和**要人手在终端上打字的**（`sudo install` 那一下要输密码：这里 stdin 是 `/dev/null`，
+/// stdout/stderr 是管道，密码提示根本到不了人眼前，超时也无从定）。
 ///
 /// `stdin_bytes` 为 `Some` 时把这些字节喂给子进程的 stdin 再关掉（EOF）。
-/// `group` 决定超时/叫停时收得掉谁、收不掉谁，见 [`Group`]。
+/// `group` 决定超时/叫停时收得掉谁、收不掉谁，见 [`Group`]；`stop` 决定它认不认
+/// `zloop stop`，见 [`Stop`]。
 pub(crate) fn run_capture(
     mut cmd: Command,
     timeout: Duration,
     group: Group,
+    stop: Stop,
     stdin_bytes: Option<Vec<u8>>,
 ) -> Result<CapturedBytes> {
     let what = cmd.get_program().to_string_lossy().into_owned();
@@ -677,7 +702,7 @@ pub(crate) fn run_capture(
         if let Some(st) = child.try_wait()? {
             break Some(st);
         }
-        if stop_requested() {
+        if stop == Stop::Honor && stop_requested() {
             stop_group(&mut child, group);
             interrupted = true;
             break None;
@@ -697,7 +722,7 @@ pub(crate) fn run_capture(
 
 /// `run_capture` 的文本版，给宿主用：stdout/stderr 转成 `String`（宿主输出本来就是 JSON/文本）。
 fn run_with_timeout(cmd: Command, timeout: Duration, what: &str) -> Result<Captured> {
-    let cap = run_capture(cmd, timeout, Group::Own, None)?;
+    let cap = run_capture(cmd, timeout, Group::Own, Stop::Honor, None)?;
     if !cap.drained {
         // 说出来：这一轮的输出是**截断**的，别让下游把半截 JSON 当成宿主的完整回话。
         eprintln!("runner: `{what}` 退出后管道还被它留下的后台进程占着，这一轮的输出只记到 {DRAIN_GRACE:?} 为止");

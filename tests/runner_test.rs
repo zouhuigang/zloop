@@ -1379,6 +1379,78 @@ fn watchdog_restores_default_after_kill_9_and_holders_are_reference_counted() {
     assert_eq!(fs::read_dir(e.home.join(".zloop/awake")).map(|r| r.count()).unwrap_or(0), 0);
 }
 
+/// A-15：`pmset` / `sudo -n` 挂住时，读电源状态的那几条命令必须自己收掉。
+///
+/// 这几条以前是裸 `.output()` / `.status()`：无限期等待，既没超时也没人叫得动。它们全在
+/// **收尾路径**上（`stop()` 第一件事就是 `awake::release()`），一挂住 runner 就不记 `stop`、
+/// 不清 pid 文件、退不出去。撤掉 `power_cmd` 的闸之后这个测试**挂住**而不是变红——
+/// 挂住的测试没人当成失败，所以这里用 `run_within` 兜底：到点还没退出就 SIGKILL + panic。
+#[test]
+fn hung_pmset_cannot_wedge_the_awake_probes() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let write = |name: &str, body: &str| {
+        let p = dir.join(name);
+        fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write("pmset", "sleep 600"); // powerd 卡住 / NFS stall / sudo 等 AD 目录服务
+    write("sudo", r#"[ "$1" = "-n" ] && shift; exec "$@""#); // sudo -n pmset 也跟着挂
+    let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default());
+    let e = awake_env();
+    let mut vars = awake_vars(&e, &path);
+    vars.push(("ZLOOP_AWAKE_TIMEOUT_SECS", "1"));
+    let d = project(&["[P0] a"]);
+    // `awake reconcile` 三条探针全走一遍：pmset -g、sudo -n pmset -g、（必要时）disablesleep
+    let (code, out, err) = run_within(&d, &["awake", "reconcile"], &vars, Duration::from_secs(30));
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(err.contains("`pmset -g` 超过 1s 没回来"), "闸响了要说出来，不能装作读到了：{err}");
+    assert!(out.contains("unchanged") && out.contains("was ?"), "读不出来就不许乱改设置：{out}");
+    assert!(out.contains("unknown (pmset -g unreadable)"), "{out}");
+    assert_eq!(pm_log(&e), "", "读不出当前值时一条写命令都不该发出去");
+}
+
+/// A-15：`zloop stop`（SIGTERM）之后，恢复默认值的那一下**必须还跑得动**。
+///
+/// 这是给 `runner::Stop::Ignore` 钉的断言，反面就在一步之遥：SIGTERM 先把 `stop_requested()`
+/// 置上，之后才走到 `stop()` → `awake::release()`。这几条 pmset 探针要是也认叫停（`Stop::Honor`），
+/// 会在 `run_capture` 的第一次轮询里被自己杀掉——`sleep_disabled()` 读不出来 → `reconcile()`
+/// 什么都不改 → `awake_off` 这条账根本不会写，`SleepDisabled=1` 留在原地。
+///
+/// 断言挑的是**账本**不是 `pm_state`：看门狗一秒后也会把值改回去，只看最终值分不出到底是谁干的。
+#[test]
+fn sigterm_still_lets_the_runner_restore_the_sleep_default() {
+    let slow = fake_host(r#"sleep 60; echo '{"session_id":"s","is_error":false,"result":"late"}'"#);
+    let tools = fake_power_tools(true);
+    let path = format!("{}:{}", tools.display(), with_fake_path(&slow));
+    let e = awake_env();
+    let vars = awake_vars(&e, &path);
+    let d = project(&["[P0] a"]);
+    let (code, out, err) = run(&d, &["start", "--fast", "--timeout-min", "120"], &vars);
+    assert_eq!(code, 0, "{out}{err}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline && pm_state(&e) != "1" {
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(pm_state(&e), "1", "runner 起来之后该先关掉合盖休眠：{}", pm_log(&e));
+    let pid: i32 = fs::read_to_string(d.join(".zloop/runner/pid")).unwrap().trim().parse().unwrap();
+
+    run(&d, &["stop"], &vars); // SIGTERM
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline
+        && Command::new("kill").args(["-0", &pid.to_string()]).output().unwrap().status.success()
+    {
+        thread::sleep(Duration::from_millis(200));
+    }
+    let j = journal(&d);
+    assert!(j.iter().any(|x| x["event"] == "stop" && x["reason"] == "sigterm"), "{j:?}");
+    assert!(
+        j.iter().any(|x| x["event"] == "awake_off" && x["restored_default"] == true),
+        "被 SIGTERM 叫停时 runner 自己就该把设置改回去（不是等看门狗擦屁股）：{j:?}\n{}",
+        pm_log(&e)
+    );
+    assert_eq!(pm_state(&e), "0", "{}", pm_log(&e));
+}
+
 #[test]
 fn awake_reconcile_fixes_a_stale_setting() {
     let tools = fake_power_tools(true);

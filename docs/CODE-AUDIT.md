@@ -2225,3 +2225,120 @@ if todo::is_terminal(&status) && !settled { bail!("{id} is already {status}"); }
 `cargo test` 189 全过（原 187）。`compact_leaves_the_round_that_is_still_in_flight`
 改了两行——它原来断言的出口是 `zloop edit t1 --status open`（当时 `done` 走不通），
 现在断言 `zloop done t1` 并直接敲它。
+
+---
+
+## 18. 第十六轮：T21（中）`awake.rs` 的 8 处裸子进程 — 收口 5 处、留 3 处并写明理由
+
+t20 收完 git 之后留了一句「**每个 zloop 起的子进程都走 `run_capture`**」，但 `awake.rs`
+里还有 8 处裸的。这一轮的题目是**评估要不要收口**，结论是「5 处要、3 处不能」，
+而且「不能」的那 3 处不是懒得改——真改了会把功能弄坏。
+
+### 18.1 先把 8 处列全（`grep -n "Command::new" src/`，一处不漏）
+
+| # | 位置 | 命令 | 谁在等它 | 结论 |
+|---|---|---|---|---|
+| 1 | `sleep_disabled()` | `pmset -g` | runner 启停 + `status` + `awake` | **收口** |
+| 2 | `sudo_ok()` | `sudo -n pmset -g` | 同上 | **收口** |
+| 3 | `set_sleep_disabled()` | `sudo -n pmset -a disablesleep 0/1` | 同上 | **收口** |
+| 4 | `on_battery()` | `pmset -g batt` | `status` 那行电池警告 | **收口** |
+| 5 | `install_sudoers()` | `visudo -c -f <tmp>` | 人敲 `zloop install --sudoers` | **收口** |
+| 6 | `spawn_caffeinate()` | `caffeinate -i -s -w <pid>` | **没人等** | 保留 |
+| 7 | `spawn_watchdog()` | `sh -c 'while kill -0 …'` | **没人等** | 保留 |
+| 8 | `install_sudoers()` | `sudo install -o root … /etc/sudoers.d/…` | 人（要打密码） | 保留 |
+
+顺带把剩下两处也核了：`runner::preflight` 走 `run_with_timeout` → `run_capture`（早就带闸），
+`daemon::start` 起的是 detach 出去的 runner 本身（和 6/7 同一类）。至此 `src/` 里
+**没有第 9 处**。
+
+### 18.2 1–4 不是「不在热路径上」，它们全在**收尾路径**上
+
+排 t21 时写的是「不在热路径、也不是会挂住的那一类」。这句话错了一半：
+
+`stop()` 的**第一行**就是 `awake::release()` → `reconcile()` → 1、2、3 三条命令。
+和通知那一下（`notify.rs` 的注释已经写明）是同一种死法：这里挂住，runner 就
+**不记 `stop`、不清 pid 文件、退不出去**——「干完就停」卡在最后一米，而且
+`AwakeGuard::drop` 里还有第二遍。
+
+会不会挂住？`pmset` 要跟 `powerd` 说话；`sudo` 要过 sudoers 解析 + 目录服务
+（公司 Mac 绑了 AD/LDAP 时 `sudo` 等的是网络）。裸 `.output()` / `.status()` 对这两种
+stall 都是无限期等待。
+
+**实测（修复前的等价实现）**：PATH 上放一个 `pmset` = `sleep 600`，
+`zloop awake reconcile` **一个字都不印，30 秒后被测试 SIGKILL**：
+
+```
+thread 'hung_pmset_cannot_wedge_the_awake_probes' panicked at tests/runner_test.rs:85:5:
+`zloop awake reconcile` 过了 30s 还没自己退出
+--- stdout ---
+--- stderr ---
+```
+
+修复后同一个场景：1 秒到点整组收掉，`awake: `pmset -g` 超过 1s 没回来，已整组收掉；
+这次当读不出来`，然后正常退 0 并印 `unknown (pmset -g unreadable)` / `unchanged`——
+**读不出当前值时一条写命令都不发**（`pm_log` 为空）。
+
+### 18.3 这一轮真正的发现：无脑套 `run_capture` 会把恢复默认值弄没
+
+`run_capture` 原来有**两个**闸：超时，和 `stop_requested()`。第二个对干活的子进程是对的，
+对**收尾**的子进程是致命的——`zloop stop` 的 SIGTERM 先把标志置上，之后才走到
+`stop()` → `awake::release()`。那三条 `pmset` 探针要是也认叫停，会在 `run_capture`
+第一次轮询里被**自己**杀掉：`sleep_disabled()` 读不出来 → `(None, _)` 落到
+`_ => None` → `set_sleep_disabled` 根本不调用 → `SleepDisabled=1` 原地留着。
+装了闸，反而把功能弄没了。
+
+所以 `run_capture` 多了一个显式的 `Stop` 参数，和 `Group` 一样，逼每个调用方
+当场表态：
+
+| | 语义 | 谁用 |
+|---|---|---|
+| `Stop::Honor` | 超时 **+** `zloop stop` 都收 | 宿主、preflight、git 检查点、`log::changed_files`、通知 |
+| `Stop::Ignore` | **只**认超时 | `awake` 的 5 条（它们是在替我们收拾现场） |
+
+`Group` 这里挑 `Own` 也是同一个道理：被外面整组 `killpg` 时，「把设置改回去」这条
+命令必须能从那一刀底下活下来把活干完。
+
+**实测（把 `Ignore` 改成 `Honor`）**：runner 被 `zloop stop` 之后，账本里
+**根本没有 `awake_off` 这一条**——
+
+```
+[…{"event":"end",…,"interrupted":true,…}, {"event":"stop","reason":"sigterm",…}]
+disablesleep 1
+disablesleep 0
+```
+
+注意 `pm_log` 末尾那个 `disablesleep 0`：**是一秒后看门狗补的，不是 runner 自己干的**。
+所以这条回归测试的断言挑的是**账本**（`awake_off` + `restored_default:true`）而不是
+最终值——只看最终值，看门狗会把这个 bug 全程盖住，测试永远绿。
+
+### 18.4 6/7/8 为什么**不能**收口（写进代码注释，不只写在这里）
+
+- **6 `caffeinate` / 7 看门狗**：它俩的全部职责就是**比 runner 活得久**（`-w <pid>`；
+  `kill -9` 之后替我们恢复默认值）。`run_capture` 是「等它退出」，在这儿等 = 等到长跑结束 /
+  等到它已经没用了。它们也不需要闸——我们从不等它们，它们挂不住我们。
+- **8 `sudo install`**：这一下**在终端上问密码**。`run_capture` 把 stdin 接 `/dev/null`、
+  stdout/stderr 接管道，密码提示到不了人眼前、人打的字也进不去，装上闸等于把
+  `zloop install --sudoers` 弄坏；「人在键盘前想多久」也没有合理的超时可定。
+  它只在人手敲那一条命令时跑，不在 runner 的任何路径上。
+
+于是那句总结改成一句**真的**话，写在 `run_capture` 的文档注释里：
+**每一个 zloop 起的、要等它退出的子进程都走 `run_capture`；不等的（detach 出去、
+故意活得更久的）和要人手打字的，在原地写明为什么。**
+
+### 18.5 回归测试
+
+| 测试 | 钉住什么 | 撤掉后 |
+|---|---|---|
+| `runner_test::hung_pmset_cannot_wedge_the_awake_probes` | `pmset` = `sleep 600` 时 `zloop awake reconcile` 30 秒内自己退 0，stderr 说出超时，且**不发任何写命令** | 把 `power_cmd` 换回裸 `.output()` → 测试**挂住**，30s 后 SIGKILL + panic（用 `run_within` 兜底正是为此：挂住的测试没人当成失败） |
+| `runner_test::sigterm_still_lets_the_runner_restore_the_sleep_default` | `zloop stop` 之后 runner **自己**把 `disablesleep` 改回去：账本里有 `awake_off` + `restored_default:true` | `Stop::Ignore` → `Stop::Honor` → 账本里没有 `awake_off`（值最后还是 0，但那是看门狗补的） |
+
+`cargo test` 191 全过（原 189）。`cargo fmt --check` 干净；`cargo clippy --all-targets`
+的 4 条 warning 和 HEAD 逐条相同，没新增。
+
+### 18.6 顺手记下、没在这一轮动的
+
+`install_sudoers()` 把规则先写到 `env::temp_dir()/zloop-pmset.<pid>`（0644），再
+`sudo install` 到 `/etc/sudoers.d/`。写和 install 之间有一个窗口，落到 `/tmp` 时
+（`TMPDIR` 没设）文件名是可预测的。macOS 上 `TMPDIR` 默认是每用户 0700 的
+`/var/folders/…`，所以实际可利用性低——但这是提权面上的 TOCTOU，值得单独排一条查清楚，
+不该混在这一轮的子进程收口里。

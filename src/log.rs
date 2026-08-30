@@ -65,7 +65,7 @@ fn git_read(root: &Path, args: &[&str], deadline: std::time::Instant, stalled: &
     }
     let mut c = std::process::Command::new("git");
     c.args(args).current_dir(root);
-    let cap = crate::runner::run_capture(c, left, crate::runner::Group::Inherit, None).ok()?;
+    let cap = crate::runner::run_capture(c, left, crate::runner::Group::Inherit, crate::runner::Stop::Honor, None).ok()?;
     if cap.timed_out || cap.interrupted {
         *stalled = true;
         return None;
