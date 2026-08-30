@@ -57,6 +57,28 @@ cargo clippy -W clippy::indexing_slicing              → 182 条（含测试）
 查找"（典型是 `todo::index_of()` 先返回 `Err` 才拿到 `idx`），clippy 看不出这层。
 不建议打开这条 lint——它会淹掉真问题。
 
+### 2.1 格式闸原先是空的（已修，t30）
+
+`cargo fmt --check` 当时在**全仓 29 个文件**上都不合规、790 个 hunk。全红等于没有信号：
+谁也不会去看一个永远失败的闸，格式漂移进来也没人拦。根因不是代码脏，是配置缺席——
+这份代码是 ~125 列的密排风格，而仓库里没有 `rustfmt.toml`，rustfmt 就按默认的 `max_width=100` 判。
+
+只调 `max_width` 还不够。rustfmt 另有一组"小启发式"（`fn_call_width=60`、`chain_width=60`、
+`struct_lit_width=18`…），会把**没超 `max_width`** 的调用和结构体字面量也拆行。同为 `max_width=125`：
+
+| 配置 | 一次性对齐的改动量 |
+|---|---|
+| 默认启发式 | 3200+ / 708− （多出 ~2400 行凭空的拆行） |
+| `use_small_heuristics = "Max"` | 778+ / 406− |
+
+结论：`rustfmt.toml` = `max_width = 125` + `use_small_heuristics = "Max"`，再跑一次 `cargo fmt` 对齐全仓。
+之后 `cargo fmt --check` 退 0，格式闸第一次真的能用。
+对齐那个提交只动格式，已进 `.git-blame-ignore-revs`（验证过：被拆行的 `tick.rs:160` 带上该文件后
+blame 从 `ac040d3` 回到真正的作者提交 `dfe739c7`）。
+
+**仍然没有 CI**：仓库里没有 `.github/`，所以这道闸目前只是"人可以跑的一条命令"，不是自动拦截。
+真要拦，得再配一条 workflow 或本地 pre-commit——记在待办里，不在本条范围内。
+
 ## 3. 测试覆盖空白
 
 用"pub 函数名在 `tests/` 里一次都没出现"粗测（会低估：很多函数是通过 CLI 测试间接跑到的）：

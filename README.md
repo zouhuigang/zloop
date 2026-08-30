@@ -1924,9 +1924,29 @@ paused/done  >  unplanned / all_done  >  user_gate / blocked  >  fail_streak  > 
 ### 开发
 
 ```bash
-cargo test                       # 71 个用例（tick / todo / state / cli / runner，runner 用假宿主，约 2 分钟）
+cargo test                       # 167 个用例（tick / todo / state / cli / runner / doctor，runner 用假宿主，约 2 分钟）
+cargo fmt --check                # 格式闸，配置见 rustfmt.toml
+cargo clippy --all-targets       # 目前 4 条告警（3 条 doc 缩进 + 1 条可省的生命周期），无正确性问题
 cargo build --release && install -m755 target/release/zloop ~/.local/bin/zloop
 ```
+
+**格式：`rustfmt.toml` 是必须的，别删。** 这份代码是 ~125 列的密排风格，rustfmt 的两个默认值都跟它对不上：
+
+| 默认值 | 后果 | 本仓库 |
+|---|---|---|
+| `max_width = 100` | 29 个文件全判成不合规 | `max_width = 125` |
+| `use_small_heuristics = "Default"`（`fn_call_width=60` / `chain_width=60` / `struct_lit_width=18`…） | 没超宽的调用和结构体字面量也被拆行，凭空多出 ~2400 行 | `use_small_heuristics = "Max"`，只有真超 125 列才换行 |
+
+没有这份配置，`cargo fmt --check` 在全仓所有文件上都是红的——那不叫格式闸，那叫没有闸。
+配上之后 `cargo fmt --check` 退 0，改动才有一道机械的格式基线。
+一次性对齐的那个提交只动格式、不动语义，已记进 `.git-blame-ignore-revs`；想让 `git blame` 跳过它：
+
+```bash
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
+注意 rustfmt 按**字符**数算宽度，不按终端列宽。这份代码里中文注释很多，一个汉字占 2 列却只算 1 个字符，
+所以含中文的行显示出来会比 125 列宽——这是 rustfmt 的已知限制，好处是它不会去拆中文注释行。
 
 目录：`src/` 实现 · `tests/` 集成测试 · `docs/`：`RUST-DESIGN.md` 当前设计、`LONG-RUN-AUDIT.md` 长程加固审计、`OPEN-SOURCE-REVIEW.md` 开源方案对照与借鉴、`TEST-REPORT.md` 自测报告、`loopx-principles.md` / `loopx-scheduling-notes.md` loopx 研究、`DESIGN.md` v0.1 Python 原型设计记录。
 

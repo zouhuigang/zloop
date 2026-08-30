@@ -1,0 +1,5 @@
+# 只动格式、不动语义的提交放这里，git blame 会跳过它们。
+# 启用：git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# style: 加 rustfmt.toml 并一次性对齐全仓格式（2026-08-30）
+ac040d305ad91b7bc9f6e3ffecbad588af50e071
