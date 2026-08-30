@@ -106,7 +106,7 @@ runner 在**轮次之间睡觉**时同样闭嘴：它醒来就接着领活，这
 ### 4. 验证安装
 
 ```bash
-zloop --version                              # zloop 0.3.0
+zloop --version                              # zloop 0.4.0
 ls ~/.claude/skills/zloop/SKILL.md           # Claude Code skill 在位
 ls ~/.codex/skills/zloop/agents/openai.yaml  # Codex skill 在位（如果装了）
 
@@ -1938,11 +1938,11 @@ paused/done  >  unplanned / all_done  >  user_gate / blocked  >  fail_streak  > 
 
 ### 与 loopx 的对比
 
-| 维度 | loopx 0.5.2 | zloop 0.2 |
+| 维度 | loopx 0.5.2 | zloop 0.4 |
 |---|---|---|
-| 源码文件 / 行数 | 819 / 317,699（Python） | 22 / ≈6,727（Rust） |
-| 顶层子命令 | 113（叶命令 307） | 22（+1 内部 `hook-stop`）——每条的用途见[命令详解](#命令详解) |
-| 单命令最多 flag | 75（`todo`） | 10（`run`） |
+| 源码文件 / 行数 | 819 / 317,699（Python） | 23 / ≈10,245（Rust） |
+| 顶层子命令 | 113（叶命令 307） | 29（含内部 `hook-stop`）——每条的用途见[命令详解](#命令详解) |
+| 单命令最多 flag | 75（`todo`） | 15（`run`） |
 | `next` 一次调用 | 20–30 KB JSON，数百 ms | 10 个字段，12 ms |
 | 状态存放处 | ≥ 9 处（两级 registry、Markdown 状态、runs/、turns/、leases/…） | 1 个 JSON（+ 可读的 log/*.md） |
 | Todo 元数据字段 | ≈ 50（URL 编码塞进 Markdown 注释） | 8 |
