@@ -544,6 +544,28 @@ $ zloop doctor          # state.json 里 policy.window_hours = 99999999999
 （`tests/doctor_test.rs`）。撤掉钳位 → 前两个 panic 变红、CLI 那个 `left: 101 / right: 0`；
 撤掉 `check_policy` 调用 → 后两个变红。
 
+#### A-7 复核（t28）：两处钳位分属两条分支，CLI 面只盖住了一条
+
+A-7 的验收只点名了 `tick.rs:186` / `state.rs:270` / `cli.rs:1990`，而越界的 `window_hours`
+实际有**两处**要钳，走的是两条不同的分支：
+
+| 位置 | 什么时候走到 | 撤掉钳位的症状 |
+|---|---|---|
+| `tick.rs:290` `window_span` | 每次 `decide` 都走 | `TimeDelta::hours out of bounds`（exit 101） |
+| `tick.rs:377` 等待封顶 `window_hours * 60` | **只有配额占满**（`counted >= max_runs`）才走 | `attempt to multiply with overflow`（exit 101） |
+
+复核结论：两处**都已经钳住**，`i64::MAX` / `i64::MIN` 在内的 8 个取值 ×
+14 条命令（含 `throttled` 分支）全部不崩。但复核时发现**测试覆盖有个洞**：
+CLI 那条测试的 fixture 从不写 tick，`max_runs` 永远没满，于是**它根本走不到第二处**——
+实测撤掉 `tick.rs:377` 的钳位，旧版 CLI 测试照样是绿的（只有 `tick_test` 那条抓得到）。
+已把 fixture 补成 `quota_full` ∈ {false, true} 两种，并加一条防空跑的断言
+（`quota_full && hours > 0` 时 `reason` 必须真的是 `throttled`）；现在撤掉任一处钳位，
+CLI 这条测试都会变红。
+
+**这个洞的通用形状**：一处防御写在只有特定状态才走到的分支里时，
+"测试绿了"说明不了它被验过——先确认 fixture 真的把那条分支走到了（断言它的可见结果），
+再谈这条测试盖住了什么。
+
 ### A-8（中）时间参数「装得下 i64」就 panic，装不下反而有好错误提示 — 已修
 
 两个入口，同一个根因（`state.rs:270` 和 `cli.rs:1990` 都是 `now() - Duration::…(n)`，无 checked）：

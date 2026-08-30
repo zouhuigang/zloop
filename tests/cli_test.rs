@@ -2501,28 +2501,56 @@ fn out_of_range_time_arguments_get_the_same_friendly_error_as_garbage() {
 /// 炸的正好是 skill 每轮的 `context` → `next` 和 runner 每轮的 decide；人拿到的是一行
 /// Rust panic 加一句 "run with RUST_BACKTRACE=1"，整个项目目录就此敲不动。
 /// 单元测试（tick_test）钉的是钳位本身，这里钉的是"用户真敲的那几条命令还能用"。
+///
+/// 越界的 `window_hours` 有**两处**要钳，走的是两条不同的分支（t28）：`window_span`
+/// 每次 decide 都过，配额没满时也走；而 `throttled` 那一支的等待封顶（`window_hours * 60`）
+/// 只有**配额占满**时才走到——`max_runs` 没满的项目怎么敲都碰不到它。所以这里的
+/// fixture 必须两种都造：只造前一种的话，撤掉封顶的钳位这条测试照样是绿的。
 #[test]
 fn an_out_of_range_window_hours_does_not_take_the_whole_project_down() {
     for hours in ["99999999999", "-99999999999", "999999999999999999", "9223372036854775807"] {
-        let dir = tempfile::tempdir().unwrap();
-        let d = dir.path();
-        assert_eq!(zloop(d, &["init", "alpha"], None, &[]).code, 0);
-        zloop(d, &["plan"], Some("[P1] one\n"), &[]);
-        let p = state::state_path(d);
-        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
-        v["policy"]["window_hours"] = serde_json::json!(hours.parse::<i64>().unwrap());
-        fs::write(&p, serde_json::to_string(&v).unwrap()).unwrap();
+        let hours_n: i64 = hours.parse().unwrap();
+        // quota_full=false：配额还空着，走 `window_span`；true：配额占满，多走一次等待封顶
+        for quota_full in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let d = dir.path();
+            assert_eq!(zloop(d, &["init", "alpha"], None, &[]).code, 0);
+            zloop(d, &["plan"], Some("[P1] one\n[P2] two\n"), &[]);
+            if quota_full {
+                let o = zloop(d, &["done", "t1", "--note", "x", "--outcome", "progress", "--no-doc"], None, &[]);
+                assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+            }
+            let p = state::state_path(d);
+            let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+            v["policy"]["window_hours"] = serde_json::json!(hours_n);
+            if quota_full {
+                v["policy"]["max_runs"] = serde_json::json!(1);
+            }
+            fs::write(&p, serde_json::to_string(&v).unwrap()).unwrap();
 
-        // 撤掉钳位时 status / context / next 一起 exit 101
-        for args in [vec!["status"], vec!["context"], vec!["next", "--peek", "--json"]] {
-            let o = zloop(d, &args, None, &[]);
-            assert_eq!(o.code, 0, "window_hours={hours} 时 `zloop {}` 该照常能用：{}{}", args.join(" "), o.out, o.err);
-            assert!(!o.err.contains("panicked"), "window_hours={hours} `zloop {}`：{}", args.join(" "), o.err);
+            // 撤掉钳位时 status / context / next 一起 exit 101
+            for args in [vec!["status"], vec!["context"], vec!["next", "--peek", "--json"]] {
+                let o = zloop(d, &args, None, &[]);
+                let tag = format!("window_hours={hours} quota_full={quota_full}");
+                assert_eq!(o.code, 0, "{tag} 时 `zloop {}` 该照常能用：{}{}", args.join(" "), o.out, o.err);
+                assert!(!o.err.contains("panicked"), "{tag} `zloop {}`：{}", args.join(" "), o.err);
+            }
+            // fixture 防空跑：`throttled` 那一支必须真的走到，否则上面三条等于没验封顶那处钳位。
+            // 负数被钳成 0 窗口 → 刚写下的那条 tick 落在窗口外，配额本来就是空的，不该 throttle。
+            let o = zloop(d, &["next", "--peek", "--json"], None, &[]);
+            let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+            let want = if quota_full && hours_n > 0 { "throttled" } else { "ready" };
+            assert_eq!(v["reason"], want, "window_hours={hours} quota_full={quota_full}：{}", o.out);
+            if want == "throttled" {
+                // 封顶按钳过的窗口（一年）算，不是按写在文件里的那个数
+                let m = v["interval_min"].as_u64().unwrap_or_else(|| panic!("{}", o.out));
+                assert!(m <= 365 * 24 * 60, "等待要封在钳过的窗口以内：{m}");
+            }
+            // 而且不是闷头钳掉就算了：doctor 得把这个没生效的取值报出来
+            let o = zloop(d, &["doctor", "--json"], None, &[]);
+            let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+            let kinds: Vec<&str> = v["findings"].as_array().unwrap().iter().filter_map(|f| f["kind"].as_str()).collect();
+            assert!(kinds.contains(&"bad_policy"), "window_hours={hours} 该被 doctor 报出来：{}", o.out);
         }
-        // 而且不是闷头钳掉就算了：doctor 得把这个没生效的取值报出来
-        let o = zloop(d, &["doctor", "--json"], None, &[]);
-        let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
-        let kinds: Vec<&str> = v["findings"].as_array().unwrap().iter().filter_map(|f| f["kind"].as_str()).collect();
-        assert!(kinds.contains(&"bad_policy"), "window_hours={hours} 该被 doctor 报出来：{}", o.out);
     }
 }
