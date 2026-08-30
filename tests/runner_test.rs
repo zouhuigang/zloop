@@ -760,6 +760,91 @@ echo '{"session_id":"n","is_error":false,"result":"ok"}'"#,
     assert_eq!(journal(&d).last().unwrap()["event"], "stop");
 }
 
+/// A-14 的同类，落在**写回**那一头（A-15）：`zloop done` 在存盘之前会跑三次 git 去列
+/// 「这一轮改了哪些文件」。以前那三次是裸 `.output()`——`core.fsmonitor` 一挂住，
+/// `zloop done` 跟着无限期挂住，而且它挂在 `state::transaction` **之前**：
+/// 这一轮的 note / approach / evidence 一个字都没落盘，整轮白干。
+///
+/// 现在闸收掉它，写回照常完成，只是日志少一节「改动文件」——而且**这件事要说出来**，
+/// 否则「git 挂住了」和「这不是个仓库」在日志里长得一模一样。
+#[test]
+fn hung_git_in_write_back_does_not_swallow_the_round() {
+    let d = project(&["[P0] a"]);
+    let _git = git_repo(&d);
+    hook_that_hangs_once(&d.join(".git/hooks/fsmonitor-slow"), r"printf '/\0'");
+    Command::new("git").args(["config", "core.fsmonitor", ".git/hooks/fsmonitor-slow"]).current_dir(&d).output().unwrap();
+    fs::write(d.join("keep.txt"), "round output\n").unwrap();
+
+    let (code, out, err) = run_bounded(
+        &d,
+        &["done", "t1", "--note", "活干完了", "--approach", "这一轮的技术文档"],
+        &[("ZLOOP_GIT_TIMEOUT_SECS", "2")],
+        // 闸 2s + 排水 2s ⇒ 5s 内该退干净。上限**必须压在钩子那 30 秒之下**：
+        // 挂住的样子在测试里只能挂 30 秒，60 秒的上限会让裸 `.output()` 也「通过」。
+        Duration::from_secs(20),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(err.contains("读工作树的 git 超过"), "少了一节就得当场说一句：{err}");
+    // 真正要守住的不是那一节清单，是**写回本身**：这一轮的账和文档必须落盘
+    let st = state::load(&state::state_path(&d)).unwrap();
+    assert_eq!(st.ticks.len(), 1, "写回必须完成：{:?}", st.ticks);
+    assert_eq!(st.ticks[0].note, "活干完了");
+    let body = fs::read_to_string(d.join(".zloop").join(st.ticks[0].log.as_deref().unwrap())).unwrap();
+    assert!(body.contains("这一轮的技术文档"), "approach 必须进日志：{body}");
+    assert!(!body.contains("## 改动文件"), "读不出来就别编一节出来：{body}");
+}
+
+/// 写回那三次 git 走的是 `Group::Inherit`（跟着调用者的进程组），**不是** `Own`。
+///
+/// 因为 `zloop done` 在 runner 场景里跑在宿主进程里，宿主超时是整组 `killpg` 收掉的。
+/// 单开一组的话这条 git 会从那一刀底下逃走：没人再管它的闸（管闸的父进程已经死了），
+/// 它就永远挂在那儿——而挂着的 git 可能正拿着 `.git/index.lock`，那把锁留下来的话，
+/// 这个仓库之后所有 git 写操作（包括人自己敲的）全部失败。改成 `Own` 这条就变红。
+#[test]
+fn write_back_git_dies_with_its_caller() {
+    use std::os::unix::process::CommandExt;
+    let d = project(&["[P0] a"]);
+    let _git = git_repo(&d);
+    hook_that_hangs_once(&d.join(".git/hooks/fsmonitor-slow"), r"printf '/\0'");
+    Command::new("git").args(["config", "core.fsmonitor", ".git/hooks/fsmonitor-slow"]).current_dir(&d).output().unwrap();
+    fs::write(d.join("keep.txt"), "round output\n").unwrap();
+
+    // 闸开到远大于这条测试的时长：要看的是「上层一刀下来它跟不跟着走」，不是它自己的超时
+    let mut cmd = Command::new(zloop_bin());
+    cmd.current_dir(&d)
+        .args(["done", "t1", "--note", "n", "--approach", "a"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    common::scrub_ambient_env(&mut cmd);
+    cmd.env("ZLOOP_GIT_TIMEOUT_SECS", "120");
+    cmd.process_group(0); // 让它自己当组长，好模拟「上层对宿主整组下刀」
+    let mut child = cmd.spawn().unwrap();
+    let pid = child.id();
+
+    let git_pid = (0..100)
+        .find_map(|_| {
+            let o = Command::new("pgrep").args(["-P", &pid.to_string()]).output().unwrap();
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() {
+                thread::sleep(Duration::from_millis(100));
+                None
+            } else {
+                s.lines().next().and_then(|l| l.trim().parse::<u32>().ok())
+            }
+        })
+        .expect("挂住的 git 子进程该出现");
+
+    Command::new("kill").args(["-TERM", &format!("-{pid}")]).output().unwrap(); // killpg，整组
+    let _ = child.wait();
+    thread::sleep(Duration::from_millis(1500));
+    let alive = Command::new("kill").args(["-0", &git_pid.to_string()]).output().unwrap().status.success();
+    if alive {
+        let _ = Command::new("kill").args(["-9", &git_pid.to_string()]).output();
+    }
+    assert!(!alive, "git {git_pid} 从调用者的组里逃走了，变成没人管的孤儿（Group::Own 的死法）");
+}
+
 #[test]
 fn preflight_failure_records_fail_and_success_reaches_the_host() {
     let fake = fake_host(

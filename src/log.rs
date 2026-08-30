@@ -49,25 +49,66 @@ impl Doc {
     }
 }
 
-/// Working-tree changes at write-back time: `git diff --stat` plus untracked files, `.zloop/` excluded.
-/// `None` outside a repo or when nothing changed. Capped so a huge round cannot bloat the doc.
-pub fn changed_files(root: &Path) -> Option<String> {
-    use std::process::Command;
-    let git = |args: &[&str]| Command::new("git").args(args).current_dir(root).output().ok();
-    if !git(&["rev-parse", "--is-inside-work-tree"])?.status.success() {
+/// 读工作树的一条 git，**带闸**（`runner::run_capture`）。
+///
+/// `None` = 这一次没跑成：起不来 / 非零退出 / 超过 `deadline` 被收掉。超时那种会置 `stalled`，
+/// 因为「git 挂住了」和「这不是个仓库」在日志里长得一样，不说出来没人看得见。
+///
+/// 进程组用 `Inherit`：`zloop done` 是**短命的 CLI**，在 runner 场景里它跑在宿主进程里，
+/// 宿主超时是整组 `killpg` 收掉的。单开一组（`Own`）会让这条 git 从那一刀底下逃走，
+/// 变成没人管的孤儿——挂着的 git 可能正拿着 `.git/index.lock`，那比漏掉一个钩子孙进程严重得多。
+fn git_read(root: &Path, args: &[&str], deadline: std::time::Instant, stalled: &mut bool) -> Option<Vec<u8>> {
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    if left.is_zero() {
+        *stalled = true;
         return None;
     }
+    let mut c = std::process::Command::new("git");
+    c.args(args).current_dir(root);
+    let cap = crate::runner::run_capture(c, left, crate::runner::Group::Inherit, None).ok()?;
+    if cap.timed_out || cap.interrupted {
+        *stalled = true;
+        return None;
+    }
+    cap.status.filter(|s| s.success())?;
+    Some(cap.stdout)
+}
+
+/// Working-tree changes at write-back time: `git diff --stat` plus untracked files, `.zloop/` excluded.
+/// `None` outside a repo or when nothing changed. Capped so a huge round cannot bloat the doc.
+///
+/// 三条 git 共用**一个**总预算（`git_timeout()`），不是每条一份：调用方等的是「列一下改了什么」
+/// 这件事，不是三件事，3×60 秒的最坏情况没人愿意等。
+pub fn changed_files(root: &Path) -> Option<String> {
+    let budget = crate::runner::git_timeout();
+    let deadline = std::time::Instant::now() + budget;
+    let mut stalled = false;
+    let out = collect_changed(root, deadline, &mut stalled);
+    if stalled {
+        // 这一轮的日志会**少一节**，而少了的原因不写在日志里（日志正是写不下去的那个东西）。
+        // 所以只能当场在 stderr 上说一句，和 t15 里 NOTES.md 读不出来时一个道理。
+        eprintln!(
+            "done: 读工作树的 git 超过 {budget:?} 没回来，已经收掉；这一轮的日志不带「改动文件」清单（ZLOOP_GIT_TIMEOUT_SECS 可调）"
+        );
+    }
+    out
+}
+
+fn collect_changed(root: &Path, deadline: std::time::Instant, stalled: &mut bool) -> Option<String> {
+    git_read(root, &["rev-parse", "--is-inside-work-tree"], deadline, stalled)?;
     let mut out = String::new();
-    if let Some(o) = git(&["diff", "--stat", "HEAD", "--", "."]) {
-        for line in String::from_utf8_lossy(&o.stdout).lines() {
+    // 这里的 `from_utf8_lossy` 是安全的：拿到的是**给人看的**一段文字，不像 `runner::git_dirty`
+    // 那样要拿路径回头喂给 `git add`（那里叫不出名字的路径必须整条丢掉，不能糊成问号）。
+    if let Some(o) = git_read(root, &["diff", "--stat", "HEAD", "--", "."], deadline, stalled) {
+        for line in String::from_utf8_lossy(&o).lines() {
             if !line.trim_start().starts_with(".zloop") {
                 out.push_str(line);
                 out.push('\n');
             }
         }
     }
-    if let Some(o) = git(&["ls-files", "--others", "--exclude-standard", "--", "."]) {
-        let new: Vec<String> = String::from_utf8_lossy(&o.stdout)
+    if let Some(o) = git_read(root, &["ls-files", "--others", "--exclude-standard", "--", "."], deadline, stalled) {
+        let new: Vec<String> = String::from_utf8_lossy(&o)
             .lines()
             .filter(|l| !l.starts_with(".zloop"))
             .map(|l| format!("  {l} (new)"))

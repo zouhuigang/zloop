@@ -334,7 +334,10 @@ fn git_checkpoint(root: &Path, todo_id: &str, note: &str, baseline: &mut DirtySn
 /// 也就十几秒——60 秒足够宽松。**不复用 `--timeout-min`**：那是给宿主的，动辄几十分钟，
 /// 装了等于没装。挂住的来源不是索引锁争用（那是秒失败），是 `pre-commit` 钩子、
 /// `core.fsmonitor` 钩子、网络文件系统 stall（见 `docs/CODE-AUDIT.md` A-14）。
-fn git_timeout() -> Duration {
+///
+/// `log::changed_files`（`zloop done` 写回时读工作树）也用这一份：同一类挂法、同一个仓库，
+/// 没有理由让人记两个旋钮。
+pub(crate) fn git_timeout() -> Duration {
     env_secs("ZLOOP_GIT_TIMEOUT_SECS", 60)
 }
 
@@ -353,7 +356,7 @@ pub(crate) fn env_secs(key: &str, default: u64) -> Duration {
 fn git_capture(root: &Path, args: &[&str], stdin_bytes: Option<Vec<u8>>) -> Option<Vec<u8>> {
     let mut c = Command::new("git");
     c.args(args).current_dir(root);
-    let cap = match run_capture(c, git_timeout(), stdin_bytes) {
+    let cap = match run_capture(c, git_timeout(), Group::Own, stdin_bytes) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("runner: git {} 起不来：{e}", args[0]);
@@ -493,24 +496,45 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// 给整组的收尾时间：先 SIGTERM 让它自己收拾，过了这个点就 SIGKILL。
 const GROUP_TERM_GRACE: Duration = Duration::from_millis(500);
 
-/// 往**整个进程组**发信号（负 pid）。子进程用 `process_group(0)` 单开了一组，
-/// 组里除了它还有它 fork 出来的孙进程——`Child::kill()` 只收得掉前者。
+/// 子进程放进哪个进程组——**这是个取舍，两边都会漏掉一类进程**：
+///
+/// * `Own`：单开一组，超时/叫停时 `killpg` 整组，连它 fork 出来的孙进程（钩子、后台任务）
+///   一起收掉。代价是**跟调用者的组脱钩**：调用者自己被上层 `killpg` 收掉时，这个子进程
+///   收不到信号，会变成挂着不动的孤儿。
+/// * `Inherit`：跟着调用者的组，调用者被整组收掉时它一起走，不留孤儿。代价是收不掉孙进程。
+///
+/// 按调用者的命长挑：runner 是长命进程、自己装了信号处置、还要防孙进程占管道 → `Own`；
+/// 短命的 CLI（`zloop done` 跑在宿主里，随时可能被 `--timeout-min` 的 `killpg` 收掉）→ `Inherit`。
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Group {
+    Own,
+    Inherit,
+}
+
+/// 往一个 pid（正数）或**整个进程组**（负数）发信号。
 #[cfg(unix)]
-fn signal_group(pid: u32, sig: i32) {
+fn signal_to(target: i32, sig: i32) {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
     unsafe {
-        kill(-(pid as i32), sig);
+        kill(target, sig);
     }
 }
 #[cfg(not(unix))]
-fn signal_group(_pid: u32, _sig: i32) {}
+fn signal_to(_target: i32, _sig: i32) {}
 
-/// 收掉这一轮起的所有进程：整组 SIGTERM → 等一会儿 → 整组 SIGKILL → 收尸。
-fn stop_group(child: &mut std::process::Child) {
-    let pid = child.id();
-    signal_group(pid, 15);
+/// 收掉这一轮起的进程：SIGTERM → 等一会儿 → SIGKILL → 收尸。
+///
+/// **先 TERM 再 KILL 不是客套**：git 收到 TERM 会自己清掉 `.git/index.lock`，被 KILL 掉则
+/// 把锁留在原地，之后这个仓库所有 git 写操作（包括人自己敲的）全部失败（A-14 实测）。
+///
+/// `Own` 时信号发给整组（负 pid），`Inherit` 时只发给直接子进程——后者的 pid 不是组 id，
+/// 拿它当组 id 去 `killpg` 是在赌运气，孙进程只能留给调用者的组去收。
+fn stop_group(child: &mut std::process::Child, group: Group) {
+    let pid = child.id() as i32;
+    let target = if group == Group::Own { -pid } else { pid };
+    signal_to(target, 15);
     let grace = Instant::now() + GROUP_TERM_GRACE;
     while Instant::now() < grace {
         match child.try_wait() {
@@ -518,9 +542,9 @@ fn stop_group(child: &mut std::process::Child) {
             Ok(None) => thread::sleep(Duration::from_millis(20)),
         }
     }
-    // 孙进程可以不理 SIGTERM，组里没走干净的一律 SIGKILL；
+    // 孙进程可以不理 SIGTERM，没走干净的一律 SIGKILL；
     // 组信号送不到时（非 unix）至少还有 `kill()` 收掉直接子进程。
-    signal_group(pid, 9);
+    signal_to(target, 9);
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -582,7 +606,8 @@ pub(crate) struct CapturedBytes {
 /// 而且 SIGTERM 叫不动（A-6 / A-14 是同一种死法的两条路）。
 ///
 /// `stdin_bytes` 为 `Some` 时把这些字节喂给子进程的 stdin 再关掉（EOF）。
-pub(crate) fn run_capture(mut cmd: Command, timeout: Duration, stdin_bytes: Option<Vec<u8>>) -> Result<CapturedBytes> {
+/// `group` 决定超时/叫停时收得掉谁、收不掉谁，见 [`Group`]。
+pub(crate) fn run_capture(mut cmd: Command, timeout: Duration, group: Group, stdin_bytes: Option<Vec<u8>>) -> Result<CapturedBytes> {
     let what = cmd.get_program().to_string_lossy().into_owned();
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin_bytes.is_some() {
@@ -593,7 +618,7 @@ pub(crate) fn run_capture(mut cmd: Command, timeout: Duration, stdin_bytes: Opti
     // 单开一个进程组，这样超时/被叫停时可以 `killpg` 整组，把子进程留下的后台孙进程一起收掉。
     // 副作用是终端的 Ctrl-C 不再直接送到子进程——runner 自己装了 SIGINT 处置，会替它收（≤200ms）。
     #[cfg(unix)]
-    {
+    if group == Group::Own {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
@@ -617,12 +642,12 @@ pub(crate) fn run_capture(mut cmd: Command, timeout: Duration, stdin_bytes: Opti
             break Some(st);
         }
         if stop_requested() {
-            stop_group(&mut child);
+            stop_group(&mut child, group);
             interrupted = true;
             break None;
         }
         if Instant::now() >= deadline {
-            stop_group(&mut child);
+            stop_group(&mut child, group);
             timed_out = true;
             break None;
         }
@@ -636,7 +661,7 @@ pub(crate) fn run_capture(mut cmd: Command, timeout: Duration, stdin_bytes: Opti
 
 /// `run_capture` 的文本版，给宿主用：stdout/stderr 转成 `String`（宿主输出本来就是 JSON/文本）。
 fn run_with_timeout(cmd: Command, timeout: Duration, what: &str) -> Result<Captured> {
-    let cap = run_capture(cmd, timeout, None)?;
+    let cap = run_capture(cmd, timeout, Group::Own, None)?;
     if !cap.drained {
         // 说出来：这一轮的输出是**截断**的，别让下游把半截 JSON 当成宿主的完整回话。
         eprintln!("runner: `{what}` 退出后管道还被它留下的后台进程占着，这一轮的输出只记到 {DRAIN_GRACE:?} 为止");

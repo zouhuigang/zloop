@@ -808,7 +808,7 @@ runner 自己接着走，`zloop stop` 也照样叫得动。宿主那道闸是 `-
 
 | 环境变量 | 默认 | 管谁 |
 |---|---|---|
-| `ZLOOP_GIT_TIMEOUT_SECS` | `60` | `--git-commit` 每轮跑的 git（`status` / `add` / `commit` / `rev-parse`）。超时按「这一轮不提交」处理：产物留在树里等下一轮认领，账本记一条 `git_stalled`。仓库特别大、`git status` 要跑几十秒时调大它 |
+| `ZLOOP_GIT_TIMEOUT_SECS` | `60` | zloop 自己跑的每一条 git 的闸。① `--git-commit` 每轮的 `status` / `add` / `commit` / `rev-parse`：超时按「这一轮不提交」处理，产物留在树里等下一轮认领，账本记一条 `git_stalled`；② `zloop done` 写回时列「改动文件」的 `diff` / `ls-files`（三条共用一份总预算）：超时就少写那一节，**写回照常完成**，stderr 上会说一句。仓库特别大、`git status` 要跑几十秒时调大它 |
 | `ZLOOP_NOTIFY_TIMEOUT_SECS` | `30` | `notify_url`（curl）和 `notify_cmd`（`sh -c`）。通知发不出去从来不该把 runner 拖下水 |
 
 挂住的来源不是索引锁争用（那是秒失败），是 `pre-commit` 钩子（husky / lefthook）、

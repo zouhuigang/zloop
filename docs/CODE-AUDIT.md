@@ -982,4 +982,78 @@ RESULT: ✅ SIGTERM 之后 1s 内退出
 
 **同类但没修**：`log.rs::changed_files()` 里还有三次裸 git（`zloop done` 写回时跑的）。
 它跑在**宿主进程**里而不是 runner 里，挂住了会被 `--timeout-min` 那道闸兜住，
-所以不是同一个严重度——单开一条记着。
+所以不是同一个严重度——单开一条记着（下面 A-15）。
+
+### A-15（中高）写回路上的裸 git 挂住 → 这一轮的账和技术文档一个字都没落盘 — 已修
+
+排 t20 时本来只想「评估要不要一并走 `run_capture`」。评估的结论是**要**，而且它比原先估的
+一档还高一点：不是「日志少一节」，是**整轮白干**。
+
+**为什么比想的严重**：`cli.rs:887` 那行 `changed_files(root)` 跑在 `state::transaction`
+**之前**。它挂住的时候，note / approach / decision / pitfall / evidence 全都还在内存里，
+一个字节都没进 `state.json`。挂多久，这一轮的产物就在磁盘上不存在多久。
+（对比 A-14：runner 那边挂住时，宿主干的活至少还躺在工作树里，下一轮能认领回来。）
+
+**复现**（`git diff --stat HEAD` 卡在 `core.fsmonitor` 上，钩子 `sleep 991`）：
+
+```
+$ zloop done t1 --note n --approach a      # 修复前
+STILL RUNNING after 20s (pid 6021)
+ 6021     1 zloop done t1 --note n --approach a
+ 6040  6021 git diff --stat HEAD -- .       ← 挂在这儿
+ticks: 0                                    ← 写回一个字都没落盘
+```
+
+**「有 `--timeout-min` 兜着」这句话在两个方向上都站不住**：
+
+1. 它兜的是**尺寸不对的**闸。默认 30 分钟（`cli.rs:321`），一次列改动文件的 git 挂住
+   要烧掉整整 30 分钟，烧完那一轮记成 `fail`，写回的内容照样没了。
+2. 交互路径**根本没有这道闸**。人在终端里跑 `/zloop`、或者自己敲 `zloop done`，
+   没有任何东西会来收它。
+
+**修法**：三次 git 走 `runner::run_capture`（A-14 那份带闸的实现），共用**一个**总预算
+`git_timeout()`（`ZLOOP_GIT_TIMEOUT_SECS`，默认 60s）——调用方等的是「列一下改了什么」
+这一件事，不是三件，没道理给 3×60 秒的最坏情况。超时就少写那一节，并且**在 stderr 上说一句**
+（少了的原因写不进日志本身——日志正是写不下去的那个东西，同 t15 的 NOTES.md）。
+
+**这里有个和 A-14 反向的取舍：进程组。** `run_capture` 原来一律 `process_group(0)` 单开一组，
+好让超时/叫停时 `killpg` 把孙进程一起收掉。**照搬到 `zloop done` 上是错的**：它是短命 CLI，
+在 runner 场景里跑在宿主进程里，宿主超时是整组 `killpg` 收掉的——单开一组的 git 会从那一刀
+底下逃走，没人再管它的闸（管闸的父进程已经死了），于是永远挂着。挂着的 git 可能正拿着
+`.git/index.lock`，那正是 A-14 里最不能留的东西。
+
+实测两种选择（`zloop done` 自己当组长，模拟上层对宿主整组下刀）：
+
+```
+Group::Own      → zloop pid 8966, git child 8987 → RESULT: git child SURVIVED as orphan ❌
+Group::Inherit  → zloop pid 8813, git child 8834 → RESULT: git child died with its caller ✅
+```
+
+所以 `run_capture` 多了一个显式的 `Group` 参数，两条路各自说清楚自己漏掉谁：
+`Own` 收得掉孙进程、收不掉自己变孤儿；`Inherit` 不留孤儿、收不掉孙进程（钩子的 `sleep`
+会漏出来，但它不拿锁，比孤儿 git 便宜）。runner 侧全部 `Own`，写回侧 `Inherit`。
+`stop_group` 跟着分叉：`Inherit` 时信号发给直接子进程，**不拿子进程的 pid 当组 id 去赌**。
+
+**修好之后**（同一个复现，闸压到 5s）：
+
+```
+exit=0 elapsed=7s                            # 5s 闸 + 2s 排水
+done: 读工作树的 git 超过 5s 没回来，已经收掉；这一轮的日志不带「改动文件」清单
+ticks: 1   note: n                           ← 写回完成，技术文档在
+no index.lock ／ git add OK                  ← 仓库没被留下的锁废掉
+```
+
+回归测试两条（`tests/runner_test.rs`），各自撤掉对应的修复就变红：
+
+* `hung_git_in_write_back_does_not_swallow_the_round` —— 闸装没装。撤回裸 `.output()`：
+  `zloop done ... 过了 20s 还没退出 —— 子进程没有闸（A-14 的死法）`。
+  **上限压在钩子那 30 秒之下**是这条测试成立的前提：`hook_that_hangs_once` 只挂得住 30 秒，
+  一开始写的 60 秒上限让裸 `.output()` 也「通过」了（30.1s 跑完，绿的）——差点收下一条假绿。
+* `write_back_git_dies_with_its_caller` —— 组选对没有。`Inherit` 改成 `Own`：
+  `git 11563 从调用者的组里逃走了，变成没人管的孤儿（Group::Own 的死法）`。
+
+149 测试全过（原 147），clippy 无新增告警。
+
+**还剩的裸子进程**：`awake.rs` 里的 `pmset` / `sudo` / `caffeinate` / `visudo`（8 处）。
+它们不在每轮的热路径上，`pmset` 和 `visudo` 也不是会挂住的那一类，但「每一个子进程都走
+`run_capture`」这句话目前还不是真的——单开一条记着。

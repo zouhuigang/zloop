@@ -66,13 +66,13 @@ pub fn send(state: &State, root: &Path, kind: &str, text: &str) -> Result<bool> 
         c.args(["-sS", "-m", "10", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", url]);
         // curl 自己的 `-m 10` 只管它自己：DNS 卡住、代理不回、curl 被 stop 掉的孙进程留着管道，
         // 都还得靠外面这个闸。带闸的那份实现只有一处，就是 `runner::run_capture`。
-        sent |= accepted("webhook", crate::runner::run_capture(c, timeout(), Some(body.into_bytes())));
+        sent |= accepted("webhook", crate::runner::run_capture(c, timeout(), crate::runner::Group::Own, Some(body.into_bytes())));
     }
     if let Some(cmd) = &state.policy.notify_cmd {
         let event = json!({"event": kind, "text": text, "goal": state.goal.id, "root": root.display().to_string(), "at": state::now_iso()}).to_string();
         let mut c = Command::new("sh");
         c.arg("-c").arg(cmd).env("ZLOOP_EVENT", kind).env("ZLOOP_TEXT", text).env("ZLOOP_ROOT", root).current_dir(root);
-        sent |= accepted("command", crate::runner::run_capture(c, timeout(), Some(event.into_bytes())));
+        sent |= accepted("command", crate::runner::run_capture(c, timeout(), crate::runner::Group::Own, Some(event.into_bytes())));
     }
     Ok(sent)
 }
