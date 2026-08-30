@@ -1613,9 +1613,9 @@ fn a_reflect_round_does_not_reset_the_fail_streak() {
     for _ in 0..3 {
         zloop::tick::record(&mut st, "fail", Some("t1"), "boom", &who).unwrap();
     }
-    assert_eq!(zloop::tick::fail_streak(&st.ticks), 3);
+    assert_eq!(zloop::tick::fail_streak(&st), 3);
     zloop::tick::record(&mut st, "reflect", None, "看了一眼", &who).unwrap();
-    assert_eq!(zloop::tick::fail_streak(&st.ticks), 3, "回看不是进展，不该清掉失败计数");
+    assert_eq!(zloop::tick::fail_streak(&st), 3, "回看不是进展，不该清掉失败计数");
     assert_eq!(zloop::tick::current_round(&st.ticks), 0, "回看不推进轮次");
 }
 

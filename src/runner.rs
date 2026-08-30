@@ -1070,7 +1070,10 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
             let mut wrote = false;
             for i in ticks_before..st.ticks.len() {
                 let t = &mut st.ticks[i];
-                if t.outcome != "noop" {
+                // 只认宿主真结掉一轮的四种 outcome。问「账本长没长」会把人在另一个
+                // 终端敲的 `zloop feedback` / `edit`（还有本轮自己插的 replan/reflect）
+                // 当成宿主的写回，于是失败轮次不记 fail、fail_streak 恒为 0（A-17）。
+                if tick::is_writeback(&t.outcome) {
                     wrote = true;
                 }
                 if t.session.is_none() {
@@ -1090,26 +1093,28 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 tick::record(st, "fail", Some(&todo.id), &note, &who)?;
             }
             // Attach what the host reported about this round to the tick that closes it.
-            if st.ticks.len() > ticks_before {
-                if let Some(last) = st.ticks.last_mut() {
-                    if last.cost_usd.is_none() {
-                        last.cost_usd = result.cost_usd;
-                    }
-                    if last.num_turns.is_none() {
-                        last.num_turns = result.num_turns;
-                    }
-                    if last.duration_ms.is_none() {
-                        last.duration_ms = result.duration_ms;
-                    }
-                    if let Some(rel) = last.log.clone() {
-                        let line = format!(
-                            "- cost: {}   turns: {}   duration: {}   (runner settlement)",
-                            last.cost_usd.map(|c| format!("${c:.4}")).unwrap_or_else(|| "-".into()),
-                            last.num_turns.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
-                            last.duration_ms.map(|d| format!("{}s", d / 1000)).unwrap_or_else(|| "-".into()),
-                        );
-                        let _ = crate::log::append(root, &rel, &line);
-                    }
+            // **结掉这一轮的那条**，不是「最后一条」：人在宿主退出后补的 `zloop feedback`
+            // 会排在写回后面，`ticks.last_mut()` 就把这一轮的花费/轮数/日志挂到人那条上，
+            // 账本从此对不上号（A-17 的第二个后果）。一条都没有 = 这一轮没人结算，别乱挂。
+            let closer = st.ticks.iter().rposition(|t| tick::is_writeback(&t.outcome)).filter(|i| *i >= ticks_before);
+            if let Some(closing) = closer.map(|i| &mut st.ticks[i]) {
+                if closing.cost_usd.is_none() {
+                    closing.cost_usd = result.cost_usd;
+                }
+                if closing.num_turns.is_none() {
+                    closing.num_turns = result.num_turns;
+                }
+                if closing.duration_ms.is_none() {
+                    closing.duration_ms = result.duration_ms;
+                }
+                if let Some(rel) = closing.log.clone() {
+                    let line = format!(
+                        "- cost: {}   turns: {}   duration: {}   (runner settlement)",
+                        closing.cost_usd.map(|c| format!("${c:.4}")).unwrap_or_else(|| "-".into()),
+                        closing.num_turns.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                        closing.duration_ms.map(|d| format!("{}s", d / 1000)).unwrap_or_else(|| "-".into()),
+                    );
+                    let _ = crate::log::append(root, &rel, &line);
                 }
             }
             st.in_progress = None; // round settled either way

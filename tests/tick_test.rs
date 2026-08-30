@@ -118,7 +118,32 @@ fn noop_ticks_do_not_break_fail_streak() {
     outcome(&mut st, "t1", "fail", "");
     tick_at(&mut st, "noop", None, None);
     outcome(&mut st, "t1", "fail", "");
-    assert_eq!(tick::fail_streak(&st.ticks), 2);
+    assert_eq!(tick::fail_streak(&st), 2);
+}
+
+/// A-17 的后半截：人在另一个终端补一句话，不该把还没停下的循环的保险丝拆掉。
+///
+/// `zloop feedback` 是文档教人「跟正在跑的循环说话」的那条路。它一插进两次 fail 中间，
+/// 连续失败就永远数不到上限——无头 runner 一轮一轮地失败、一轮一轮地烧，谁都不叫停。
+#[test]
+fn feedback_mid_run_does_not_disarm_the_fail_brake() {
+    let mut st = fresh(&["[P0] a"]);
+    st.policy.max_fail_streak = 3;
+    for i in 0..2 {
+        outcome(&mut st, "t1", "fail", "boom");
+        // 每次失败之后人都补一句——但循环还没停在人面前，这句话不是"失败被解决了"
+        tick_at(&mut st, "feedback", Some("t1"), None);
+        assert_eq!(tick::fail_streak(&st), i + 1, "第 {} 句反馈把失败计数清零了", i + 1);
+        assert!(tick::decide(&st, now_utc()).should_run, "还没到上限，不该停");
+    }
+    outcome(&mut st, "t1", "fail", "boom");
+    let d = tick::decide(&st, now_utc());
+    assert_eq!((d.should_run, d.reason.as_str()), (false, "fail_streak"), "该停在连续失败上");
+
+    // 停下之后人再开口，才是这道闸等的东西：放它再试（README 里那段实测的语义）
+    tick_at(&mut st, "feedback", Some("t1"), None);
+    assert_eq!(tick::fail_streak(&st), 0);
+    assert!(tick::decide(&st, now_utc()).should_run, "停下来等人之后，人说话该让循环继续");
 }
 
 #[test]

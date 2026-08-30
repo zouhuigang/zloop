@@ -1421,8 +1421,11 @@ feedback → t1：正则不行，输入会有嵌套括号，换成手写状态�
   每轮协议也明说了"有反馈就先按它调整"。
 - `zloop status` 多一行 `反馈`，你自己也看得见（免得"我说了它没反应"无从判断）。
 - `zloop doc <todo>` 里，反馈紧跟在它回应的那一轮后面，和模型的实现思路并排——事后翻文档能看出方向为什么变。
-- **fail / noop / progress 三条 streak 都会被它打断**：循环因为连续失败停下来等人，人开口说话正是它该等到的东西。
+- **noop / progress 两条 streak 会被它打断**：循环停下来等人，人开口说话正是它该等到的东西。
   实测连续 3 次 `fail` 之后 `next` 是 `WAIT (fail_streak)`，`zloop feedback …` 之后立刻变回 `RUN`。
+- `fail` 那条要多一个条件：**只有循环已经停在 `fail_streak` 上**（失败数够到 `max_fail_streak`），
+  这句反馈才清零。还在跑的时候补一句「先别动 x.rs」不算"失败被解决了"——无条件清零等于给无头
+  runner 拆保险丝：反馈一插进两次 fail 中间，连续失败就永远数不到上限，宿主一轮一轮接着烧（A-17）。
 - 不吃配额、不推进轮次（`feedback` 不在计数的 outcome 里）；不改 todo 状态、不碰在飞状态。要让一条已完成的
   todo 重做，照旧是 `zloop edit <id> --status open`。
 

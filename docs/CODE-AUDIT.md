@@ -1184,7 +1184,7 @@ A-16 只是一个样本。这一轮把问题反过来问：**runner 的判断一
 | 6 | 同上 | `noop_streak` | A-16 修完后 runner **不再读**，只剩 `zloop next` 的退避提示 |
 | 7 | `ticks[].cost_usd` 求和 | `spent_usd` | `budget` → **停** |
 | 8 | `ticks[].at` + `COUNTED` | `window_ticks` | `throttled` → 睡 |
-| 9 | **`ticks.len()` 的轮内增量** | `runner.rs:1069` 的 `wrote_back` | 记不记 `fail`（→ 4）、要不要 checkpoint 提交 |
+| 9 | ~~**`ticks.len()` 的轮内增量**~~ → 轮内有没有 `done/progress/fail/block` | `runner.rs:1069` 的 `wrote_back` | 记不记 `fail`（→ 4）、要不要 checkpoint 提交（A-17 修完后不再看长度） |
 | 10 | `ticks[].host` / `.session` | `pick_session` | 这一轮 `--resume` 谁 |
 | 11 | `in_progress` | `held_by_other` | 只挡交互式 `next`，**对 runner 无效**（有意，见 `tick.rs:108`） |
 | 12 | `policy.*` | 直接读 | 上面所有阈值 |
@@ -1196,11 +1196,11 @@ A-16 只是一个样本。这一轮把问题反过来问：**runner 的判断一
 | 命令 | 往账本里写什么 | 碰到上面哪几项 | 结论 |
 |---|---|---|---|
 | `init` / `plan` | todos、`goal.status` | 1 2 | 有意 |
-| `next`（非 peek） | `noop` tick、`in_progress` | 6 9 11 | 6 已在 A-16 修掉；9 靠 `outcome != "noop"` 躲过（**只躲过了 noop 一种**） |
+| `next`（非 peek） | `noop` tick、`in_progress` | 6 9 11 | 6 已在 A-16 修掉；9 已在 A-17 修掉（原来只躲过 `noop` 一种） |
 | `done` | done/progress/fail/block tick | 2 4 5 7 8 9 | 有意——它本来就是写回 |
-| `edit` | **`edit` tick**、todo 状态/依赖、`goal.status` | 1 2 3 4 5 **9 10** | 打断 streak 是有意的；**9 / 10 不是** → A-17 / A-19 |
-| `feedback` | **`feedback` tick** | 4 5 **9 10** | 同上 → A-17 / A-19 |
-| `replan --apply` | `replan` tick、换 todo | 2 **9** | 对 streak 透明是有意的；9 不是 → A-17 |
+| `edit` | **`edit` tick**、todo 状态/依赖、`goal.status` | 1 2 3 4 5 **9 10** | 打断 streak 是有意的；9 已在 A-17 修掉；**10 未修** → A-19 |
+| `feedback` | **`feedback` tick** | 4 5 **9 10** | 9 与 4 已在 A-17 修掉；**5（`progress_streak`）和 10 未修** → A-19 |
+| `replan --apply` | `replan` tick、换 todo | 2 **9** | 对 streak 透明是有意的；9 已在 A-17 修掉 |
 | `pause` / `resume` | `goal.status` | 1 | 有意 |
 | `compact` | **删 todo + 删 tick** | 4 5 **7** 8 | → A-18 |
 | `goal new/switch/rm` | 换掉整个 `state.json` | 全部 | 已被 `goals::ensure_idle` 挡住（runner 在跑就拒绝，除非 `--force`） |
@@ -1209,7 +1209,7 @@ A-16 只是一个样本。这一轮把问题反过来问：**runner 的判断一
 
 三条新的，全部复现成立。
 
-### A-17（高）人插一句 `zloop feedback`，一轮**失败**的宿主就被记成「写回了」——连续失败停机整个失效
+### A-17（高）人插一句 `zloop feedback`，一轮**失败**的宿主就被记成「写回了」——连续失败停机整个失效 — 已修
 
 结算那一步（`runner.rs:1069-1091`）的注释写的是 "did the host write back?"，
 代码问的却是「这段时间里账本长了没长」：
@@ -1262,6 +1262,49 @@ A/B 实测（`scripts/repro-a17-interactive-write-masks-a-failed-round.sh`），
 修的方向（下一轮做，不在本轮）：`wrote_back` 不能靠「账本长没长」推，得认人——
 只把**宿主这一轮的会话**记的 tick 算数，或者反过来只认 `done/progress/fail/block`
 这四种真写回的 outcome。后者更稳：`zloop done` 从人的会话里敲同样算写回，本来就该算。
+
+**修法**（t24）——按上面第二条走，一共三处，缺一条闸就还是关不上：
+
+1. **`wrote_back` 只认写回的 outcome**（`runner.rs:1073` + `tick::is_writeback`）。
+   新增 `tick::WRITEBACK = ["done","progress","fail","block"]`，就是 `zloop done`
+   的四个出口。判据从「这段时间里账本长了没长」变成「这段时间里有没有人把这一轮结掉」。
+2. **这一轮的花费挂在结掉它的那条 tick 上**（`runner.rs:1095`）。`ticks.last_mut()` 换成
+   「轮内最后一条写回 tick」；一条都没有就什么都不挂——上面第 2 个后果。
+3. **`feedback` 不再无条件清 `fail_streak`**（`tick::fail_streak`）。只修 1 是不够的：
+   fail 确实开始记了，但人每插一句就把两次 fail 隔开，尾部连续数永远到不了上限，
+   实测仍是「起了 7 轮、账本里 6 条 fail、一直不停」。现在的规则是**只有循环已经停在
+   `fail_streak` 上**（前面攒的 fail ≥ `max_fail_streak`）那句反馈才清零——README
+   里那段实测（3 次 fail → `WAIT (fail_streak)` → `feedback` → `RUN`）一字不差照旧成立，
+   变的只是「还在跑的时候补一句话」不再算"失败被解决了"。
+   为此 `fail_streak(ticks)` 改成 `fail_streak(state)`（要读 `policy.max_fail_streak`），
+   实现也从"从尾往前扫"改成"从头往后走"——要判一条反馈写下时循环停没停，
+   得知道它**前面**攒了几条 fail。
+
+修完同一个脚本：
+
+```
+=== 场景 A：宿主每轮都失败，没人插话 ===
+  起了 2 轮 ｜ 账本里 fail：2 条 ｜ journal 每轮的 wrote_back：false false
+  runner: runner: stop (fail_streak)
+
+=== 场景 B：一模一样，只是人每隔 1 秒敲一句 zloop feedback ===
+  起了 2 轮 ｜ 账本里 fail：2 条 ｜ journal 每轮的 wrote_back：false false
+  runner: runner: stop (fail_streak)
+
+[OK] 两边都停在 fail_streak：交互式命令写的 tick 不再被当成宿主的写回
+```
+
+回归测试三条，撤掉对应那处修复就变红：
+
+| 测试 | 盯住的是 | 撤掉之后 |
+|---|---|---|
+| `runner_test::a_humans_feedback_cannot_mask_a_failed_round` | 1 + 3：宿主每轮失败、每轮自己敲一句 feedback → 仍记 2 条 fail、`wrote_back=false`、停在 `fail_streak`；`--git-commit` 一个 checkpoint 都没有，半成品留在树里 | 60 秒跑不完（`round 1 written back · host blew up` 无限循环） |
+| `runner_test::the_rounds_cost_lands_on_the_write_back_not_on_a_humans_note` | 2：写回之后人再开口，花费/轮数/时长记在 `done` 那条上 | `left: (None, None, None)` |
+| `tick_test::feedback_mid_run_does_not_disarm_the_fail_brake` | 3：反馈插在 fail 之间不清零；停下之后的反馈照旧清零 | `第 1 句反馈把失败计数清零了 left: 0 right: 1` |
+
+**没顺手改的**（同一张表上、同型、留给后面）：`edit` tick 也会打断 `fail_streak`
+（README 明说「任意 `edit` 都会重置计数」，而且 `edit` 至少意味着计划真的动了，先留着）；
+`feedback` 对 `progress_streak` 的无条件清零是第 5 项上一模一样的形状，没在本轮动。
 
 ### A-18（中）`zloop compact` 把花费一起归档走，`max_total_usd` 静默复位
 

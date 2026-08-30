@@ -85,7 +85,7 @@ pub fn signals(state: &State) -> Vec<Signal> {
     }
 
     // 连续失败：可能不是这一条难，是方法错了
-    let fails = tick::fail_streak(&state.ticks);
+    let fails = tick::fail_streak(state);
     if fails >= FAIL_AT {
         out.push(Signal { kind: "fail_streak", detail: format!("连续 {fails} 轮失败") });
     }

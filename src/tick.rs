@@ -11,9 +11,17 @@ use chrono::{DateTime, Duration, FixedOffset};
 use serde_json::{json, Map, Value};
 
 pub const COUNTED: [&str; 3] = ["done", "progress", "fail"];
+/// 宿主**真的把这一轮结掉了**的四种 outcome：`zloop done` 的四个出口。
+///
+/// 别用「这段时间里账本长没长」代替这个判断：`feedback` / `edit` / `replan` / `reflect`
+/// 也会往 `ticks` 里加东西，其中 `feedback` 和 `edit` 是**人在另一个终端**敲的。
+/// runner 用长度差判结算时，人插一句 `zloop feedback` 就能让一轮失败的宿主被记成
+/// 「写回了」——fail 不记、`fail_streak` 恒为 0、连续失败停机整个失效（A-17）。
+pub const WRITEBACK: [&str; 4] = ["done", "progress", "fail", "block"];
 /// `feedback` 是唯一一个**人写的** outcome（`zloop feedback`）：agent 自述之外的另一路信号。
-/// 它不计入 `COUNTED`（不吃配额、不推进轮次），但会打断 fail / noop / progress 三条 streak——
+/// 它不计入 `COUNTED`（不吃配额、不推进轮次），但会打断 noop / progress 两条 streak——
 /// 人开口说话正是"停下来等人"该等到的东西，等到了就该让循环继续。
+/// fail 那条要多一个条件（**循环已经停在 fail_streak 上**），理由见 `fail_streak`。
 pub const OUTCOMES: [&str; 9] =
     ["done", "progress", "fail", "block", "noop", "edit", "feedback", "reflect", "replan"];
 pub const FEEDBACK: &str = "feedback";
@@ -29,6 +37,11 @@ pub const REPLAN: &str = "replan";
 /// streak 计数时要跳过的轮次：它们不代表干活的结果。
 fn transparent(outcome: &str) -> bool {
     outcome == "noop" || outcome == REFLECT || outcome == REPLAN
+}
+
+/// 这条 tick 是宿主结掉一轮活留下的吗？——runner 判「写回了没有」只认这个。
+pub fn is_writeback(outcome: &str) -> bool {
+    WRITEBACK.contains(&outcome)
 }
 
 /// 上一轮干活之后才到的反馈——也就是下一轮**必须先处理**的那些。
@@ -76,13 +89,34 @@ impl Decision {
 // --- streaks & accounting -------------------------------------------------
 
 /// Trailing consecutive `fail` ticks; `noop` ticks are transparent, anything else breaks it.
-pub fn fail_streak(ticks: &[Tick]) -> usize {
+///
+/// `feedback` 只在**循环已经因连续失败停下**的时候才清零（`forgive_at` = `max_fail_streak`）。
+/// 无条件清零看着更"人说了算"，实际是给无头 runner 拆了保险丝：`zloop feedback` 是文档
+/// 教人「跟正在跑的循环说话」的那条路，人在另一个终端补一句「先别动 x.rs」，跟"这一轮
+/// 失败被解决了"没有任何关系，可它一插进两次 fail 中间，连续失败就永远数不到上限——
+/// 宿主接着一轮一轮地烧（A-17 的后半截）。
+///
+/// 「人开口说话就该让循环继续」这条语义没丢，只是收窄到它本来说的那个场景：**停下来
+/// 等人之后**人才开的口（README 里那段实测——连着 3 次 fail → `WAIT (fail_streak)` →
+/// `zloop feedback …` → `RUN`——一字不差地照旧成立）。
+pub fn fail_streak(state: &State) -> usize {
+    fails_in_a_row(&state.ticks, state.policy.max_fail_streak)
+}
+
+fn fails_in_a_row(ticks: &[Tick], forgive_at: usize) -> usize {
+    // 从头往后走，不是从尾往前：要判「这条 feedback 写下的当时循环停没停」，
+    // 得知道它**前面**攒了几条 fail。
     let mut n = 0;
-    for t in ticks.iter().rev() {
+    for t in ticks {
         match t.outcome.as_str() {
             "fail" => n += 1,
-            o if transparent(o) => continue,
-            _ => break,
+            o if transparent(o) => {}
+            FEEDBACK => {
+                if forgive_at > 0 && n >= forgive_at {
+                    n = 0; // 人回应的是一个已经停在那儿的循环——放它再试
+                }
+            }
+            _ => n = 0, // done / progress / block / edit：这一轮有别的结果了
         }
     }
     n
@@ -241,7 +275,7 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
             interval_min: if exhausted { None } else { Some(interval(state, 1 + noops)) },
         };
     }
-    if fail_streak(ticks) >= policy.max_fail_streak {
+    if fail_streak(state) >= policy.max_fail_streak {
         return Decision::stop("fail_streak");
     }
     if policy.max_total_usd > 0.0 && spent_usd(ticks) >= policy.max_total_usd {

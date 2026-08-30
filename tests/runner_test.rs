@@ -325,6 +325,86 @@ echo '{"session_id":"a16","is_error":false,"result":"ok"}'"#,
     assert!(!j.iter().any(|e| e["event"] == "stop" && e["reason"] == "throttled"), "配额满不是终态，不该 stop：{j:?}");
 }
 
+/// A-17 回归：人在另一个终端敲一句 `zloop feedback`，不能让一轮**失败**的宿主
+/// 被记成「写回了」。
+///
+/// 结算那一步以前问的是「这段时间里账本长没长」（`t.outcome != "noop"`），而
+/// `feedback` / `edit` / `replan` 都会让它长——于是失败轮次不记 fail、`fail_streak`
+/// 恒为 0、连续失败停机整个失效，`--git-commit` 还会把那一轮的半成品当成果提交掉。
+///
+/// 这条测试里的「人」就是宿主自己在退出前敲的那句 feedback：时序确定（反馈落在
+/// runner 记 fail 之前），不靠另一个线程去抢。
+#[test]
+fn a_humans_feedback_cannot_mask_a_failed_round() {
+    let fake = fake_host(
+        r#"id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+echo "half-finished work for $id" > "$id.txt"
+# 人在另一个终端补一句（不是写回：不改 todo 状态、不结算这一轮）
+zloop feedback "$id" "先别动 x.rs" >/dev/null 2>&1
+echo "host blew up" >&2
+exit 1"#,
+    );
+    let d = project(&["[P0] a"]);
+    let p = state::state_path(&d);
+    let mut st = state::load(&p).unwrap();
+    st.policy.max_fail_streak = 2;
+    state::save(&p, &mut st).unwrap();
+    let git = git_repo(&d);
+
+    let (code, out, err) = run_within(
+        &d,
+        &["run", "--host", "claude", "--fast", "--no-replan", "--git-commit", "--timeout-min", "30"],
+        &[("PATH", &with_fake_path(&fake))],
+        Duration::from_secs(60),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("runner: stop (fail_streak)"), "人插一句话不该拆掉连续失败这道闸：{out}");
+
+    let st = state::load(&p).unwrap();
+    assert_eq!(st.ticks.iter().filter(|t| t.outcome == "fail").count(), 2, "失败的轮次要记进账本：{:?}", st.ticks);
+    assert_eq!(st.ticks.iter().filter(|t| t.outcome == "feedback").count(), 2, "{:?}", st.ticks);
+    assert_eq!(zloop::tick::fail_streak(&st), 2, "{:?}", st.ticks);
+
+    let j = journal(&d);
+    assert!(j.iter().filter(|e| e["event"] == "end").all(|e| e["wrote_back"] == false), "{j:?}");
+    // --git-commit：失败的轮次没有成果，checkpoint 一个都不该有
+    assert!(!j.iter().any(|e| e["event"] == "commit"), "失败轮次不该产生 checkpoint：{j:?}");
+    assert!(!out.contains("runner: git checkpoint"), "{out}");
+    let log = String::from_utf8_lossy(&git(&["log", "--oneline"]).stdout).to_string();
+    assert_eq!(log.lines().count(), 1, "树上只该有那条 init：{log}");
+    // 半成品留在工作树里等下一轮认领，没被提交也没被删
+    assert!(d.join("t1.txt").exists(), "没写回不等于要把产物扔掉");
+}
+
+/// A-17 的第二个后果：结算时把这一轮的花费/轮数/日志挂到 `ticks.last_mut()` 上。
+/// 人在宿主写回之后补的那句 `zloop feedback` 排在后面，于是花费记到了**人**那条 tick 上。
+#[test]
+fn the_rounds_cost_lands_on_the_write_back_not_on_a_humans_note() {
+    let fake = fake_host(
+        r#"id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+zloop done "$id" --note ok --approach "fake host round" >/dev/null 2>&1
+# 人在写回之后才开口——这条 tick 排在写回后面，但它不是这一轮的结算
+zloop feedback "$id" "顺便说一句：下次先跑 lint" >/dev/null 2>&1
+echo '{"session_id":"c2","is_error":false,"result":"ok","total_cost_usd":0.4321,"num_turns":9,"duration_ms":8100}'"#,
+    );
+    let d = project(&["[P0] a"]);
+    let (code, out, err) = run(&d, &["run", "--host", "claude", "--fast", "--no-replan"], &[("PATH", &with_fake_path(&fake))]);
+    assert_eq!(code, 0, "{out}{err}");
+    let st = state::load(&state::state_path(&d)).unwrap();
+    let kinds: Vec<&str> = st.ticks.iter().map(|t| t.outcome.as_str()).collect();
+    assert_eq!(kinds, vec!["done", "feedback"], "{:?}", st.ticks);
+    assert_eq!(
+        (st.ticks[0].cost_usd, st.ticks[0].num_turns, st.ticks[0].duration_ms),
+        (Some(0.4321), Some(9), Some(8100)),
+        "花费该记在结掉这一轮的那条上"
+    );
+    assert_eq!(
+        (st.ticks[1].cost_usd, st.ticks[1].num_turns, st.ticks[1].duration_ms),
+        (None, None, None),
+        "人说的那句话不吃这一轮的账"
+    );
+}
+
 #[test]
 fn max_budget_flag_is_passed_to_claude() {
     let fake = fake_host(

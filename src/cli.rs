@@ -621,7 +621,7 @@ fn start_refusal(st: &state::State, reason: &str) -> String {
         "paused" => ("当前目标是暂停着的".to_string(), "zloop resume 继续，或 zloop goal switch <id> 换一个".to_string()),
         "done" => ("当前目标已经结束了".to_string(), "zloop goal new \"<新目标>\"".to_string()),
         "fail_streak" => (
-            format!("连着 {} 轮失败，到了 policy.max_fail_streak 上限", tick::fail_streak(&st.ticks)),
+            format!("连着 {} 轮失败，到了 policy.max_fail_streak 上限", tick::fail_streak(st)),
             "zloop log 看失败原因，zloop edit 改掉那条 todo（或 zloop feedback 留一句），再 start".to_string(),
         ),
         "progress_streak" => (
