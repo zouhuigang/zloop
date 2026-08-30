@@ -1370,6 +1370,64 @@ fn a_dead_wait_reads_the_same_on_every_list() {
     assert!(o.out.contains("⛔等不到 t1") && o.out.contains("解开敲 zloop edit t2 --blocked-by ''"), "{}", o.out);
 }
 
+/// `edit <dep> --status deferred` 是**一条命令判死一片**：回显只讲被改的那条自己，
+/// 被连累的那几条一个字不说。
+///
+/// 修复前：`edit t4 --status deferred` 印 `t4 [P2] deferred 四` 就没了，紧接着
+/// `doctor` 退 1 报 t2/t3 永远轮不到——同一份 state，两块屏说的话对不上，而
+/// `edit` 那一行是这一刻唯一会被读到的。被连累的是谁在那一刻就已经知道
+/// （反向扫一遍 `blocked_by` 而已），没有任何理由留给下一次 doctor。
+#[test]
+fn deferring_a_dependency_names_the_todos_it_kills() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "alpha"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 基础", "--add", "[P1] 二", "--add", "[P1] 三", "--add", "[P2] 四"], None, &[]);
+    zloop(d, &["edit", "t2", "--blocked-by", "t4"], None, &[]);
+    zloop(d, &["edit", "t3", "--blocked-by", "t4"], None, &[]);
+
+    let o = zloop(d, &["edit", "t4", "--status", "deferred"], None, &[]);
+    assert_eq!(o.code, 0, "edit 本身是成功的，别把脚本里的 `edit && …` 打断");
+    // 前提：这一改确实把 t2/t3 判死了（少了这句，下面验的只是个没后果的字样）
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 1, "前提没了：doctor 得先认定 t2/t3 永远轮不到");
+    assert!(o.out.contains("连累 2 条永远等不到 t4"), "被连累的条数要说出来: {}", o.out);
+    assert!(o.out.contains("t2") && o.out.contains("t3"), "还要点名是哪几条: {}", o.out);
+    assert!(o.out.contains("zloop edit t4 --status open"), "欠一个出口: {}", o.out);
+
+    // 捡回来就该闭嘴：这一行说的是当下的事实，不是"改过一次"的流水
+    let o = zloop(d, &["edit", "t4", "--status", "open"], None, &[]);
+    assert!(!o.out.contains("连累"), "捡回来了还在喊: {}", o.out);
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 0);
+
+    // 没人依赖的那条延后，不该凭空多出一行
+    let o = zloop(d, &["edit", "t1", "--status", "deferred"], None, &[]);
+    assert!(!o.out.contains("连累"), "没人等 t1: {}", o.out);
+
+    // 依赖方自己已经了结了，就不算被连累——判据和四张清单同源（`dead_deps` 跳终态）
+    zloop(d, &["edit", "t2", "--status", "deferred"], None, &[]);
+    let o = zloop(d, &["edit", "t4", "--status", "deferred"], None, &[]);
+    assert!(o.out.contains("连累 1 条永远等不到 t4：t3"), "了结的那条不该再算进来: {}", o.out);
+
+    // 长清单只印前 8 个，条数仍然说全：这一行是"提醒去看"，不是清单本身
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "beta"], None, &[]);
+    let mut args = vec!["plan".to_string()];
+    for i in 1..=11 {
+        args.push("--add".into());
+        args.push(format!("[P1] 活{i}"));
+    }
+    let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    zloop(d, &args, None, &[]);
+    for i in 2..=11 {
+        zloop(d, &["edit", &format!("t{i}"), "--blocked-by", "t1"], None, &[]);
+    }
+    let o = zloop(d, &["edit", "t1", "--status", "deferred"], None, &[]);
+    assert!(o.out.contains("连累 10 条永远等不到 t1"), "条数要说全: {}", o.out);
+    assert!(o.out.contains("t2,t3,t4,t5,t6,t7,t8,t9…"), "只印前 8 个再省略: {}", o.out);
+    assert!(!o.out.contains("t11"), "省略号后面别再漏出来: {}", o.out);
+}
+
 /// 做完 / 延后的那条不在等谁：给它印「等不到」是噪音，`⏳` 也该原样留着。
 #[test]
 fn a_finished_todo_is_not_waiting_on_anyone() {

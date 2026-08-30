@@ -61,6 +61,19 @@ pub fn dead_deps<'a>(state: &'a State, t: &'a Todo) -> Vec<&'a str> {
     out
 }
 
+/// 反着问一遍 [`dead_deps`]：因为 `id` 派不出去，哪些 todo 跟着永远轮不到。
+///
+/// `edit <dep> --status deferred` 是一条命令判死一片——被连累的那几条在**这一刻**是
+/// 已知的（`blocked_by` 反向扫一遍就有），可回显只讲被改的那条自己，人看到
+/// `t4 deferred` 就走了，下次知道是 `doctor` 退 1 的时候（t38）。
+///
+/// 判据不另写：仍旧走 [`dead_deps`]，所以终态的 todo、`user`、重复 id 的处理
+/// 和四张清单完全一致；`id` 自己也不会进来（自依赖在 `edit` 入口就挡掉了，
+/// 真混进来也会被 `dead_deps` 的终态早退滤掉）。
+pub fn dead_dependents<'a>(state: &'a State, id: &str) -> Vec<&'a str> {
+    state.todos.iter().filter(|t| t.id != id && dead_deps(state, t).contains(&id)).map(|t| t.id.as_str()).collect()
+}
+
 /// 死等的出口命令。方向不能反：依赖还在清单里就把**依赖**捡回来，已经不在了
 /// 只能把**这条**的依赖断开——指着人去 `edit` 一条不存在的 todo 是死路。
 pub fn dead_dep_fix(state: &State, t: &Todo, dep: &str) -> String {

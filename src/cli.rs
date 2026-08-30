@@ -1106,10 +1106,12 @@ fn cmd_edit(
         // 印成 `⏳t4` 等于说"排上了"，人就走了，下次发现是 doctor 退 1 的时候。
         let dead: Vec<String> = todo::dead_deps(st, &st.todos[idx]).iter().map(|s| s.to_string()).collect();
         let fix = dead.first().map(|d| todo::dead_dep_fix(st, &st.todos[idx], d));
-        Ok(Ok((st.todos[idx].clone(), dead, fix)))
+        // 反过来再扫一遍：`--status deferred` 一条命令判死一片，被连累的那几条现在就知道
+        let hit: Vec<String> = todo::dead_dependents(st, id).iter().map(|s| s.to_string()).collect();
+        Ok(Ok((st.todos[idx].clone(), dead, fix, hit)))
     })?;
     match result {
-        Ok((t, dead, fix)) => {
+        Ok((t, dead, fix, hit)) => {
             let deps = if !dead.is_empty() {
                 format!(" ⛔等不到 {}", dead.join(","))
             } else if t.blocked_by.is_empty() {
@@ -1121,6 +1123,14 @@ fn cmd_edit(
             // 退出码还是 0：这条 edit 本身是成功的，改成非 0 会把脚本里的 `edit && …` 打断
             if let Some(fix) = fix {
                 println!("  ↳ 解开敲 {fix}");
+            }
+            if !hit.is_empty() {
+                // 长清单只印前几个：这行是"提醒去看"，不是清单本身（`zloop doctor` 才是）
+                const SHOW: usize = 8;
+                let ids = hit.iter().take(SHOW).cloned().collect::<Vec<_>>().join(",");
+                let tail = if hit.len() > SHOW { "…" } else { "" };
+                println!("  ⛔ 连累 {} 条永远等不到 {}：{ids}{tail}", hit.len(), t.id);
+                println!("  ↳ 让它们能跑：zloop edit {} --status open   # 或逐条断开依赖", t.id);
             }
             Ok(0)
         }
