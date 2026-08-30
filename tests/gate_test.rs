@@ -1,8 +1,9 @@
 //! 自动闸（`.github/workflows/ci.yml` + `scripts/check.sh`）的回归测试。
+//! 四道：docs（文档链接与节号）→ fmt → clippy → test。
 //!
 //! 这里钉的不是「闸能不能跑通」——那是 CI 自己每次 push 都在回答的问题；这里钉的是
 //! **闸只有一份定义**：CI 必须去调 `scripts/check.sh`，不许在 workflow 里再抄一遍
-//! `cargo fmt --all` / `clippy -D warnings` / `cargo test`。抄成两份之后它们会各走各的，
+//! `cargo fmt --all` / `clippy -D warnings` / `cargo test` / 文档链接闸。抄成两份之后它们会各走各的，
 //! 到那天「本地过了」和「CI 过了」就不是同一句话了，而这种漂移平时看不出来。
 //!
 //! 另外钉住 `runs-on: macos-*`：`awake::supported()` 是 `cfg!(target_os = "macos")`，
@@ -29,22 +30,45 @@ fn ci_calls_the_same_gate_humans_call() {
     let ci = without_comments(&repo(".github/workflows/ci.yml"));
     assert!(ci.contains("scripts/check.sh"), "CI 必须调 scripts/check.sh：\n{ci}");
 
-    // 三条实命令一条都不许出现在 workflow 的实际步骤里——出现即说明有人把闸抄成了第二份。
+    // 四条实命令一条都不许出现在 workflow 的实际步骤里——出现即说明有人把闸抄成了第二份。
     // （`cargo fmt --version` / `cargo clippy --version` 是打印版本，不是闸，所以这里
     //   匹配的是带闸参数的形态。）
-    for inlined in ["cargo fmt --all", "--all-targets", "-D warnings", "cargo test"] {
+    for inlined in ["check-doc-links.py", "cargo fmt --all", "--all-targets", "-D warnings", "cargo test"] {
         assert!(!ci.contains(inlined), "workflow 里不许内联 `{inlined}`，闸的定义在 scripts/check.sh：\n{ci}");
     }
 }
 
 #[test]
-fn the_gate_covers_fmt_clippy_and_test() {
+fn the_gate_covers_docs_fmt_clippy_and_test() {
     let sh = repo("scripts/check.sh");
-    for cmd in ["cargo fmt --all -- --check", "cargo clippy --all-targets --all-features -- -D warnings", "cargo test"] {
+    for cmd in [
+        "python3 scripts/check-doc-links.py",
+        "cargo fmt --all -- --check",
+        "cargo clippy --all-targets --all-features -- -D warnings",
+        "cargo test",
+    ] {
         assert!(sh.contains(cmd), "scripts/check.sh 少了这一道：`{cmd}`\n{sh}");
     }
-    // 默认（不带参数）必须三道全跑，别哪天被改成只跑 fmt
-    assert!(sh.contains(r#"${*:-"fmt clippy test"}"#), "check.sh 的默认闸必须是 fmt clippy test：\n{sh}");
+    // 默认（不带参数）必须四道全跑，别哪天被改成只跑 fmt
+    assert!(sh.contains(r#"${*:-"docs fmt clippy test"}"#), "check.sh 的默认闸必须是 docs fmt clippy test：\n{sh}");
+}
+
+/// 文档闸自己得是绿的——一道开局就红的闸等于没有闸（t30 在 `cargo fmt` 上踩过一次）。
+/// 这里顺带把它当成回归测试用：`docs/CODE-AUDIT.md` 的节号重复过一次（第三轮和第四轮
+/// 都编成 6），害得十一处「正文 §N」有一半指错地方，而当时没有任何东西会报错。
+#[test]
+fn the_doc_link_gate_is_green() {
+    let out = std::process::Command::new("python3")
+        .arg("scripts/check-doc-links.py")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("跑不了 python3 scripts/check-doc-links.py");
+    assert!(
+        out.status.success(),
+        "文档链接闸红了：\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]

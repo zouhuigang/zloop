@@ -4,6 +4,15 @@
 > 这份文档能给的是：按风险面逐块过一遍，每条发现都带**可复现的失败场景**；
 > 试过但复现不出来的，写明"试过没复现"，不写进 issue，免得污染真发现。
 
+> **要查某一条缺陷，先去 [`docs/FINDINGS.md`](FINDINGS.md)**（42 条确认缺陷的清册：
+> 一览表 + 逐条草稿，每条带锚点直达这边的正文）。这边是**过程**，按审查轮次排，
+> 从上往下读；那边是**结果**，按缺陷查。
+>
+> 编号约定：`§N` ＝ 第 (N−3) 轮（§5 是第二轮，§22 是第十九轮），**节号不重复、不跳号**。
+> 这条不变量以前是破的——第三轮和第四轮都编成了 6，导致十一处「正文 §6」有一半指错地方
+> （t45 重编号修掉，同轮还修了开头两处「见第 2 节的 A-1 / B-1」——它们其实在 §4）。
+> 现在 `scripts/check-doc-links.py` 会把它连同全仓的锚点链接一起验，`sh scripts/check.sh` 和 CI 都跑。
+
 ## 1. 规模与 panic 面
 
 `src/` 23 个文件 8019 行，`tests/` 3941 行。
@@ -25,7 +34,7 @@
 
 **（一）真的会崩，且输入来自用户手改的文件 —— `hosts.rs:252/257/260`**
 
-见 §2 的 A-1。这是这一轮唯一确认的 panic。
+见 §4 的 A-1。这是这一轮唯一确认的 panic。
 
 **（二）靠不变量保证，成立 —— `phase.rs:154`、`cli.rs:742`、`cli.rs:767`、`runner.rs:634`**
 
@@ -34,7 +43,7 @@
 
 但 `Decision` 是 `pub` 结构体、字段全 `pub`，这个不变量**没有任何东西守着**——
 将来谁手工构造一个 `Decision { should_run: true, todo: None, .. }`，四处一起崩。
-低危，记在 §2 的 B-1（**已在 t10 修掉**：构造器 + 私有字段 + `ready_todo()`）。
+低危，记在 §4 的 B-1（**已在 t10 修掉**：构造器 + 私有字段 + `ready_todo()`）。
 
 **（三）由构造保证，成立 —— `todo.rs:34`、`state.rs:275`、`runner.rs:328/329`**
 
@@ -508,7 +517,7 @@ d.interval_min.map(|m| (m, d.reason.clone()))
   三条全部 FAILED（各 20–25 秒被上限掐掉），不是挂死。
 
 **隔壁问题已查清**：`max_noop_streak` 在 runner 路径上不是「空转」，是**跨进程串味**——
-见 [A-16](#a-16中高noop-计数从交互式命令串进-runner-的停机判断人敲三下-zloop-next-就能让长跑拒绝启动--已修)。
+见 [A-16](#a-16中高noop-计数从交互式命令串进-runner-的停机判断人敲三下-zloop-next就能让长跑拒绝启动--已修)。
 
 ### A-6（高）超时管不住留下后台进程的那一轮，而且这段时间里 SIGTERM 叫不动 runner — 已修
 
@@ -785,7 +794,7 @@ $ zloop doctor
 
 ---
 
-## 6. 第四轮：调度逻辑的边界
+## 7. 第四轮：调度逻辑的边界
 
 全部用真命令构造，`zloop next --json` 读结果。
 
@@ -1015,7 +1024,7 @@ $ zloop edit t1 --status open && zloop next --json → ready / t1
 
 ---
 
-## 7. 第五轮：实景撞上的
+## 8. 第五轮：实景撞上的
 
 不是扫出来的——是这次长跑自己踩的。审查会话和无头 runner 共用一个工作树，
 `--git-commit` 的 checkpoint 当场把对方没写完的代码提交了。
@@ -1125,12 +1134,12 @@ runner: git checkpoint 35eea29 · 2 个文件
 
 ---
 
-## 8. 第六轮：A-6 的同一类死法，另外三条路
+## 9. 第六轮：A-6 的同一类死法，另外三条路
 
 A-6 修的是宿主/preflight 那条路（`run_with_timeout`：进程组 + 排水上限）。
 这一轮沿着同一个问题问下去：**runner 每轮还起了哪些子进程，它们有闸吗？**
 
-### 8.1 全部子进程调用点
+### 9.1 全部子进程调用点
 
 | 位置 | 命令 | 什么时候跑 | 有闸吗 |
 |---|---|---|---|
@@ -1381,7 +1390,7 @@ no index.lock ／ git add OK                  ← 仓库没被留下的锁废掉
 它们不在每轮的热路径上，`pmset` 和 `visudo` 也不是会挂住的那一类，但「每一个子进程都走
 `run_capture`」这句话目前还不是真的——单开一条记着。
 
-## 9. 第七轮：noop 计数的作用域
+## 10. 第七轮：noop 计数的作用域
 
 ### A-16（中高）noop 计数从交互式命令串进 runner 的停机判断：人敲三下 `zloop next`，就能让长跑拒绝启动 — 已修
 
@@ -1458,12 +1467,12 @@ README 里 `max_noop_streak` 那一行原来写的是「（runner 不受此影�
 
 151 测试全过（原 150）。
 
-## 10. 第八轮：把「交互式命令写进账本的东西」系统扫一遍
+## 11. 第八轮：把「交互式命令写进账本的东西」系统扫一遍
 
 A-16 只是一个样本。这一轮把问题反过来问：**runner 的判断一共读账本里的哪些量，
 这些量分别有谁在写？** 只要写的人里有一个是交互式命令，那就是一条 A-16 同型的路。
 
-### 10.1 runner 读什么（判断输入的全集）
+### 11.1 runner 读什么（判断输入的全集）
 
 `tick::decide` + `runner::wait_plan` + `runner::run` 里，所有影响「跑不跑、跑哪条、
 停不停、resume 谁」的量，一个不落：
@@ -1483,7 +1492,7 @@ A-16 只是一个样本。这一轮把问题反过来问：**runner 的判断一
 | 11 | `in_progress` | `held_by_other` | 只挡交互式 `next`，**对 runner 无效**（有意，见 `tick.rs:108`） |
 | 12 | `policy.*` | 直接读 | 上面所有阈值 |
 
-### 10.2 谁在写（写命令的全集）
+### 11.2 谁在写（写命令的全集）
 
 `state.json` 的全部写入点（`state::transaction` / `state::save` 的调用者）逐个对照：
 
@@ -1734,7 +1743,7 @@ $ sh scripts/repro-a19-runner-resumes-a-humans-session.sh
 |---|---|---|
 | `runner_test::a_humans_feedback_is_not_a_session_to_resume` | 人给 t1 留一句 `feedback` 后跑两轮（默认 `todo` 模式 + `--resume all` 各一遍）：argv 里不许出现人的 session id；同时 `--resume all` 下第 2 轮仍要接上 `sess-t1` | `runner 跑进了人的对话里（[]）：resume=HUMAN-9999` |
 
-### 10.3 检查过、确认不是问题的
+### 11.3 检查过、确认不是问题的
 
 - ~~**`edit` / `feedback` 打断 fail / noop / progress 三条 streak**：有意设计，`tick.rs:14`
   写明了理由——「人开口说话正是『停下来等人』该等到的东西」。第 4 / 5 项就该被它打断。~~
@@ -1753,7 +1762,7 @@ $ sh scripts/repro-a19-runner-resumes-a-humans-session.sh
 
 ---
 
-## 11. 第九轮：A-17 那张表上同型的最后两条
+## 12. 第九轮：A-17 那张表上同型的最后两条
 
 A-17 修完时留了一句「没顺手改的」：`edit` 也会打断 `fail_streak`、`feedback` 对
 `progress_streak` 的无条件清零是一模一样的形状。这一轮把这两条一起复现、一起修掉。
@@ -1855,7 +1864,7 @@ A/B 实测（假宿主每轮都 `zloop done t1 --outcome progress`，`max_progre
 | `tick_test::an_edit_on_another_todo_does_not_disarm_the_fail_brake` | A-20：改 t2 不清 t1 的失败计数；停下之后改 t2 才清；改 t1 照旧随时清 | `第 1 次改别的 todo 把失败计数清零了 left: 0 right: 1` |
 | `tick_test::feedback_mid_run_does_not_disarm_the_progress_brake` | A-21：反馈插在两轮 progress 中间不清零；停下之后清；`edit` 改这条 todo 随时清、改别的不清 | `第 1 句反馈把原地踏步计数清零了 left: 0 right: 1` |
 
-### 11.1 这一类到此为止
+### 12.1 这一类到此为止
 
 「交互式命令写进账本的东西串进 runner 的判断」这一类（A-16 → A-17 → A-18 / A-19 → A-20 / A-21）
 到这一轮为止，`tick.rs` 里三条 streak 的规矩统一成了一句话：
@@ -1872,7 +1881,7 @@ A-18（`compact` 抹掉花费）是这一类的另一头——**从账本里删�
 它的修法也就成了另一句话：**归档只该让账本变小，不该让账变少**（累计花费单独存一份），
 而且**动账本的命令要和 `goal switch` 走同一道闸**（`ensure_idle`）。这一类到此全部修完。
 
-## 12. 第十轮：「永远等不到」的第三种形状
+## 13. 第十轮：「永远等不到」的第三种形状
 
 A-9 修完时留了一句话没往下问：`dangling_blocked_by`（依赖不存在）和 `dep_cycle`（依赖成环）
 都在报同一个后果——**这条 todo 永远轮不到**。那这个后果还有没有第三种走法？有，而且不用手改文件。
@@ -1930,7 +1939,7 @@ zloop doctor             → 没发现问题（exit 0）
 | `doctor_test::depending_on_a_todo_with_an_unknown_status_is_reported_too` | 手改成 `"cancelled"` 的那一半，且要把野状态原样印进 `what` | `[]` |
 | `doctor_test::a_live_dependency_is_not_a_dead_end` | 反向：依赖还开着 / 依赖在等人（`done --block`）/ 两条都 deferred，一个字都不该报，doctor 退 0 | 照常绿（它防的是误报） |
 
-## 13. 第十一轮：两条小尾巴
+## 14. 第十一轮：两条小尾巴
 
 ### T36-①（低）`tests/scratch_t33.rs` 被误提交进仓库 — 已清
 
@@ -2056,7 +2065,7 @@ todo」一起判死刑，而回显只讲 t4 自己，一个字都不说被它连
 
 ---
 
-## 14. 第十二轮：`compact` —— 同一个形状，但撤不回来
+## 15. 第十二轮：`compact` —— 同一个形状，但撤不回来
 
 ### T39（中高）`compact` 把还有人依赖的那条搬进归档，等它的那几条就此永远等不到 — 已修
 
@@ -2119,13 +2128,13 @@ compacted 1 todos and 1 ticks → .zloop/archive/compact-….json
 （`drop_todo_from_state`）。检查本身一个字没动：**坏文件不会因为新版本不再生产就消失**，
 手改过的 state 和老版本留下的 `state.json` 仍然要被 `doctor` 认出来。
 
-## 15. 第十三轮：`compact` 的另外两个受害者（T39 只清了三分之一）
+## 16. 第十三轮：`compact` 的另外两个受害者（T39 只清了三分之一）
 
 T39 修的是 `blocked_by`。但 `dangling_in_progress` 这条 doctor 检查本身就说明：
 **指着 todo id 的字段不止 `blocked_by` 一处**。这一轮把 `state.json` 里
 「存了一个 todo id」的字段列全，逐个问一句「compact 搬走它指的那条会怎样」。
 
-### 15.1 指针全集（`src/state.rs` 的 struct 逐字段过）
+### 16.1 指针全集（`src/state.rs` 的 struct 逐字段过）
 
 | 存 todo id 的地方 | compact 怎么对它 | 结论 |
 |---|---|---|
@@ -2138,7 +2147,7 @@ T39 修的是 `blocked_by`。但 `dangling_in_progress` 这条 doctor 检查本�
 `Goal.id` 是目标 id、`Policy` 全是阈值，都不指 todo。所以指针一共三处，
 T39 之后还剩两处没人管——正好对应下面两条。
 
-### 15.2 T40-①（中高）例行 `compact` 吃掉人今天刚留下的、还没人读过的反馈 — 已修（见 §16）
+### 16.2 T40-①（中高）例行 `compact` 吃掉人今天刚留下的、还没人读过的反馈 — 已修（见 §17）
 
 `compact` 挑 tick 的判据是 `old_ids.contains(tick.todo)`（`cli.rs:2209`）——
 **只看它挂在哪条 todo 上，不看这条 tick 自己多老**。于是一条五秒钟前写下的
@@ -2168,7 +2177,7 @@ zloop context | grep 方向错了       → 0 条
 方向：搬 tick 的判据要多一条——**这条 tick 自己也得够老**，或者至少
 `pending_feedback` 里的那些不许搬；一条都不该在人还没读到之前消失。
 
-### 15.3 T40-②（中）`compact --force` 把在飞的那条搬走，`ensure_idle` 给的两条出口从此都退 2 — 已修（见 §16）
+### 16.3 T40-②（中）`compact --force` 把在飞的那条搬走，`ensure_idle` 给的两条出口从此都退 2 — 已修（见 §17）
 
 `cmd_compact` 先过 `goals::ensure_idle`，有 `in_progress` 就拦下。**但 `--force` 直接
 `return Ok(())`**（`goals.rs:217`），而 `old_ids` 的挑选完全不看 `st.in_progress`。
@@ -2204,7 +2213,7 @@ zloop doctor → ✗ 第 1 轮派出去的 t1 已经不在待办里了          
 方向：和 T39 同一个形状——`in_progress.todo` 不许进 `old_ids`，`--force` 也不许。
 `--force` 的语义是「我知道有人在跑，账我认」，不是「把在飞的那一轮删掉」。
 
-### 15.4 检查过、确认不是问题的
+### 16.4 检查过、确认不是问题的
 
 - **孤儿日志文件**：tick 进了归档，`.zloop/log/20260830-*-t1-done.md` 留在原地。
   `doctor` 的 `missing_log` 查的是反方向（tick 指着不存在的文件），这边不报。
@@ -2217,13 +2226,13 @@ zloop doctor → ✗ 第 1 轮派出去的 t1 已经不在待办里了          
   直接把竞态的结果摆出来试（`zloop next` 之后 `compact --keep-days 0 --force`）：
   `nothing to compact`、`t1` 还在清单里、`doctor` 没发现问题。**没复现。**
 
-## 16. 第十四轮：`compact` 剩下的两处指针一起收口（T40-①/② 已修）
+## 17. 第十四轮：`compact` 剩下的两处指针一起收口（T40-①/② 已修）
 
 T39 修的是三处 todo 指针里的一处（`blocked_by`）。这一轮把剩下两处
 （`Tick.todo`、`InProgress.todo`）补齐——形状和 T39 完全一样：**归档里的东西捡不回来，
 所以判断力要用在搬走之前，不是搬走之后说一声。**
 
-### 16.1 `cmd_compact` 现在是「先挑到期的，再四道闸逐个往外挑」
+### 17.1 `cmd_compact` 现在是「先挑到期的，再四道闸逐个往外挑」
 
 ```
 到期的（终态 + 自己的时间戳早于 cutoff）
@@ -2241,7 +2250,7 @@ T39 修的是三处 todo 指针里的一处（`blocked_by`）。这一轮把剩�
 `④` 排在最后一道是有意的：前三道挑走的那些本来就不搬，拿**真正的搬运名单**去问
 「搬走之后谁会死」才准（原来是拿全部到期的去问，会把已经留下的那条也报成"被等着"）。
 
-### 16.2 T40-① 为什么要两道闸（②③ 缺一不可）
+### 17.2 T40-① 为什么要两道闸（②③ 缺一不可）
 
 | 场景 | ② 待读反馈 | ③ 名下最近有记录 |
 |---|---|---|
@@ -2253,7 +2262,7 @@ T39 修的是三处 todo 指针里的一处（`blocked_by`）。这一轮把剩�
 后者会当场造出第二种悬空指针（`tick.todo` 指着归档里的 id），而前者顺带钉死了一条不变量：
 **todo 和它的 tick 永远一起走**。
 
-### 16.3 T40-② 的出口只印真的能用的那条
+### 17.3 T40-② 的出口只印真的能用的那条
 
 `ensure_idle` 印的是「先 `zloop done t1` 收尾（或 `zloop edit t1 --status open` 放回去）」。
 但 ① 拦下的这条 todo **必然已经了结**（`old_ids` 只收终态），而 `zloop done` 对终态的 todo
@@ -2269,7 +2278,7 @@ nothing compacted：到期的 1 条都留下了，还在清单里
 （`ensure_idle` / `status` 那两处也印着同一条走不通的 `zloop done`，那是**另一处**缺陷，
 入口不同、影响面更大，单独排一条，见下一轮 todo。）
 
-### 16.4 回归测试
+### 17.4 回归测试
 
 | 测试 | 钉住什么 | 撤掉后 |
 |---|---|---|
@@ -2280,18 +2289,18 @@ nothing compacted：到期的 1 条都留下了，还在清单里
 四道闸都不响（backdate 时把 tick 一起改老了、`--keep-days 0` 下秒级截断的时间戳严格早于
 `cutoff`），说明新增的闸没有顺手改掉正常整理的行为。
 
-## 17. 第十五轮：T42（中高）派活指着一条已了结的 todo 时，四处出口一起坏 — 已修
+## 18. 第十五轮：T42（中高）派活指着一条已了结的 todo 时，四处出口一起坏 — 已修
 
-§16.3 那句「入口不同、影响面更大，单独排一条」就是这一条。
+§17.3 那句「入口不同、影响面更大，单独排一条」就是这一条。
 
-### 17.1 造这个状态不需要 `--force`，也不需要手改文件
+### 18.1 造这个状态不需要 `--force`，也不需要手改文件
 
 两步都在最普通的用法里：`zloop next` 派出 t1，人看了一眼判它不做了 →
 `zloop edit t1 --status deferred`。`cmd_edit` 从头到尾不碰 `in_progress`（`cli.rs:1037-1111`），
 于是派活指针留在一条 `deferred` 的 todo 上。**这是「派出去之后人改主意」，不是异常路径**——
 T40-② 需要 `--force` 才走得到，这一条一道闸都不响。
 
-### 17.2 四处出口同时失效（实测，修复前）
+### 18.2 四处出口同时失效（实测，修复前）
 
 | 出口 | 印的 / 做的 | 实际 |
 |---|---|---|
@@ -2304,7 +2313,7 @@ T40-② 需要 `--force` 才走得到，这一条一道闸都不响。
 `zloop done <id> …`」，模型手里只有这一条命令，而它保证失败。第四条是老熟人——A-7 同一个形状：
 三条命令被拦下，唯一负责回答「哪儿不对」的那个没话说。
 
-### 17.3 修法：让 `done` 收得了尾，且**不改状态**
+### 18.3 修法：让 `done` 收得了尾，且**不改状态**
 
 两个候选：把出口全改成 `edit --status open`，或者让 `done` 在这个状态下能收尾。选后者，
 因为前者是**劝人撤销自己刚做的决定**（把 deferred 改回 open 再 done），而且要在三处分别
@@ -2319,12 +2328,12 @@ if todo::is_terminal(&status) && !settled { bail!("{id} is already {status}"); }
 
 `settled` 为真时四个分支（block / done / progress / fail）**全部跳过对 todo 的写**——
 状态、note、`blocked_by` 一个字都不动，只 `record` 这一轮的 tick，再由 `cmd_done` 清掉
-`in_progress`。把 `deferred` 写成 `done` 才是 §15.3 说的那条「假的完成」：人判过的东西
+`in_progress`。把 `deferred` 写成 `done` 才是 §16.3 说的那条「假的完成」：人判过的东西
 不该被一次机械的写回覆盖回去。
 
 「为什么状态没动」是**结构化字段**不是回显自己判的：`apply_done` 返回
 `Written { tick, idx, kept_status }`，`kept_status: Option<String>` 就是那条终态；
-`cmd_done` 只渲染它。（§16 的教训：判断和回显分成两处写，回显迟早替一个不存在的行为背书。）
+`cmd_done` 只渲染它。（§17 的教训：判断和回显分成两处写，回显迟早替一个不存在的行为背书。）
 
 配套的三处：
 
@@ -2337,15 +2346,15 @@ if todo::is_terminal(&status) && !settled { bail!("{id} is already {status}"); }
   派活指针还挂在它上面` → 修法给的是现在真能敲的那条 `zloop done t1 …`。
   判 warn 不判 err：一条正常的 `done` 就收得掉，循环也照跑（下一次 `next` 会重新派活、
   顺手盖掉这个指针）。
-- `compact` 的 in-flight 提示（§16.3 那个两步走）收敛成一条命令。
+- `compact` 的 in-flight 提示（§17.3 那个两步走）收敛成一条命令。
 
-### 17.4 闸只对在飞的那条开
+### 18.4 闸只对在飞的那条开
 
 `in_progress` 不指着它时一切照旧退 2 —— 三种情形实测：写回之后再 `done` 一次
 （`done` 自己把指针清了）、在飞的是 t2 却去 `done t1`、从没派过活的 todo。
 `done_twice_is_rejected`（`tick_test`）和 `done_errors`（`cli_test`）一个字没改，全过。
 
-### 17.5 回归测试
+### 18.5 回归测试
 
 | 测试 | 钉住什么 | 撤掉后 |
 |---|---|---|
@@ -2358,13 +2367,13 @@ if todo::is_terminal(&status) && !settled { bail!("{id} is already {status}"); }
 
 ---
 
-## 18. 第十六轮：T21（中）`awake.rs` 的 8 处裸子进程 — 收口 5 处、留 3 处并写明理由
+## 19. 第十六轮：T21（中）`awake.rs` 的 8 处裸子进程 — 收口 5 处、留 3 处并写明理由
 
 t20 收完 git 之后留了一句「**每个 zloop 起的子进程都走 `run_capture`**」，但 `awake.rs`
 里还有 8 处裸的。这一轮的题目是**评估要不要收口**，结论是「5 处要、3 处不能」，
 而且「不能」的那 3 处不是懒得改——真改了会把功能弄坏。
 
-### 18.1 先把 8 处列全（`grep -n "Command::new" src/`，一处不漏）
+### 19.1 先把 8 处列全（`grep -n "Command::new" src/`，一处不漏）
 
 | # | 位置 | 命令 | 谁在等它 | 结论 |
 |---|---|---|---|---|
@@ -2381,7 +2390,7 @@ t20 收完 git 之后留了一句「**每个 zloop 起的子进程都走 `run_ca
 `daemon::start` 起的是 detach 出去的 runner 本身（和 6/7 同一类）。至此 `src/` 里
 **没有第 9 处**。
 
-### 18.2 1–4 不是「不在热路径上」，它们全在**收尾路径**上
+### 19.2 1–4 不是「不在热路径上」，它们全在**收尾路径**上
 
 排 t21 时写的是「不在热路径、也不是会挂住的那一类」。这句话错了一半：
 
@@ -2408,7 +2417,7 @@ thread 'hung_pmset_cannot_wedge_the_awake_probes' panicked at tests/runner_test.
 这次当读不出来`，然后正常退 0 并印 `unknown (pmset -g unreadable)` / `unchanged`——
 **读不出当前值时一条写命令都不发**（`pm_log` 为空）。
 
-### 18.3 这一轮真正的发现：无脑套 `run_capture` 会把恢复默认值弄没
+### 19.3 这一轮真正的发现：无脑套 `run_capture` 会把恢复默认值弄没
 
 `run_capture` 原来有**两个**闸：超时，和 `stop_requested()`。第二个对干活的子进程是对的，
 对**收尾**的子进程是致命的——`zloop stop` 的 SIGTERM 先把标志置上，之后才走到
@@ -2441,7 +2450,7 @@ disablesleep 0
 所以这条回归测试的断言挑的是**账本**（`awake_off` + `restored_default:true`）而不是
 最终值——只看最终值，看门狗会把这个 bug 全程盖住，测试永远绿。
 
-### 18.4 6/7/8 为什么**不能**收口（写进代码注释，不只写在这里）
+### 19.4 6/7/8 为什么**不能**收口（写进代码注释，不只写在这里）
 
 - **6 `caffeinate` / 7 看门狗**：它俩的全部职责就是**比 runner 活得久**（`-w <pid>`；
   `kill -9` 之后替我们恢复默认值）。`run_capture` 是「等它退出」，在这儿等 = 等到长跑结束 /
@@ -2455,7 +2464,7 @@ disablesleep 0
 **每一个 zloop 起的、要等它退出的子进程都走 `run_capture`；不等的（detach 出去、
 故意活得更久的）和要人手打字的，在原地写明为什么。**
 
-### 18.5 回归测试
+### 19.5 回归测试
 
 | 测试 | 钉住什么 | 撤掉后 |
 |---|---|---|
@@ -2465,7 +2474,7 @@ disablesleep 0
 `cargo test` 191 全过（原 189）。`cargo fmt --check` 干净；`cargo clippy --all-targets`
 的 4 条 warning 和 HEAD 逐条相同，没新增。
 
-### 18.6 顺手记下、没在这一轮动的
+### 19.6 顺手记下、没在这一轮动的
 
 `install_sudoers()` 把规则先写到 `env::temp_dir()/zloop-pmset.<pid>`（0644），再
 `sudo install` 到 `/etc/sudoers.d/`。写和 install 之间有一个窗口，落到 `/tmp` 时
@@ -2473,10 +2482,10 @@ disablesleep 0
 `/var/folders/…`，所以实际可利用性低——但这是提权面上的 TOCTOU，值得单独排一条查清楚，
 不该混在这一轮的子进程收口里。
 
-→ 已在 §19（T43）查完并修掉。**上一段括号里那半句「`TMPDIR` 没设」是错的**，真正的触发条件
-见 §19.1。
+→ 已在 §20（T43）查完并修掉。**上一段括号里那半句「`TMPDIR` 没设」是错的**，真正的触发条件
+见 §20.1。
 
-## 19. 第十七轮：T43 —— §18.6 那条尾巴查到底
+## 20. 第十七轮：T43 —— §19.6 那条尾巴查到底
 
 ### T43（中）`install_sudoers` 的暂存路径别人也能占名，装进 `/etc/sudoers.d/` 的可以不是我们写的那份 — 已修
 
@@ -2492,9 +2501,9 @@ sudo install -o root -g wheel -m 0440 $tmp /etc/sudoers.d/zloop-pmset      // �
 `fs::write` 和 `sudo install` 是对同一条路径的**两次独立解析**，中间那段时间里这条路径指向什么，
 装进 `/etc/sudoers.d/` 的就是什么。而这条路径的名字是 `pid`，猜得到。
 
-### 19.1 先纠正 §18.6 里写错的那半句前提
+### 20.1 先纠正 §19.6 里写错的那半句前提
 
-§18.6 写的是「落到 `/tmp` 时（`TMPDIR` 没设）」。**这半句是错的**，实测（rustc 1.98，macOS 26.5）：
+§19.6 写的是「落到 `/tmp` 时（`TMPDIR` 没设）」。**这半句是错的**，实测（rustc 1.98，macOS 26.5）：
 
 ```
 $ env -i ./probe                 # 环境里一个变量都没有
@@ -2517,7 +2526,7 @@ Rust 在 Apple 平台上的 `env::temp_dir()` 不是「`TMPDIR` 没设就 `/tmp`
 1. `TMPDIR` 指向一个别的 uid 也写得进的目录；
 2. 机器上有第二个非 root uid 在跑代码（另一个登录用户，或被拿下的 `_www` / `nobody` 之类服务账号）。
 
-### 19.2 前提成立时，两种占名方式都成（实测）
+### 20.2 前提成立时，两种占名方式都成（实测）
 
 `sh scripts/repro-t43-sudoers-tmp-swap.sh` 的第一部分照抄修之前那三行跑：
 
@@ -2547,14 +2556,14 @@ Rust 在 Apple 平台上的 `env::temp_dir()` 不是「`TMPDIR` 没设就 `/tmp`
 `/tmp` 的 sticky 位（`t`）挡的是「删掉/改名别人的文件」，挡不住「先占住一个还不存在的名字」。
 pid 也不是屏障：macOS pid 顺序递增、`ps` 看得见，提前把候选名字铺满是几十 KB 软链接的事。
 
-### 19.3 两道看起来像闸的东西，都不拦这个
+### 20.3 两道看起来像闸的东西，都不拦这个
 
 * **`visudo -c`**：它检查的是语法，攻击者的规则语法完全合法（实测 `parsed OK`）；何况它跑在
   窗口**之前**，换内容发生在它之后。
 * **那次密码提示**：`sudo install` 会停下来等人打密码——这不是保护，这是把窗口**拉长**到
   「人在键盘前想多久」。窗口从来不是「write 到 install 那一瞬」。
 
-### 19.4 修法：换掉的不是名字，是**父目录**
+### 20.4 修法：换掉的不是名字，是**父目录**
 
 只把名字改随机是不够的（那只解决「猜得到」，没解决「那个目录别人写得进」）。现在的
 `awake::stage_rule_in(base, rule)`：
@@ -2569,7 +2578,7 @@ pid 也不是屏障：macOS pid 顺序递增、`ps` 看得见，提前把候选�
 顺手补掉的一处漏：清场从「`sudo install` 之后删一次」改成 `StagedRule` 的 `Drop`。修之前
 `visudo` 拒绝那一支是直接 `bail!` 的，临时文件留在原地没人管。
 
-### 19.5 回归测试
+### 20.5 回归测试
 
 | 测试 | 钉住什么 | 撤掉修复后 |
 |---|---|---|
@@ -2580,7 +2589,7 @@ pid 也不是屏障：macOS pid 顺序递增、`ps` 看得见，提前把候选�
 的 4 条 warning 和 HEAD 逐条相同（`awake.rs:9` / `notify.rs:8,9` 的 doc 缩进、`tick.rs:293`
 的 lifetime），没新增。
 
-### 19.6 顺手确认过的
+### 20.6 顺手确认过的
 
 * `grep -rn "temp_dir" src/` 全仓库只有这一处，没有第二个同型的暂存点。
 * `visudo -c -f` 读得动新暂存的文件（0600、在 0700 目录里、默认 `TMPDIR`），实测：
@@ -2590,14 +2599,14 @@ pid 也不是屏障：macOS pid 顺序递增、`ps` 看得见，提前把候选�
   visudo -c → …/zloop-pmset: parsed OK   退出码 = Some(0)
   ```
 
-### 19.7 没验的那一步（说清楚，别当验过）
+### 20.7 没验的那一步（说清楚，别当验过）
 
 最后那下 `sudo install -o root -g wheel -m 0440 <暂存> /etc/sudoers.d/zloop-pmset` **没有在本机跑**：
 它要么弹密码、要么就真的动这台机器的 `/etc/sudoers.d/`，都不是审查该做的事。这一步涉及的
 只有「root 去读一个属主是本人的 0600 文件」——root 不受权限位约束，且**修前修后它读的都是
 同一个临时目录底下的文件**，这一层没有变化。真正变了的是那条路径别人还占不占得住名字。
 
-## 20. 第十八轮：T29 —— `compact` 搬走的不只是花费，还有「这个目标跑了多久」
+## 21. 第十八轮：T29 —— `compact` 搬走的不只是花费，还有「这个目标跑了多久」
 
 ### T29（中）一次例行整理，把 `status` / `stats` / `replan` / 轮次编号四处读数一起清零 — 已修
 
@@ -2609,7 +2618,7 @@ tick 上，于是预算闸被静默复位。当时的修法是给 `Archived` 加
 「跑了几轮」「返工几轮」「失败几次」「无文档几轮」「宿主累计多久」「现在是第几轮」
 的唯一数据源，而这些数全是**现算**的。搬走 tick，它们一起掉下去。
 
-### 20.1 复现（`sh scripts/repro-t29-compact-drops-round-count.sh`，修之前退 1）
+### 21.1 复现（`sh scripts/repro-t29-compact-drops-round-count.sh`，修之前退 1）
 
 一个跑了 4 轮（done / progress / fail / done）、完成过 2 条 todo、返工率 50% 的目标，
 把前两条 todo 和它们的 tick 做旧到一个月前，然后跑一次**默认参数之外什么都没做**的整理：
@@ -2644,7 +2653,7 @@ tick 上，于是预算闸被静默复位。当时的修法是给 `Archived` 加
 本来是给「刚 init 完还没跑」准备的，而 compact 把一个跑了很久的目标伪装成了那个状态。
 「一轮都没跑过」和「跑过的都被整理走了」是两回事，只有前者该劝人去 `zloop next`。
 
-### 20.2 修法：记的不是「几轮」，是**按 outcome 分的计数**
+### 21.2 修法：记的不是「几轮」，是**按 outcome 分的计数**
 
 顺着 A-18 再加一个 `archived.rounds` 是能把这一条摁下去的，但那是在等下一个字段被发现。
 根因是「`compact` 搬走了 ticks，而所有累计量都从 ticks 现算」，所以归档汇总里存的应该是
@@ -2673,7 +2682,7 @@ pub struct Archived {
 轮次/返工/失败/被挡/反馈/回看/重估七个数一起补齐。**返工率的分子和分母必须同源**——
 只补分母（或只补分子）会让一次整理把返工率冲歪，而 `replan` 拿这个数当信号。
 
-### 20.3 口径：哪些数是「一辈子」，哪些只是「账本里还剩的」
+### 21.3 口径：哪些数是「一辈子」，哪些只是「账本里还剩的」
 
 修完之后 `stats` 的表头和它下面那张 todo 清单**必然对不上**（40 轮 vs 清单里 2 条），
 因为归档走的 todo 连 id 都不在了。这不是 bug，是 compact 的本意——但不说出来，
@@ -2687,7 +2696,7 @@ pub struct Archived {
 这时 `Archived::rounds_unknown()` 为真，`stats` 说的是「老版本整理走 N 条记录，轮次没记」——
 不知道就说不知道，**不许把「不知道」印成「0 轮」**，更不许接着劝人去 `zloop next`。
 
-### 20.4 没修的那一半（说清楚，别当没看见）
+### 21.4 没修的那一半（说清楚，别当没看见）
 
 同一次整理还会让两个**从 todo 现算**的数掉下去，这一轮没动：
 
@@ -2698,16 +2707,16 @@ pub struct Archived {
 可百分比又确实在回答「这个目标做到哪儿了」。要不要把归档的 todo 数也算进分母，
 是个口径决定（还牵扯清单里「步骤 1..N」的编号），单独排一条，别混在这一轮里。
 
-> **已在 §21（T44）做掉**：口径定成「做到哪儿了」含归档、「还剩什么」不含，
+> **已在 §22（T44）做掉**：口径定成「做到哪儿了」含归档、「还剩什么」不含，
 > 步骤号钉死为「剩下这张清单里的执行顺序」。那一轮还数出第三个出口（`goals` 的进度列）。
 
-### 20.5 回归测试
+### 21.5 回归测试
 
 | 测试 | 钉住什么 | 撤掉修复后 |
 |---|---|---|
 | `cli_test::compact_does_not_reset_how_many_rounds_this_goal_has_run` | 整理前后 `status`「跑了 4 轮」、`stats`「4 轮 · 返工 2（50%）· 失败 1」「无文档 2 轮」、`replan` 的「返工率 50%」全都不变；`stats --json` 的 rounds/rework/fails/rework_rate/archived_rounds；再整理一次不重复计数；老版本汇总走 `rounds_unknown` 那一支 | 把 `rounds_total` / `counted` 的归档项去掉 → `整理之后 status 的轮数掉了：… 0%  跑了 0 轮` |
 | `cli_test::compact_does_not_hand_out_a_round_number_twice` | 整理之后 `next --json` 的 `round` 不掉、`in_progress.round` 接着数、新 tick 的编号不撞归档里用过的 | 把 `round_number` 换回 `current_round` → `整理之后编号掉回去了：{… "round":0 … "phase":"executing t3 · round 1 …"}` |
-| `scripts/repro-t29-compact-drops-round-count.sh` | 四处读数一起看（status / next 的 round / stats / replan 信号） | 退出码 0 → 1，并印出上面 §20.1 那段「整理之后」 |
+| `scripts/repro-t29-compact-drops-round-count.sh` | 四处读数一起看（status / next 的 round / stats / replan 信号） | 退出码 0 → 1，并印出上面 §21.1 那段「整理之后」 |
 
 `cargo test` 194 全过（原 192）。`cargo fmt --check` 干净；`cargo clippy --all-targets`
 的 4 条 warning 和 HEAD 逐条相同（`awake.rs` / `notify.rs` 的 doc 缩进、`tick.rs` 的 lifetime），
@@ -2715,15 +2724,15 @@ pub struct Archived {
 
 ---
 
-## 21. 第十九轮：T44 —— 「这个目标做到哪儿了」也是 `compact` 搬得走的
+## 22. 第十九轮：T44 —— 「这个目标做到哪儿了」也是 `compact` 搬得走的
 
 ### T44（中）整理一次账本，进度条 66% → 0%、「一次过 2/2」→「0/0」 — 已修
 
 T29 修的是从 **ticks** 现算的那一族（轮次 / 返工 / 失败 / 无文档 / 耗时 / 轮次编号），
-当时明写了「没修的那一半」（§20.4）：从 **todo** 现算的还有两个。这一轮把它们做掉，
+当时明写了「没修的那一半」（§21.4）：从 **todo** 现算的还有两个。这一轮把它们做掉，
 顺带发现第三个出口。
 
-### 21.1 复现（`sh scripts/repro-t44-compact-drops-progress-percent.sh`，修之前退 1）
+### 22.1 复现（`sh scripts/repro-t44-compact-drops-progress-percent.sh`，修之前退 1）
 
 三条待办、完成两条（进度 2/3），把它们做旧到一个月前，跑一次默认参数的整理：
 
@@ -2746,12 +2755,12 @@ T29 修的是从 **ticks** 现算的那一族（轮次 / 返工 / 失败 / 无�
 |---|---|---|
 | `status` 的进度条 / 百分比 | 66% → **0%** | 同一行左边写着「跑了 2 轮」（T29 修好了，一辈子的账），右边说做到 0%——**一行两个口径**，而且没有任何标记 |
 | `stats` 的「一次过 X/Y 条」 | 2/2 → **0/0** | 同一张表上面写着「2 轮」，质量行说一条都没完成过；`0/0` 还会让 `pct()` 印出 `—` |
-| `goals` 的进度列 | 2/3 → **0/1**（§20.4 没数到的第三处） | 多目标那张表是「哪个目标做到哪儿了」的唯一入口 |
+| `goals` 的进度列 | 2/3 → **0/1**（§21.4 没数到的第三处） | 多目标那张表是「哪个目标做到哪儿了」的唯一入口 |
 
 分子分母**一起**掉是这一条和 T29 的区别：不是数字变小，是比例被重置成 0%——
 一个跑了两轮、完成两条的目标，在三个出口上同时显示成「没开始」。
 
-### 21.2 口径（这一条 todo 要定的就是它）
+### 22.2 口径（这一条 todo 要定的就是它）
 
 **「做到哪儿了」的数含归档；「清单里还剩什么」不含。** 一句话把四处都判了：
 
@@ -2771,7 +2780,7 @@ T29 修的是从 **ticks** 现算的那一族（轮次 / 返工 / 失败 / 无�
   归档    整理走 2 条待办（完成 2 条），已算进上面的 66%
 ```
 
-### 21.3 修法：归档汇总里再存一份「todo 那一侧的原料」
+### 22.3 修法：归档汇总里再存一份「todo 那一侧的原料」
 
 沿用 T29 定下的形状——存**能重算出这一族的原料**，不是再加一个计数器：
 
@@ -2789,7 +2798,7 @@ pub struct Archived {
 它要的是每条 todo 名下的轮数，而 tick 下一行就不在账本里了；判据抽成
 `stats::first_try(status, &mine)`，`compute` 和 `compact` 共用，不许写两遍。
 
-### 21.4 顺带修掉的：整理干净的目标被说成「刚开的」
+### 22.4 顺带修掉的：整理干净的目标被说成「刚开的」
 
 `status` 那句「◦ 待规划」的分支条件是 `total == 0`，写它时想的是「刚 init 完还没规划」。
 可 compact 能把干完活的目标清空成一模一样的样子——**和 T29 里 `stats` 的 `rounds == 0`
@@ -2802,430 +2811,29 @@ pub struct Archived {
 账本里的，`status` 多一行「老版本整理走过待办，条数没记（没算进上面的百分比）」——
 不知道就说不知道，别让百分比替归档里的那些背书。
 
-### 21.5 回归测试
+### 22.5 回归测试
 
 | 测试 | 钉住什么 | 撤掉修复后 |
 |---|---|---|
 | `cli_test::compact_does_not_reset_how_far_this_goal_has_got` | 整理前后 `status` 的 66%、`stats` 的「一次过 1/2 条」、`goals` 的 2/3 全不变；`archived.todos/done()/planned()/first_try`（返工过的那条不算一次过）；两处归档说明行；`stats --json` 的 done/first_try/archived_todos/archived_done；再整理一次不重复计数；老版本汇总走 `todos_unknown` 那一支 | `tests/cli_test.rs:1074` `整理之后 status 的百分比掉了：… ░░░ 0%  跑了 2 轮` |
 | `cli_test::compact_keeps_deferred_out_of_the_denominator_and_does_not_forge_a_fresh_goal` | 延后的 todo 归档后不进分母（66% 不变）；全部整理干净之后不说「待规划」、还是 100%、阶段行说明是整理走的 | `tests/cli_test.rs:1138` `延后的 todo 被算进了归档的分母：` |
-| `scripts/repro-t44-compact-drops-progress-percent.sh` | 三处出口一起看（status 百分比 / stats 一次过 / goals 进度） | 退出码 0 → 1，并印出上面 §21.1 那段「整理之后」 |
+| `scripts/repro-t44-compact-drops-progress-percent.sh` | 三处出口一起看（status 百分比 / stats 一次过 / goals 进度） | 退出码 0 → 1，并印出上面 §22.1 那段「整理之后」 |
 
 `cargo test` 196 全过（原 194）。`cargo fmt --check` 干净；`cargo clippy --all-targets`
 的 4 条 warning 和 HEAD 逐条相同，没新增。
 
 ---
 
-## 22. 第二十轮（收尾）：全部确认缺陷的 issue 草稿
+## 缺陷清册搬到了 `docs/FINDINGS.md`
 
-### 22.1 口径：什么进这张表
+原来这里是「§22 第二十轮（收尾）：全部确认缺陷的 issue 草稿」——42 条确认缺陷的一览表
+和逐条草稿。它是**按缺陷查**的入口，却压在三千多行**按轮次读**的正文后面，
+两种读法挤在一个文件里，谁都得先滚过对方。t45 把它整节搬到了
+[`docs/FINDINGS.md`](FINDINGS.md)，内容一字没删，另外做了三件事：
 
-这个目标从第一天起就说了「不存在证不出来」，所以这张表的准入线只有一条：
-**有可复现的失败场景**——一个脚本、一条回归测试，或者一段逐字记下来的命令输出。
+- 每条草稿的「正文 §N」从**一个数字**变成**锚点链接**，点进去落在这边的那一小节上；
+- 一览表多一列「正文」，同样是链接；
+- 顺带修掉了搬家时暴露出来的三处引用腐烂（重复的节号 6、指错的 §2、一条本来就坏的锚点）。
 
-- **进表**：22.2 / 22.3 的 42 条。每条都能指出"敲什么会看到什么"。
-- **不进表，但记一笔**：22.4——查过、确认不是缺陷（有意设计 / 边界都在 / 场景太构造）。
-- **不进表，因为没复现**：22.5——试过、没做出来。写下来是为了让下一个人别重复试，
-  **不是**为了凑数；混进 issue 里会污染真发现。
-
-**为什么是"草稿"不是 issue**：项目约定——本次审查只 `git commit` 到本地，
-不 `git push`、不开 GitHub issue（修复还没被人看过）。这一节就是等人看的那份东西：
-一条一条可以直接复制成 issue 正文，也可以直接当作"已经修完了什么"的验收清单。
-真要开的时候，仓库里的 `scripts/gh-issues.py` 负责 issue ↔ todo 的绑定（约定是
-todo 文本结尾带 `(#N)`）。
-
-**严重度口径**：高 = 会丢活/丢钱/长跑失控且没人被通知；中高 = 同样的后果但要多一个前提；
-中 = 状态或读数出错、有出口但难发现；低 = 绊子、脏东西、说法不准。
-
-### 22.2 一览
-
-| # | id | 严重度 | 一句话 | 状态 | 修复 commit |
-|---|---|---|---|---|---|
-| 1 | A-1 | 高 | `install --claude-stop-hook` 撞上形状不对的 settings.json 就 panic | 已修 | `c917421` |
-| 2 | A-2 | 中 | `remember --rule` 读-改-写无锁，并发丢条目 | 已修 | `d07d003` |
-| 3 | A-3 | 低 | 残留 `state.json.tmp` 没人清，`doctor` 也不说 | 已修 | `d07d003` |
-| 4 | A-4 | 高 | NOTES.md 一个非 UTF-8 字节 → 约定和经验静默清零并被真删掉 | 已修 | `36b0e3c` `90f2c5d` |
-| 5 | A-5 | 高 | `--exit-on-wait` 在「等人」时从不生效（实测空转 20 小时） | 已修 | `8131c7c` |
-| 6 | A-6 | 高 | 超时管不住留下孙进程的那一轮，期间 SIGTERM 叫不动 | 已修 | `ca2074b` |
-| 7 | A-7 | 中 | `policy.window_hours` 越界 → `next`/`status`/`context` 全 panic | 已修 | `c917421` `1e6f103` |
-| 8 | A-8 | 中 | 时间参数「装得下 i64」就 panic，装不下反而有好提示 | 已修 | `c917421` |
-| 9 | A-9 | 中高 | 依赖成环没人拦，永久卡死且 `doctor` 无诊断 | 已修 | `ba87ca2` |
-| 10 | A-10 | 中 | 「0 = 关掉这个检查」只对五个阈值里的三个成立 | 已修 | `ba87ca2` |
-| 11 | A-11 | 高 | 时钟跳到未来 + 撞配额 = runner 睡 72 年，面板一切正常 | 已修 | `0ff7fe0` |
-| 12 | A-12 | 高 | `--git-commit` 的 checkpoint 提交整个工作树 | 已修 | `3c1865b` |
-| 13 | A-13 | 高 | 基线只拍一次，长跑中途邻居新建的文件都算我们的 | 已修 | `15106bf` |
-| 14 | A-14 | 高 | git 一挂住 runner 跟着挂住，SIGTERM 叫不动 | 已修 | `7d18b26` |
-| 15 | A-15 | 中高 | 写回路上的裸 git 挂住 → 整轮的账和技术文档不落盘 | 已修 | `7384774` |
-| 16 | A-16 | 中高 | 人敲三下 `zloop next`，长跑就拒绝启动（noop 计数跨进程串味） | 已修 | `1811382` |
-| 17 | A-17 | 高 | 人插一句 `feedback`，失败的一轮被记成「写回了」 | 已修 | `6ff3793` |
-| 18 | A-18 | 中 | `compact` 把花费一起归档走，`max_total_usd` 静默复位 | 已修 | `73c16cb` |
-| 19 | A-19 | 中高 | 人留一句反馈，下一轮无头 runner 就 `--resume` 进人的对话 | 已修 | `4dd8499` |
-| 20 | A-20 | 高 | 改**别的** todo 就把连续失败停机这道闸拆了 | 已修 | `73740b7` |
-| 21 | A-21 | 高 | 一句 `feedback` 让「原地踏步」那道闸永远数不到上限 | 已修 | `73740b7` |
-| 22 | A-22 | 中高 | 依赖一条已延后的 todo：一样永远等不到，`doctor` 却退 0 | 已修 | `cf29c2b` |
-| 23 | B-1 | 低 | `Decision` 的 "should_run ⇒ todo 非空" 没人守（绊子，非 bug） | 已修 | 本轮（t10） |
-| 24 | B-2 | 低 | `edit <id> --blocked-by <它自己>` 被收下，那条 todo 永久卡死 | 已修 | `ba87ca2` |
-| 25 | B-3 | 中 | 全部 deferred 时说「目标结束」，引着人去开新目标 | 已修 | `e768b5d` |
-| 26 | T21 | 中 | `awake.rs` 8 处裸子进程（收口 5 处，留 3 处并写明理由） | 已修 | `7941e6d` |
-| 27 | T29 | 中 | `compact` 把「跑了几轮」一起搬走，四处读数清零 | 已修 | `6e85fcc` |
-| 28 | T30 | 中 | 格式闸全红 = 没有闸（缺 `rustfmt.toml`） | 已修 | `ac040d3` `ffb6f59` |
-| 29 | T31 | 中 | 闸有定义但没人自动按（没有 CI） | 已修 | `789d524` |
-| 30 | T32 | 中 | `policy.intervals_min` 越界：debug 崩、release 睡 8171 年 | 已修 | `dc7e714` |
-| 31 | T33 | 低 | 阶梯写反 `[30,10,3]` 三件事一起反过来，`doctor` 沉默 | 已修 | `7dc358e` |
-| 32 | T34 | 低 | `slowest_interval` 用 `.last()` 取「最慢的一档」，阶梯非单调时拿的不是最大值 | **未修（待定）** | — |
-| 33 | T36-① | 低 | `tests/scratch_t33.rs` 被误提交（文件里写着"未被 git 跟踪"） | 已清 | `503e427` |
-| 34 | T36-② | 中 | `status` 对「永远等不到」和「正常排队」用同一个词 | 已修 | `503e427` |
-| 35 | T37 | 中 | 「永远等不到」只在 `status` 一块屏上说了（另三处清单还在骗人） | 已修 | `bca786a` |
-| 36 | T38 | 中 | 延后一条依赖 = 一条命令判死一片，回显只字不提 | 已修 | `0c27d16` |
-| 37 | T39 | 中高 | `compact` 搬走还有人依赖的那条，等它的几条永远等不到 | 已修 | `c441398` |
-| 38 | T40-① | 中高 | 例行 `compact` 吃掉人今天刚留下、还没人读过的反馈 | 已修 | `331293a` `5304382` |
-| 39 | T40-② | 中 | `compact --force` 搬走在飞的那条，`ensure_idle` 的两条出口都退 2 | 已修 | `331293a` `5304382` |
-| 40 | T42 | 中高 | 派活指着一条已了结的 todo 时，四处出口一起坏 | 已修 | `2e0168f` |
-| 41 | T43 | 中 | `install_sudoers` 的暂存路径别人占得住名字 | 已修 | `b406ded` |
-| 42 | T44 | 中 | 整理一次账本，进度条 66% → 0%、「一次过 2/2」→「0/0」 | 已修 | `71e5c8a` |
-
-**41 已修（含 T36-① 的"已清"）/ 1 未修（T34，已排成下一条待办）/ 0 不修。**
-分布：高 11、中高 8、中 17、低 6。
-
-### 22.3 逐条草稿
-
-每条五行：复现怎么做、修之前看到什么、什么算修好了、现在是什么状态和为什么、正文在哪。
-
-#### A-1（高）· 已修 `c917421`
-- **标题**：`zloop install --claude-stop-hook`：`settings.json` 是合法 JSON 但结构不对时 panic
-- **复现**：`HOME` 指向临时目录，写入 `{"hooks": []}`，跑 `zloop install --claude-stop-hook`
-- **修复前**：panic `hosts.rs:257`。7 种形状（`[]`/`"hello"`/`42`/`{"hooks":[]}`/`{"hooks":"none"}`/`{"hooks":{"Stop":{}}}`/`{"hooks":{"Stop":"off"}}`）全崩；反倒是**语法坏**的 `{oops` 处理得很好（exit 2 + 说明）
-- **验收**：7 种形状全部 exit 2 + 说明；逐字节比对磁盘内容**没变**；`{}`/`{"hooks":{}}`/`{"hooks":{"Stop":[]}}` 照旧写得进去
-- **状态**：已修 · 回归测试 `cli_test::a_wrongly_shaped_settings_json_is_reported_not_panicked_or_clobbered`（三层分别换回 `.expect()` 都变红）· 正文 §4
-
-#### A-2（中）· 已修 `d07d003`
-- **标题**：`zloop remember --rule` 是无锁的读-改-写，并发会丢条目
-- **复现**：20 个进程同时 `zloop remember --rule "…"`；再试 10 追加 + 10 `--rule` 混合
-- **修复前**：20 → **12** 落地；混合场景 20 → **16**（`--rule` 的整文件重写吞掉了它读入之后别人追加的经验）。文件不损坏，丢的是条目，而且悄无声息
-- **验收**：两个场景都 20/20；纯追加那条路照旧不用等锁
-- **状态**：已修 · `notes.rs` 的读-改-写走 `state::locked`（NOTES 自己一把锁，见 `lock_target`）· 正文 §5
-
-#### A-3（低）· 已修 `d07d003`
-- **标题**：被杀之后留下的 `state.json.tmp` 没人清，`doctor` 说"没发现问题"
-- **复现**：手工在 `.zloop/` 放一个 `state.json.tmp`，跑 `zloop doctor`
-- **修复前**：exit 0「没发现问题」。文件永远不会被清理，攒着占地方
-- **验收**：`doctor` 报 `leftover_tmp`，说清"正本没事、这些可以删"，并把 `<x>.tmp.<pid>`（持有者记录用的那种）也认出来
-- **状态**：已修 · `doctor.rs::check_leftover_tmp` · 正文 §5
-
-#### A-4（高）· 已修 `36b0e3c` `90f2c5d`
-- **标题**：NOTES.md 里一个非 UTF-8 字节 → 约定和经验静默清零，下一次 `remember --rule` 把它们真删掉
-- **复现**：正常的 NOTES.md（2 约定 / 3 经验）后面追加一个 `\xff`，跑 `zloop context`，再敲一次 `zloop remember --rule`
-- **修复前**：第二步 `context` 带的护栏变成 **0 / 0**（文件里其实都还在），第三步之后磁盘上只剩 1 约定 / 0 经验、**没有备份**；全程 `doctor` 都说没问题
-- **验收**：读不出来就**拒绝写回**（不拿空的盖掉），`context` 不静默交出护栏，`doctor` 出声
-- **状态**：已修（两个 commit：写侧 + 体检侧）· 正文 §6
-
-#### A-5（高）· 已修 `8131c7c`
-- **标题**：`--exit-on-wait` 在「等人」时从不生效——它只在一种 runner 自己走不到的状态下才管用
-- **复现**：`sh scripts/repro-a5-exit-on-wait.sh`（全程真实路径：宿主自己 `done --block` 把活交回给人，下一轮 runner 撞 `user_gate`）
-- **修复前**：脚本退 1——15 秒后进程还在，journal 2 条 `sleep`、账本 **0 条 noop**。审的时候机器上抓到现行：一个带 `--exit-on-wait` 的 runner 在 `user_gate` 上转了 **20 小时 24 分**，写了 1849 条 journal 并一路占着 keep-awake
-- **验收**：脚本退 0；`exit_on_wait` 由**标志**说了算而不是由 noop 计数说了算；继续等的那一支打印 `… (polling until a human unblocks)`
-- **状态**：已修 · 回归测试 `runner_test::exit_on_wait_stops_the_first_time_the_runner_itself_hits_a_human_gate` + 新增 `run_within()` 助手（这类回归撤掉修复是**挂住**而不是变红，挂住的测试没人当成失败）· 正文 §6
-
-#### A-6（高）· 已修 `ca2074b`
-- **标题**：超时管不住留下孙进程的那一轮，而且这段时间里 SIGTERM 叫不动 runner
-- **复现**：`policy.preflight_cmd = "sleep 20 &"`，`zloop run --timeout-min 3 --fast`（3 秒上限）
-- **修复前**：runner 实际耗时 **21 秒**——耗时跟着孙进程寿命走，跟 `--timeout-min` 没关系（`read_to_string` 在等管道 EOF，而孙进程继承了同一个写端）。宿主那条路一模一样
-- **验收**：超时那一轮连孙进程一起收（进程组），排水有上限；这段时间里 SIGTERM 叫得动
-- **状态**：已修 · 正文 §6
-
-#### A-7（中）· 已修 `c917421`（+ `1e6f103` 复核补第二处）
-- **标题**：`policy.window_hours` 手滑一下，`next` / `status` / `context` 全 panic，而 `doctor` 说没问题
-- **复现**：把 `.zloop/state.json` 的 `policy.window_hours` 改成越界值，跑 `zloop next`
-- **修复前**：panic（`tick.rs:186` 的 `at - Duration::hours(...)` 没有范围检查）。这不是"内部文件"——zloop 自己就在教人去改隔壁的 `policy.max_total_usd`
-- **验收**：钳进 `0..=8760`，三条命令都不崩；`doctor` 报 `bad_policy`
-- **状态**：已修 · 回归测试 `an_out_of_range_window_hours_gets_clamped_instead_of_panicking` 等；**t28 复核发现两处钳位分属两条分支、CLI 面只盖住了一条**，`1e6f103` 补上第二处的覆盖 · 正文 §6 + §6 复核
-
-#### A-8（中）· 已修 `c917421`
-- **标题**：时间参数「装得下 i64」就 panic，装不下反而有好错误提示
-- **复现**：`zloop compact --keep-days 99999999999`
-- **修复前**：panic `cli.rs:1990`；再大一位（`999999999999999`）反而是 chrono 的友好错误。两个入口同一个根因（`now() - Duration::…(n)` 无 checked）
-- **验收**：5 个越界取值全变 exit 2 + 人话；`--since 7d` / `--keep-days 30` 一条没被误伤；**验参挪到 `ensure_idle` 之前**（连范围都不对的参数不该先去抢闸）
-- **状态**：已修 · 回归测试 `out_of_range_time_arguments_get_the_same_friendly_error_as_garbage` · 正文 §6
-
-#### A-9（中高）· 已修 `ba87ca2`
-- **标题**：依赖成环没人拦，永久卡死且无诊断
-- **复现**：`zloop edit t1 --blocked-by t2` + `zloop edit t2 --blocked-by t1`（二元环，两条都是真命令）
-- **修复前**：`next` 一路 `blocked` + 「隔一阵重试」，`status` 说「等依赖 · 30 分钟后重试」，`doctor` 说「没发现问题」
-- **验收**：`doctor` 报环并说清怎么解开；`edit` 挡住唯一一个不用看全图就能判定的环（自依赖，见 B-2）
-- **状态**：已修 · 回归测试三条（`doctor_test.rs`，二元环用**真命令**造）· 正文 §6
-
-#### A-10（中）· 已修 `ba87ca2`
-- **标题**：「0 = 关掉这个检查」只对五个阈值里的三个成立
-- **复现**：`max_fail_streak = 0`（或 `max_noop_streak = 0`），一个**一轮都没跑过**的新目标跑 `zloop next`
-- **修复前**：`0 >= 0` 恒真 → 第一次 `next` 就返回 `fail_streak` + `interval=None`＝当场永久停机；`max_noop_streak=0` 则让 `exhausted` 恒真，非终态出口的「10 分钟后再看」塌成「停下等人」
-- **验收**：五个阈值同一个口径，`0` 一律等于关掉
-- **状态**：已修 · 回归测试 `tick_test::zero_turns_a_threshold_off_the_same_way_for_all_five` · 正文 §6
-
-#### A-11（高）· 已修 `0ff7fe0`
-- **标题**：时钟跳到未来 + 撞配额 = runner 睡 72 年，而 `status` 看着一切正常
-- **复现**：账本里有一条落在未来的 tick（NTP 校时 / 改时区 / 虚拟机挂起恢复 / 电池耗尽都会造出来），同时撞上 `max_runs`
-- **修复前**：`interval_min = 38048610`（72 年）
-- **验收**：等待封顶在一个配额窗口（`window_hours`，最坏每窗口醒一次重判）；跨天的「睡到」带日期；未来时间戳由 `doctor` 的 `future_timestamp` 报出来
-- **状态**：已修 · 回归测试两条（单元 `a_future_tick_cannot_stretch_the_throttle_wait_past_the_window` + 精确到分钟的 `22*60+1` 那条一起钉住）· 正文 §6
-
-#### A-12（高）· 已修 `3c1865b`
-- **标题**：`--git-commit` 的 checkpoint 提交整个工作树（`git add -A -- .`）
-- **复现**：在一个有别人在制品的仓库里跑 `zloop run --git-commit`，等一轮 checkpoint
-- **修复前**：邻居没提交的改动被 `zloop <todo>: <note>` 一起提交走
-- **验收**：只提交 runner 起跑之后变化的路径，别人的在制品留在原地；拆不开的那种打印出来并记账本
-- **状态**：已修 · 正文 §7
-
-#### A-13（高）· 已修 `15106bf`
-- **标题**：基线只在起跑那一刻拍一次，长跑中途冒出来的文件都算我们的
-- **复现**：起跑 → 睡眠/回看/重估中间由别人新建文件 → 下一轮 checkpoint
-- **修复前**：「不在基线里 ⇒ 是我们的」这条规则管的不是"这一轮"，而是"上次成功提交以来的一切"；而长跑里大部分墙上时间根本不在轮次里
-- **验收**：每轮开工前重拍基线，**但只在上一轮结清时**（没写回 / add 失败那轮的产物还在树里等认领，重拍会把它们永远划给别人）；读不出工作树时**留着上一张**，不换空快照
-- **状态**：已修 · 正文 §7
-
-#### A-14（高）· 已修 `7d18b26`
-- **标题**：git 一挂住，runner 跟着挂住，而且 SIGTERM 叫不动它
-- **复现**：`sh scripts/repro-a14-git-hang.sh`
-- **修复前**：runner 每轮 6 次裸 git（`.output()` 是**无限期**阻塞，既不看 `--timeout-min` 也不看 `stop_requested()`），git 挂住 runner 就挂住，只能 SIGKILL——而 SIGKILL 会把 `.git/index.lock` 留给孤儿 git 进程，仓库后续所有 git 写操作全废
-- **验收**：git 和 `notify_cmd` 的子进程都有闸；挂住的那个整组收掉；SIGTERM 叫得动
-- **状态**：已修 · 正文 §8
-
-#### A-15（中高）· 已修 `7384774`
-- **标题**：写回路上的裸 git 挂住 → 这一轮的账和技术文档一个字都没落盘
-- **复现**：让 `zloop done` 里 `changed_files(root)` 那次 git 挂住
-- **修复前**：`cli.rs:887` 的 `changed_files` 跑在 `state::transaction` **之前**，挂住时 note / approach / decision / pitfall / evidence 全在内存里，一个字节都没进 `state.json`——挂多久，这一轮的产物在磁盘上就不存在多久（不是"日志少一节"，是**整轮白干**）
-- **验收**：写回路上的 git 也走带闸的 `run_capture`，但**跟着调用者的进程组走**（不能连调用它的人一起收）
-- **状态**：已修 · 回归测试两条（`runner_test.rs`，各自撤掉对应修复就变红）· 正文 §8
-
-#### A-16（中高）· 已修 `1811382`
-- **标题**：noop 计数从交互式命令串进 runner 的停机判断——人敲三下 `zloop next`，长跑就拒绝启动
-- **复现**：`sh scripts/repro-a16-noop-poke-kills-throttled-runner.sh`
-- **修复前**：`noop` tick 全仓只有一个生产者（`zloop next` 非 `--peek` 且 `should_run=false` 时记），也就是**人在终端敲的**；runner 却拿它算 `exhausted` 去决定自己要不要停
-- **验收**：`throttled` 不再由 noop 计数说了算；`max_noop_streak` 收回给 `zloop next` 用
-- **状态**：已修 · 正文 §9
-
-#### A-17（高）· 已修 `6ff3793`
-- **标题**：人插一句 `zloop feedback`，一轮**失败**的宿主就被记成「写回了」，连续失败停机整个失效
-- **复现**：`sh scripts/repro-a17-interactive-write-masks-a-failed-round.sh`
-- **修复前**：结算问的是「这段时间账本长了没长」（`t.outcome != "noop"` 就算写回），而不是「宿主写回了没有」
-- **验收**：`wrote_back` 只认真写回的四种 outcome；人在另一个终端写的 tick 不算
-- **状态**：已修 · 回归测试三条，撤掉对应修复就变红 · 正文 §10
-
-#### A-18（中）· 已修 `73c16cb`
-- **标题**：`zloop compact` 把花费一起归档走，`max_total_usd` 静默复位
-- **复现**：`sh scripts/repro-a18-compact-resets-budget-cap.sh`
-- **修复前**：钱记在 tick 的 `cost_usd` 上，`compact` 把老 todo 名下的 tick 连锅端进 `archive/`，预算闸就此从头再来
-- **验收**：归档只让**账本**变小，不让**账**变少（`Archived.cost_usd` 累计，`spent_total` 加回来）；整理也走 `ensure_idle`
-- **状态**：已修 · 正文 §10 ·**这条只是第一个受害者**，同族的 T29 / T44 在后面
-
-#### A-19（中高）· 已修 `4dd8499`
-- **标题**：人留一句反馈，下一轮无头 runner 就 `--resume` 进人的对话里
-- **复现**：`sh scripts/repro-a19-runner-resumes-a-humans-session.sh`
-- **修复前**：`pick_session` 只看 host 对不对、todo 对不对，**不看这条 tick 是谁记的**；而 `feedback` / `edit` 会把调用者的 `CLAUDE_CODE_SESSION_ID` 原样记进 tick
-- **验收**：`--resume` 只接**宿主写回过**的会话
-- **状态**：已修 · 正文 §10
-
-#### A-20（高）· 已修 `73740b7`
-- **标题**：人顺手整理 backlog（`zloop edit` 改**别的** todo），连续失败停机这道闸就被拆了
-- **复现**：`sh scripts/repro-a20-a21-another-terminal-disarms-the-brakes.sh`（四个场景、两对 A/B 对照，退 1 = 至少一条复现）
-- **修复前**：`fails_in_a_row` 的兜底分支 `_ => n = 0` 把 `edit` 也收了进去，改一条**无关**的 todo 就把连续失败清零
-- **验收**：改的是**正在失败的那条**才清零；改别的活只有在循环**已经停在 `fail_streak` 上**时才清零（那时人是在回应一个停着的循环）
-- **状态**：已修 · 回归测试两条，各自撤掉对应修复就变红 · 正文 §11
-
-#### A-21（高）· 已修 `73740b7`
-- **标题**：人插一句 `zloop feedback`，同一条 todo 原地踏步那道闸就永远数不到上限
-- **复现**：同上脚本（假宿主每轮 `done t1 --outcome progress`，`max_progress_streak=2`，实测 8 轮不停）
-- **修复前**：`progress_streak` 从尾往前扫、`_ => break`，任何一条 `feedback` 都把它断掉——而 `feedback` 正是文档教人「跟正在跑的循环说话」的那条路
-- **验收**：和 A-20 同一条规矩；`edit` 改的**就是这条 todo** 仍然无条件清零（README 给的出口就是 `edit t3 --text "更小的一步"`，活真的换了）
-- **状态**：已修 · 正文 §11
-
-#### A-22（中高）· 已修 `cf29c2b`
-- **标题**：依赖一条已延后的 todo——卡死的形状和依赖环一模一样，`doctor` 却退 0
-- **复现**：`zloop edit t2 --blocked-by t1` + `zloop edit t1 --status deferred`（两条真命令）
-- **修复前**：`doctor` 的 `dep_cycle` 只报"环"，这种"依赖一条永远不会 done 的"一声不吭
-- **验收**：`doctor` 把「永远等不到」的第三种形状也报出来
-- **状态**：已修 · 回归测试三条（撤掉 `can_still_finish` 判据前两条立刻变红）· 正文 §12
-
-#### B-1（低）· 已修（本轮 t10）
-- **标题**：`Decision` 的 "should_run ⇒ todo 非空" 不变量没人守
-- **复现**：**没有**——这条从头到尾不是 bug，是绊子：四处 `unwrap()` 靠它，而它今天成立
-- **修复前**：字段全 `pub`、没有构造器，任何模块都能拼出 `Decision { should_run: true, todo: None, .. }`，四处一起崩
-- **验收**：① 全仓不再有 `Decision` 字面量（构造器 `ready`/`stop`/`wait`）；② 别的模块**编译不过**（私有字段 `_seal`，实测 `error: cannot construct 'Decision' with struct literal syntax due to private fields`）；③ 四处调用点不再 `unwrap()`（`ready_todo()`，runner 那处退化成"停下报原因"）；④ 一条覆盖 13 个出口的不变量测试，撤掉修复变红
-- **状态**：已修 · 回归测试 `tick_test::every_decide_exit_keeps_should_run_implies_a_todo` · 正文 §4 B-1
-
-#### B-2（低）· 已修 `ba87ca2`
-- **标题**：`edit <id> --blocked-by <它自己>` 被收下，那条 todo 就再也跑不了
-- **复现**：`zloop edit t1 --blocked-by t1`（唯一的 todo）
-- **修复前**：exit 0 收下，此后 `next` 永远 `WAIT (blocked) · retry in 10 min`，`doctor` 说没问题；配合 A-5 就是一个不会退出、也不会通知任何人的 runner
-- **验收**：exit 2 + 说清为什么永远满足不了；**一个字都不写进 `state.json`**；`--blocked-by t2` 照收
-- **状态**：已修（修 A-9 时一起做的，t10 复核时才把状态补正——**这一轮没有改代码**）· 回归测试 `cli_test::edit_refuses_to_make_a_todo_depend_on_itself` + 手改文件那条由 `doctor_test::a_self_dependency_from_a_hand_edited_file_is_reported_but_a_finished_dep_is_not` 兜 · 正文 §6
-
-#### B-3（中，第四轮记的是低）· 已修 `e768b5d`
-- **标题**：全部 deferred 时说「目标结束」，并引着人去开新目标
-- **复现**：把所有 todo `--status deferred`，看 `status` / `next`
-- **修复前**：比记的严重——它根本走不到 `all_done` 那一支，因为在那之前 `edit` 的收尾已经把 `goal.status` 改成 `done` 了。于是「一条没做完、全推到以后」在面板上和「活干完了」长得一样，两条延后的活就此没人再看
-- **验收**：`all_deferred` 有自己的 reason 和出口动作（把延后的捡回来，而不是开新目标）
-- **状态**：已修 · 回归测试 `tick_test::all_deferred_is_not_all_done` · 正文 §6
-
-#### T21（中）· 已修 `7941e6d`
-- **标题**：`awake.rs` 里 8 处裸子进程——收口 5 处，留 3 处并写明理由
-- **复现**：`grep -n "Command::new" src/`，8 处逐个看谁在等它
-- **修复前**：t20 收完 git 时留了一句「每个 zloop 起的子进程都走 `run_capture`」，`awake.rs` 里还有 8 处裸的
-- **验收**：5 处收口；**不能收的 3 处把理由写进代码注释**（不只写在文档里）
-- **状态**：已修 ·**这一轮真正的发现是反的**：无脑套 `run_capture` 会把恢复默认值弄没——`zloop stop` 的 SIGTERM 先把 `stop_requested()` 置上，收尾路径上的 `pmset` 探针要是也认叫停，会在第一次轮询里被自己杀掉，`SleepDisabled=1` 原地留着。所以 `run_capture` 多了一个显式的 `Stop` 参数 · 正文 §18
-
-#### T29（中）· 已修 `6e85fcc`
-- **标题**：一次例行整理，把 `status` / `stats` / `replan` / 轮次编号四处读数一起清零
-- **复现**：`sh scripts/repro-t29-compact-drops-round-count.sh`（修之前退 1）
-- **修复前**：`compact` 之后 `status` 的「跑了 4 轮」→ 0 轮、`stats` 整页消失、`replan` 的返工信号熄火、轮次编号 3 → 0 重号
-- **验收**：归档汇总里存的是**按 outcome 分的计数**（能重算出全族），不是再加一个计数器
-- **状态**：已修 ·**A-18 只补了花费那一个，同族还有 6 个原地等着**——修一类"累计量被搬走"的 bug 时先问它是不是一族 · 正文 §20
-
-#### T30（中）· 已修 `ac040d3` `ffb6f59`
-- **标题**：格式闸原先是空的——`cargo fmt --check` 在全仓 29 个文件上都不合规（790 hunk）
-- **复现**：`cargo fmt --check`
-- **修复前**：全红等于没有信号，格式漂移进来也没人拦。根因是配置缺席（~125 列的密排风格，仓库里没有 `rustfmt.toml`，rustfmt 按默认 `max_width=100` 判）
-- **验收**：`rustfmt.toml` = `max_width=125` + `use_small_heuristics="Max"`（默认启发式会多出 ~2400 行凭空拆行）；对齐提交只动格式并进 `.git-blame-ignore-revs`
-- **状态**：已修 · 正文 §2.1
-
-#### T31（中）· 已修 `789d524`
-- **标题**：闸有了定义，但没人自动去按（仓库里没有 `.github/`）
-- **复现**：翻仓库根目录
-- **修复前**：t30 之后格式闸只是"人可以跑的一条命令"，不是自动拦截
-- **验收**：`.github/workflows/ci.yml`（macos-latest）+ `scripts/check.sh` 一份定义（fmt → clippy `-D warnings` → test，越便宜越靠前、fail-fast），CI 和人调的是同一件事
-- **状态**：已修 ·**加闸前先跑一遍**：`clippy -D warnings` 本来就有 4 条红，直接配进 CI 就是开局全红——那正是 t30 判过死刑的假闸 · 正文 §2.2
-
-#### T32（中）· 已修 `dc7e714`
-- **标题**：`policy.intervals_min` 越界 —— debug 崩、release 睡 8171 年
-- **复现**：`intervals_min=[4294967295]` + 一条卡在人手里的 todo，跑 `next --peek --json` / `status` / `context`
-- **修复前**：debug 构建三条命令全在 `phase.rs::human_minutes` 的 `m + 720` 上溢出 panic（exit 101）；release 不崩，`interval_min` 原样吐 4294967295 分钟（8171 年）runner 就此睡死，面板因同一处回绕印「约 0 天后重试」；`doctor --json` 的 findings 是空的——**三样东西同时说没事**
-- **验收**：`clamp_interval` 把每一档钳进 `1..=7 天`（下限 1 挡的是另一头：`[0]` 会让 runner 忙等）；`human_minutes` 改 `saturating_add`；`doctor` 补取值范围（err 级）；`runner::slowest_interval` 走同一道闸
-- **状态**：已修 · 回归测试 4 条，四处修复逐个撤掉都变红 ·**这是 A-7 / A-11 之后第三次重演同一个形状**（人手改的 policy 一路原样交给运行期）
-
-#### T33（低）· 已修 `7dc358e`
-- **标题**：退避阶梯写反（`[30,10,3]`）时三件事一起反过来，`doctor` 沉默
-- **复现**：`policy.intervals_min = [30, 10, 3]`，跑 `doctor`
-- **修复前**：每一档单看都合法，所以 T32 的取值范围查不出来。实际后果：有活干的正常轮次每 30 分钟才动一次（吞吐掉到 1/10）；`blocked`/`user_gate` 退避序列变成 10→3→3（越不出活退得越快）；`slowest_interval` 拿 3 当「最慢的一档」
-- **验收**：报 **warn** 不是 error（没有任何值被无声换掉，人写的数原样生效了）；只报「往回走」不报「没有严格递增」（`[10,10,10]` 是有人存心不要退避，合法）；比的是**钳过之后**的值（免得和 T32 那条 error 把同一个根因拆成两条互相矛盾的报告）
-- **状态**：已修
-
-#### T34（低）· **未修，待定**
-- **标题**：`runner::slowest_interval` 用 `.last()` 取「最慢的一档」，阶梯非单调时它拿到的不是最大值
-- **复现**：`intervals_min = [3, 30, 10]` → `slowest_interval` 拿到 10，真正最慢是 30
-- **现状**：函数名和文档写的都是"最慢"，而「等人」「被限流」「被 host 限流」三处 sleep 都读它
-- **验收（这条 todo 要产出的）**：定下是改成 `.max()` 还是维持 `.last()` 并改名，两条路各写清代价，然后照做 + 回归测试
-- **状态**：**未修（待定）**——这是口径问题不是 bug：`.last()` 在阶梯单调时完全正确，改成 `.max()` 等于替用户决定"阶梯就该是升序的"。T33 的 `doctor` warn 已经覆盖了"人手写歪"的情况，剩下的是"要不要连写歪的也照着最大值睡"。已排成下一条待办（t34），不并进本轮（一轮只做一条）
-
-#### T36-①（低）· 已清 `503e427`
-- **标题**：`tests/scratch_t33.rs` 被误提交进仓库
-- **复现**：`git ls-files tests/`
-- **修复前**：文件里两行注释自己写着「未被 git 跟踪、该 `rm` 掉」，结果 `git add -A` 连它一起带进了 `71a74d6`。不影响任何结果，但它是**一句写在仓库里的假话**
-- **验收**：`git rm`，没有别的动作
-- **状态**：已清
-
-#### T36-②（中）· 已修 `503e427`
-- **标题**：`status` 对「永远等不到」和「正常排队」用同一个词
-- **复现**：造一条依赖 `deferred`/归档 todo 的活，看 `status` 的进展列
-- **修复前**：三种命完全不同的等待印同一行灰的 `⏳ 等 t1`
-- **验收**：死等和排队在面板上分得开
-- **状态**：已修 · 回归测试 `cli_test::status_tells_a_dead_wait_apart_from_a_normal_queue` · 正文 §13
-
-#### T37（中）· 已修 `bca786a`
-- **标题**：「永远等不到」只在 `status` 一块屏上说了，另外三处紧凑清单还在印 `⏳t4`
-- **复现**：同 T36-②，改看 `zloop context` / `prompt` 渲染 / `cmd_edit` 回显
-- **修复前**：三处照旧印「排上了」·**并且 t36 自己的判据也漏了一种**：它取「第一条没 done 的依赖」再判死活，死依赖排在活依赖**后面**就整条漏掉（`doctor` 那边是把 `blocked_by` 整条扫完的）
-- **验收**：四处一起说，且**判据只留一份**
-- **状态**：已修 · 正文 §13
-
-#### T38（中）· 已修 `0c27d16`
-- **标题**：延后一条依赖 = 一条命令判死一片，而 `edit` 的回显只字不提
-- **复现**：`zloop edit t4 --status deferred`（t2/t3 依赖 t4），紧接着 `zloop doctor`
-- **修复前**：`edit` 只印 `t4 [P2] deferred 四` 就结束，`doctor` 退 1 报 t2/t3 永远轮不到——同一份 state 两块屏说的话对不上，而 `edit` 那一行是这一刻**唯一会被读到的**
-- **验收**：回显当场点名被连累的那几条 + 敲什么解开；判据不另写（复用 `dead_deps`）；长清单只印前 8 个但条数说全；**退出码仍是 0**（`edit` 本身成功了，改成非 0 会打断脚本里的 `edit && …`）
-- **状态**：已修 · 撤掉回显那段，新测试报「被连累的条数要说出来」
-
-#### T39（中高）· 已修 `c441398`
-- **标题**：`compact` 把还有人依赖的那条搬进归档，等它的那几条就此永远等不到
-- **复现**：`plan` 三条 → `edit t2/t3 --blocked-by t1` → 做完 t1 → 做旧 → `zloop compact`
-- **修复前**：t1 进归档，t2/t3 的 `blocked_by` 指着一个不存在的 id；**归档里的 todo 捡不回来**（这是它比 T38 狠的地方——T38 还能 `edit` 撤销）
-- **验收**：还有人依赖的那条不许搬
-- **状态**：已修 · 正文 §14
-
-#### T40-①（中高）· 已修 `331293a` `5304382`
-- **标题**：例行 `compact` 吃掉人今天刚留下的、还没人读过的反馈
-- **复现**：`zloop feedback t1 "…"`（t1 完成于 40 天前）→ `zloop compact --keep-days 30` → `zloop context | grep`
-- **修复前**：1 条 → **0 条**。三点让它比 T39 更难发现：**不需要 `--force`**（最普通的例行整理，甚至能进 cron）；**静默**（回显只说「2 ticks」，`doctor` 前后都退 0）；**丢的正是协议里排第一的那个输入**（skill 的原话是「交接包里有反馈就先按它调整」）
-- **验收**：搬 tick 的判据要多一条——这条 tick 自己也得够老，且 `pending_feedback` 指着的一个都不许搬（②③ 两道闸缺一不可）
-- **状态**：已修 · 正文 §15.2 + §16
-
-#### T40-②（中）· 已修 `331293a` `5304382`
-- **标题**：`compact --force` 把在飞的那条搬走，`ensure_idle` 给的两条出口从此都退 2
-- **复现**：`zloop next` → `zloop edit t1 --status deferred` → `zloop compact --keep-days 0 --force`
-- **修复前**：`done t1` 和 `edit t1 --status open` 双双 `unknown todo id`，`doctor` 退 1 且给的修法是「手工把 state.json 里的 in_progress 删掉」——**zloop 自己造出了一个只能手改文件才能收拾的状态**
-- **验收**：`in_progress.todo` 不许进 `old_ids`，`--force` 也不许（`--force` 的语义是「我知道有人在跑，账我认」，不是「把在飞的那一轮删掉」）；出口只印真的能用的那条
-- **状态**：已修 · 正文 §15.3 + §16
-
-#### T42（中高）· 已修 `2e0168f`
-- **标题**：派活指着一条已了结的 todo 时，四处出口一起坏
-- **复现**：`zloop next`（派出 t1）→ `zloop edit t1 --status deferred`。**两步都在最普通的用法里**，一道闸都不响，也不用改文件
-- **修复前**：`done t1` 退 2 `already deferred`；`ensure_idle` 指的正是那条退 2 的命令；`status` 同一屏上「t1 ⏭ 已延后」+「正在做 t1」；`doctor` 一声不吭退 0。**最狠的是第一条落在无头轮次上**——runner 每轮塞给模型的收尾指令写死是「必须执行 `zloop done <id>`」，模型手里只有这一条命令，而它保证失败
-- **验收**：让 `done` 收得了尾，且**不改状态**（另一条路是劝人撤销自己刚做的决定，否决）；闸只对在飞的那条开
-- **状态**：已修 · 正文 §17
-
-#### T43（中）· 已修 `b406ded`
-- **标题**：`install_sudoers` 的暂存路径别人也占得住名字，装进 `/etc/sudoers.d/` 的可以不是我们写的那份
-- **复现**：`sh scripts/repro-t43-sudoers-tmp-swap.sh`
-- **修复前**：`env::temp_dir().join(format!("zloop-pmset.{}", process::id()))` —— 名字可猜、写的时候不 `O_EXCL` 不 `O_NOFOLLOW`，`visudo -c` 检查的和最后装进去的可以是两份
-- **验收**：换掉的不是名字，是**父目录**（自己建一个 0700 的目录）
-- **状态**：已修 ·**顺带纠正了一句写错的前提**：macOS 上「TMPDIR 没设 = /tmp」不成立，Apple 平台 `env::temp_dir()` 走 `confstr(_CS_DARWIN_USER_TEMP_DIR)`，拿到的是每用户 0700 的 `/var/folders/…/T/`（`env -i` 实测）。可利用性因此收窄，但修法不变 · 正文 §19
-
-#### T44（中）· 已修 `71e5c8a`
-- **标题**：整理一次账本，进度条 66% → 0%、「一次过 2/2」→「0/0」、`goals` 的 2/3 → 0/1
-- **复现**：`sh scripts/repro-t44-compact-drops-progress-percent.sh`（修之前退 1）
-- **修复前**：T29 修的是从 **ticks** 现算的那一族，从 **todo** 现算的还有两个没修（§20.4 明写过），这一轮做掉并发现第三个出口
-- **验收**：归档汇总里再存一份「todo 那一侧的原料」；顺带修掉「整理干净的目标被说成刚开的」（`total == 0 && archived.todos == 0` 才算待规划）
-- **状态**：已修 ·**这是同一个教训第三次出现**：为「空账本 = 刚开始」准备的早退分支，`compact` 都能伪造它的前提 · 正文 §21
-
-### 22.4 不修（查过，确认不是缺陷）
-
-不进 issue，但写下来——因为它们都长得像缺陷，下一个人会重新怀疑一遍。
-
-| 事 | 为什么不修 |
-|---|---|
-| `--evidence @<大文件>` 不设上限 | 32 MB 证据实测：日志涨到 32 MB、峰值内存 132 MB，但**账本和交接包都没被污染**（`state.json` 1079 B、`tick.note` 1 字符、`context` 540 B）。该有的边界都在，只是落盘那份没截 |
-| `plan --file /dev/zero` 会挂住 | `read_to_string` 无界读，但要拿**字符设备**喂它才触发，场景太构造 |
-| `zloop log --show ../../../../etc/hosts` | 本地 CLI，用户对这些文件本来就有读权限，**不构成越权**；`--show` 的帮助文字写的就是 "path or bare file name" |
-| 孤儿日志文件（tick 进归档、`.md` 留在原地） | `doctor` 的 `missing_log` 查的是反方向；文件还读得到，没有任何路径会崩 |
-| NOTES.md 会不会是 compact 的第三个受害者 | `notes.rs` 存的是 `- <RFC3339> 正文`，**没有 todo id 这个概念**，compact 从不碰这个文件。受害者不存在 |
-| `ensure_idle` 的 TOCTOU | 赢了竞态也没用：`next` 派出去的那条状态是 `open`，而 `old_ids` 只收 `is_terminal` 的。直接把竞态结果摆出来试 → `nothing to compact`、todo 还在、`doctor` 没发现问题 |
-| `awake.rs` 剩下 3 处裸子进程 | 收口会把功能弄坏（收尾路径上的探针不能认叫停，见 T21）。理由写进了**代码注释**，不只写在文档里 |
-| `edit`/`feedback` 打断 **noop** streak | 有意：`noop` 不是停机闸，且 A-16 之后 runner 不读它 |
-| `reflect` / `replan` tick 对 streak 透明 | 有意（`tick.rs` 写明：插一轮反思不代表失败被解决了） |
-| `held_by_other` 挡不住 runner | 有意且**必须**：runner 自家的 `claude -p` 子进程要靠这条放行才进得来 |
-| `goal new` / `switch` / `rm` 换掉整个 `state.json` | `goals::ensure_idle` 已经挡住了（runner 在跑、或有轮次没写回都拒绝，除非 `--force`） |
-
-### 22.5 试过但没复现（不进 issue）
-
-写下来是为了让下一个人别重复试。**这些不算发现**——混进 issue 会污染真发现。
-
-- 并发写账本丢更新（20 并发 `plan --add` → 20/20，id 不重复）；
-- SIGKILL 把 `state.json` 写坏（386 次真 SIGKILL，每轮验 JSON，一次没坏）；
-- 残留锁文件把后续命令锁死（flock 由内核在进程死亡时释放）；
-- 日志文件和 tick 对不上（`log::write` 在事务闭包**里面**；最坏是孤儿日志，而 `log::entries` 按 tick 过滤）；
-- 路径穿越写到 `.zloop/` 外面（`goal new --id ../../pwn` 被 `sanitize_id` 压成 `pwn`）；
-- 环境变量把输出搞崩（`COLUMNS` 喂 0/1/2/-5/abc/20 位数，加 `NO_COLOR`/`CLICOLOR_FORCE`/`ZLOOP_AWAKE_POLL_SECS=abc`，9 种全 exit 0 且行数不变）；
-- stdin 喂垃圾（`hook-stop` 喂空/乱文本/`[]`/2000 层嵌套 → 全 exit 0 静默忽略）；
-- 超长 / 控制字符的 CLI 参数（1 MB 目标文字、`\x1b[31m`、`\x07` → 正常收下、正常存）；
-- 非 UTF-8 从命令行钻进来（clap 直接挡）——**唯一漏的是 NOTES.md，那条是 A-4**；
-- `cargo test` 漏进程（两遍全绿、临时进程都收掉了；机器上那个活了 20 小时的 runner 是 A-5 不是漏进程）。
-
-### 22.6 这张表自己的边界
-
-三件说清楚，别当没说：
-
-1. **「没有 bug」仍然证不出来。** 这 42 条是**这几轮按风险面扫到的**，不是全集。
-   没扫到的面（真实并发的宿主进程、非 macOS 平台、`.zloop` 落在网络文件系统上）
-   一条都没验过。
-2. **41 条"已修"里，每条的红/绿证据都在各自正文里**，形式不统一：多数是"撤掉修复就变红"
-   的回归测试，少数（A-13 / T21 的取舍类）是逐条比对的实测记录。
-   引用这张表时请连正文一起看，别只看"已修"两个字。
-3. **本次不开 GitHub issue、不 `git push`**（项目约定）。这一节就是那份等人看的清单；
-   要落成真 issue 时走 `scripts/gh-issues.py`，绑定约定是 todo 文本结尾带 `(#N)`。
+正文（§1–§22）留在这里。**内容一句没改**，改的只有导航：第四轮及其后的节号各 +1
+（原来第三轮和第四轮都叫 6），以及上面说的那三处引用。

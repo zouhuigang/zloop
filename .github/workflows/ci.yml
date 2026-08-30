@@ -1,6 +1,6 @@
-# 仓库的自动闸：fmt --check + clippy -D warnings + cargo test。
+# 仓库的自动闸：文档链接 + fmt --check + clippy -D warnings + cargo test。
 #
-# 跑的是 `scripts/check.sh`，不是在这里再抄一遍三条命令——闸只有一份定义，
+# 跑的是 `scripts/check.sh`，不是在这里再抄一遍那几条命令——闸只有一份定义，
 # 本地敲的和 CI 跑的永远是同一件事（`tests/gate_test.rs` 把这条钉成断言）。
 name: CI
 
@@ -44,5 +44,5 @@ jobs:
       - name: Toolchain versions
         run: rustc --version && cargo --version && cargo fmt --version && cargo clippy --version
 
-      - name: Gate (fmt + clippy + test)
+      - name: Gate (docs + fmt + clippy + test)
         run: sh scripts/check.sh

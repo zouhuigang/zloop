@@ -1,27 +1,27 @@
 #!/bin/sh
-# 仓库的**唯一一道闸**：格式 + lint + 测试。CI（`.github/workflows/ci.yml`）跑的就是这个文件，
+# 仓库的**唯一一道闸**：文档链接 + 格式 + lint + 测试。CI（`.github/workflows/ci.yml`）跑的就是这个文件，
 # 人在本地敲的也是这个文件——闸只有一份定义，CI 和本地不会各写一套然后慢慢跑偏。
 #
-#   sh scripts/check.sh              # 三道全过
-#   sh scripts/check.sh fmt clippy   # 只跑前两道（快，适合当 preflight）
+#   sh scripts/check.sh              # 四道全过
+#   sh scripts/check.sh docs fmt clippy   # 只跑前三道（快，适合当 preflight）
 #
 # 退出码 0 = 全过；非 0 = 第一道没过的那一道的退出码。
 #
-# **fail-fast 是故意的**：三道按「越便宜越靠前」排（fmt 秒级 → clippy 一次编译 → test 全跑），
+# **fail-fast 是故意的**：四道按「越便宜越靠前」排（docs 毫秒级 → fmt 秒级 → clippy 一次编译 → test 全跑），
 # 红了就地停，不再往下烧时间。它同时是 `policy.preflight_cmd` 的合法取值——在
 # `.zloop/state.json` 的 `policy` 里写：
 #
-#   "preflight_cmd": "sh scripts/check.sh fmt clippy"
+#   "preflight_cmd": "sh scripts/check.sh docs fmt clippy"
 #
 # 注意 preflight 失败会记一笔 `fail` 而不调宿主，连红 `max_fail_streak` 轮 runner 就停机——
-# 想让每轮开跑前先过一道，用便宜的前两道；把 test 也塞进去等于让一棵红树把整个长跑卡死
+# 想让每轮开跑前先过一道，用便宜的前三道；把 test 也塞进去等于让一棵红树把整个长跑卡死
 # （runner 再也走不到「修好它」那一步）。
 set -u
 
 ROOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null) || ROOT=$(dirname "$0")/..
 cd "$ROOT" || exit 2
 
-GATES=${*:-"fmt clippy test"}
+GATES=${*:-"docs fmt clippy test"}
 
 run_gate() {
     printf '\n==> %s\n' "$*"
@@ -34,6 +34,10 @@ run_gate() {
 
 for g in $GATES; do
     case "$g" in
+    # 排最前面因为最便宜（几十毫秒，不用编译）。守的是文档里的跨文件链接和锚点：
+    # 「正文 §N」这类引用没有编译器，写歪了不会有任何东西报错——t45 立这道闸时
+    # 现场就抓到三处腐烂（重复的节号、指错的节、一条本来就坏的锚点）。
+    docs) run_gate python3 scripts/check-doc-links.py ;;
     fmt) run_gate cargo fmt --all -- --check ;;
     # --all-targets 把 tests/ 也算进去：闸不能只看 src/，回归测试才是这仓库的主要产物。
     clippy) run_gate cargo clippy --all-targets --all-features -- -D warnings ;;
@@ -41,7 +45,7 @@ for g in $GATES; do
     # 而这仓库的模块头注释里全是给接手人看的说明，doc test 是它们唯一的编译检查。
     test) run_gate cargo test ;;
     *)
-        echo "[check] 不认识的闸：$g（可选 fmt / clippy / test）" >&2
+        echo "[check] 不认识的闸：$g（可选 docs / fmt / clippy / test）" >&2
         exit 2
         ;;
     esac

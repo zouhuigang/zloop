@@ -3,7 +3,7 @@
 **让 Claude Code / Codex 围着一个目标持续干活的最小调度器。**
 一个 JSON 状态文件、一个 1.6 MB 的静态 Rust 二进制，不需要任何解释器、服务或后台守护。你给它一个目标和几条 todo，它一轮做一条、做完写回、该停就停、能接着跑就接着跑——跑多久都行。
 
-它专门解决四件事（设计见 [docs/RUST-DESIGN.md](docs/RUST-DESIGN.md)，长程运行加固见 [docs/LONG-RUN-AUDIT.md](docs/LONG-RUN-AUDIT.md)）：
+它专门解决四件事（设计见 [docs/RUST-DESIGN.md](docs/RUST-DESIGN.md)，长程运行加固见 [docs/LONG-RUN-AUDIT.md](docs/LONG-RUN-AUDIT.md)，全量代码审查查实的 42 条缺陷见 [docs/FINDINGS.md](docs/FINDINGS.md)）：
 
 | 目标 | 怎么用 | 背后 |
 |---|---|---|
@@ -1999,6 +1999,10 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 注意 rustfmt 按**字符**数算宽度，不按终端列宽。这份代码里中文注释很多，一个汉字占 2 列却只算 1 个字符，
 所以含中文的行显示出来会比 125 列宽——这是 rustfmt 的已知限制，好处是它不会去拆中文注释行。
 
-目录：`src/` 实现 · `tests/` 集成测试 · `docs/`：`RUST-DESIGN.md` 当前设计、`LONG-RUN-AUDIT.md` 长程加固审计、`OPEN-SOURCE-REVIEW.md` 开源方案对照与借鉴、`TEST-REPORT.md` 自测报告、`loopx-principles.md` / `loopx-scheduling-notes.md` loopx 研究、`DESIGN.md` v0.1 Python 原型设计记录。
+目录：`src/` 实现 · `tests/` 集成测试 · `docs/`：[`FINDINGS.md`](docs/FINDINGS.md) 确认缺陷清册（**按缺陷查看这一份**）、[`CODE-AUDIT.md`](docs/CODE-AUDIT.md) 全量代码审查正文（按轮次读）、`RUST-DESIGN.md` 当前设计、`LONG-RUN-AUDIT.md` 长程加固审计、`OPEN-SOURCE-REVIEW.md` 开源方案对照与借鉴、`TEST-REPORT.md` 自测报告、`loopx-principles.md` / `loopx-scheduling-notes.md` loopx 研究、`DESIGN.md` v0.1 Python 原型设计记录。
+
+文档里的跨文件链接和锚点由 `python3 scripts/check-doc-links.py` 守着（`sh scripts/check.sh` 的第一道，CI 也跑）：
+链接指向不存在的文件或对不上的标题就红。`CODE-AUDIT.md` 的节号还多一条约束——不重复、不跳号，
+因为整份清册靠「正文 §N」把人送回正文，而这种引用**没有编译器**，写歪了不会有任何东西报错。
 
 MIT License.
