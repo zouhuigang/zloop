@@ -745,6 +745,91 @@ fn remember_pause_resume_and_compact() {
     assert!(zloop(d, &["next", "--peek", "--json"], None, &[]).out.contains("\"id\": \"t2\""));
 }
 
+/// A-18：整理账本不能顺手给预算闸提额。
+///
+/// `compact` 把老 todo 名下的 tick 搬进 `archive/`，而花费就记在 tick 上。少了累计汇总，
+/// 一个已经撞到 `policy.max_total_usd` 停下的目标，被例行整理一次就回到 ready——
+/// 而且 `status` 连花过钱这件事都不再显示，人不知道自己刚给循环提了额。
+/// （复现脚本：`scripts/repro-a18-compact-resets-budget-cap.sh`）
+#[test]
+fn compacting_the_ledger_does_not_disarm_the_budget_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 老活", "--add", "[P1] 还没做的活"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "老活做完", "--no-doc"], None, &[]);
+
+    // 一个跑了一个月、已经花超上限的目标：t1 那一轮花了 $9.50，上限 $5.00
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.policy.max_total_usd = 5.0;
+    st.todos[0].done_at = Some("2026-01-01T00:00:00+08:00".into());
+    st.ticks[0].at = "2026-01-01T00:00:00+08:00".into();
+    st.ticks[0].cost_usd = Some(9.5);
+    state::save(&p, &mut st).unwrap();
+
+    let peek = |d: &Path| zloop(d, &["next", "--peek", "--json"], None, &[]).out;
+    assert!(peek(d).contains("\"reason\": \"budget\""), "前提没成立：整理之前就该是 budget\n{}", peek(d));
+
+    let o = zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("compacted 1 todos and 1 ticks"), "{}", o.out);
+    // 搬走了一笔钱就要说出来
+    assert!(o.out.contains("$9.50"), "整理带走了花费却不吭声：{}", o.out);
+
+    // tick 归档走了，账没走
+    let st = state::load(&p).unwrap();
+    assert!(st.ticks.is_empty(), "tick 应该被搬走：{:?}", st.ticks);
+    assert_eq!(st.archived.ticks, 1);
+    assert!((st.archived.cost_usd - 9.5).abs() < 1e-9, "{:?}", st.archived);
+    assert!((zloop::tick::spent_total(&st) - 9.5).abs() < 1e-9);
+
+    // 闸还在：调度器、start 的预检、status 三处都还看得见这 $9.50
+    assert!(peek(d).contains("\"reason\": \"budget\""), "整理之后预算闸没了：{}", peek(d));
+    let o = zloop(d, &["start", "--host", "claude", "--fast"], None, &[]);
+    assert!(o.out.contains("budget") || o.err.contains("budget"), "{}{}", o.out, o.err);
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("$9.50") && o.out.contains("上限 $5.00"), "status 不再提花过的钱：{}", o.out);
+    // 再整理一次不会把同一笔钱记两遍
+    zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    let st = state::load(&p).unwrap();
+    assert!((st.archived.cost_usd - 9.5).abs() < 1e-9, "{:?}", st.archived);
+}
+
+/// A-18 的另一半：`compact` 动的是 runner 下一轮要读的账，所以和 `goal switch` 走同一道闸。
+#[test]
+fn compacting_is_refused_while_the_runner_is_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a", "--add", "[P1] b"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
+    let p = state::state_path(d);
+    let mut st = state::load(&p).unwrap();
+    st.todos[0].done_at = Some("2026-01-01T00:00:00+08:00".into());
+    st.ticks[0].at = "2026-01-01T00:00:00+08:00".into();
+    state::save(&p, &mut st).unwrap();
+
+    // runner 在跑（pid 文件指向一个活着的进程）
+    fs::create_dir_all(d.join(".zloop/runner")).unwrap();
+    fs::write(d.join(".zloop/runner/pid"), format!("{}\n", std::process::id())).unwrap();
+    let o = zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert_ne!(o.code, 0, "runner 跑着还让整理：{}{}", o.out, o.err);
+    assert!(o.err.contains("runner 正在跑"), "{}", o.err);
+    assert!(!state::load(&p).unwrap().ticks.is_empty(), "被拒的 compact 不许动账本");
+    // --force 才放行
+    let o = zloop(d, &["compact", "--keep-days", "30", "--force"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("compacted 1 todos"), "{}", o.out);
+    fs::remove_file(d.join(".zloop/runner/pid")).unwrap();
+
+    // 有会话拿着 todo 没写回，同样先别动
+    zloop(d, &["next"], None, &[]);
+    let o = zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert_ne!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.err.contains("还没写回"), "{}", o.err);
+}
+
 // ---------- 每轮技术文档 ----------
 
 #[test]

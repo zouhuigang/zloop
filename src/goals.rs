@@ -209,13 +209,18 @@ pub fn resolve_match(root: &Path, needle: &str) -> Result<(Row, Match)> {
     bail!("没有目标匹配 {needle:?}：`zloop goal list` 看有哪些")
 }
 
-/// 切换 / 新建之前的安全检查：runner 在跑，或有会话拿着 todo 没写回，都先别动。
-pub fn ensure_idle(root: &Path, force: bool) -> Result<()> {
+/// 动账本之前的安全检查：runner 在跑，或有会话拿着 todo 没写回，都先别动。
+///
+/// `why` 说清楚"为什么这时候不该动"——切目标是"会让它中途换活"，`compact` 是"会动它
+/// 正在读的轮次记录"。装闸的判据是**改的东西 runner 下一轮要不要读**，不是命令叫什么
+/// 名字：`compact` 删 tick 就等于改 `fail_streak` / `progress_streak` / 花费 / 配额窗口
+/// 这四道闸的输入（A-18）。
+pub fn ensure_idle(root: &Path, force: bool, why: &str) -> Result<()> {
     if force {
         return Ok(());
     }
     if let Some(pid) = crate::daemon::running(root) {
-        bail!("runner 正在跑（pid {pid}）：换目标会让它中途换活。先 `zloop stop`，或加 --force");
+        bail!("runner 正在跑（pid {pid}）：{why}。先 `zloop stop`，或加 --force");
     }
     if let Ok(st) = state::load(&state::state_path(root)) {
         if let Some(ip) = &st.in_progress {
@@ -312,7 +317,7 @@ pub fn switch(root: &Path, needle: &str, force: bool) -> Result<Switched> {
         if want.current {
             return Ok(Switched { parked: None, current: want });
         }
-        ensure_idle(root, force)?;
+        ensure_idle(root, force, "换目标会让它中途换活")?;
         let parked_row = park(root)?;
         if let Err(e) = engage(root, &want.path) {
             unpark(root, &parked_row);
@@ -354,7 +359,7 @@ pub fn create(root: &Path, text: &str, id: Option<&str>, force: bool) -> Result<
             }
             None => None,
         };
-        ensure_idle(root, force)?;
+        ensure_idle(root, force, "换目标会让它中途换活")?;
         let parked_row = park(root)?;
         // id 要在 park **之后**定：当前目标读不出来时 `taken()` 数不到它，停走的那份可能
         // 刚占掉一个 `g<N>`，这里再看一次才不会和它撞成同一个 id。

@@ -138,6 +138,9 @@ pub enum Cmd {
         /// Keep todos finished within this many days
         #[arg(long = "keep-days", default_value_t = 7)]
         keep_days: i64,
+        /// 照常整理，即使 runner 在跑 / 有轮次没写回
+        #[arg(long)]
+        force: bool,
     },
     /// 重估一次：对着最终目标看剩下的任务还对不对，提最小改动（改不改由你点头）
     Replan {
@@ -489,7 +492,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             println!("goal is now {status}");
             Ok(0)
         }
-        Cmd::Compact { keep_days } => cmd_compact(&root, &path, keep_days),
+        Cmd::Compact { keep_days, force } => cmd_compact(&root, &path, keep_days, force),
         Cmd::Notify { text } => {
             let st = state::load(&path)?;
             if !notify::configured(&st) {
@@ -629,7 +632,7 @@ fn start_refusal(st: &state::State, reason: &str) -> String {
             "zloop edit 把它拆小，再 start".to_string(),
         ),
         "budget" => (
-            format!("已花 ${:.2}，到了 policy.max_total_usd（${:.2}）上限", tick::spent_usd(&st.ticks), p.max_total_usd),
+            format!("已花 ${:.2}，到了 policy.max_total_usd（${:.2}）上限", tick::spent_total(st), p.max_total_usd),
             format!("改大 {}/{} 里的 policy.max_total_usd，再 start", state::STATE_DIR, state::STATE_FILE),
         ),
         "user_gate" | "blocked" => (
@@ -1325,7 +1328,7 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         _ => ("•", "空闲", "2"),
     };
     let pct = (finished * 100).checked_div(planned).unwrap_or(0);
-    let spent = tick::spent_usd(&st.ticks);
+    let spent = tick::spent_total(&st);
     let money = if spent > 0.0 {
         let cap = if st.policy.max_total_usd > 0.0 { format!("（上限 ${:.2}）", st.policy.max_total_usd) } else { String::new() };
         format!(" · 花了 ${spent:.2}{cap}")
@@ -2029,9 +2032,12 @@ fn cmd_doc(
 }
 
 /// Archive todos finished more than `keep_days` ago, together with their ticks.
-fn cmd_compact(root: &Path, path: &Path, keep_days: i64) -> Result<i32> {
+fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<i32> {
+    // 删 tick = 改 runner 下一轮要读的四个累计量（fail_streak / progress_streak / 花费 /
+    // 配额窗口），和 `goal switch` 同一类，所以走同一道闸（A-18）。
+    crate::goals::ensure_idle(root, force, "整理账本会动它正在读的轮次记录")?;
     let cutoff = state::now() - chrono::Duration::days(keep_days.max(0));
-    let (moved_todos, moved_ticks, archive) = state::transaction(path, |st| {
+    let (moved_todos, moved_ticks, carried, archive) = state::transaction(path, |st| {
         let old_ids: std::collections::HashSet<String> = st
             .todos
             .iter()
@@ -2043,22 +2049,38 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64) -> Result<i32> {
             .map(|t| t.id.clone())
             .collect();
         if old_ids.is_empty() {
-            return Ok((0usize, 0usize, None));
+            return Ok((0usize, 0usize, 0.0f64, None));
         }
         let (gone_todos, kept_todos): (Vec<_>, Vec<_>) = st.todos.drain(..).partition(|t| old_ids.contains(&t.id));
         let (gone_ticks, kept_ticks): (Vec<_>, Vec<_>) =
             st.ticks.drain(..).partition(|t| t.todo.as_ref().map(|id| old_ids.contains(id)).unwrap_or(false));
         st.todos = kept_todos;
         st.ticks = kept_ticks;
+        // 花费跟着 tick 一起走，但账不能跟着走：搬走多少就往累计里记多少，
+        // `tick::spent_total` 再把它加回预算闸（A-18）。
+        let carried: f64 = gone_ticks.iter().filter_map(|t| t.cost_usd).sum();
+        st.archived.ticks += gone_ticks.len();
+        st.archived.cost_usd += carried;
+        st.archived.at = Some(state::now_iso());
         let dir = root.join(state::STATE_DIR).join("archive");
         std::fs::create_dir_all(&dir)?;
         let target = dir.join(format!("compact-{}.json", state::now_iso().replace([':', '+'], "")));
-        let payload = serde_json::json!({"compacted_at": state::now_iso(), "keep_days": keep_days, "todos": gone_todos, "ticks": gone_ticks});
+        let payload = serde_json::json!({"compacted_at": state::now_iso(), "keep_days": keep_days, "cost_usd": carried, "todos": gone_todos, "ticks": gone_ticks});
         std::fs::write(&target, serde_json::to_string_pretty(&payload)? + "\n")?;
-        Ok((gone_todos.len(), gone_ticks.len(), Some(target)))
+        Ok((gone_todos.len(), gone_ticks.len(), carried, Some(target)))
     })?;
     match archive {
-        Some(p) => println!("compacted {moved_todos} todos and {moved_ticks} ticks → {}", p.display()),
+        Some(p) => {
+            println!("compacted {moved_todos} todos and {moved_ticks} ticks → {}", p.display());
+            // 说出来：不然人无从知道自己刚整理掉的是一笔钱，还是一笔钱都没有。
+            if carried > 0.0 {
+                let st = state::load(path)?;
+                println!(
+                    "  归档里带走 ${carried:.2} 花费，已记进累计账（累计 ${:.2}）：policy.max_total_usd 不受整理影响",
+                    tick::spent_total(&st)
+                );
+            }
+        }
         None => println!("nothing to compact (no done/deferred todos older than {keep_days} days)"),
     }
     Ok(0)

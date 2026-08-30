@@ -100,7 +100,8 @@ pub fn compute(state: &State) -> Stats {
         reflects: counted(tick::REFLECT),
         replans: counted(tick::REPLAN),
         undocumented: state.ticks.iter().filter(|k| k.documented == Some(false)).count(),
-        cost_usd: tick::spent_usd(&state.ticks),
+        // 花费是目标一辈子的账：`compact` 归档走的那部分也得算（A-18）。
+        cost_usd: tick::spent_total(state),
         duration_ms: state.ticks.iter().filter_map(|k| k.duration_ms).sum(),
         done,
         first_try: todos.iter().filter(|t| t.first_try).count(),

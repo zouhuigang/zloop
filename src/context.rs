@@ -42,7 +42,7 @@ fn resume_hint(host: Option<Host>) -> &'static str {
 pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, at: DateTime<FixedOffset>) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    let spent = tick::spent_usd(&state.ticks);
+    let spent = tick::spent_total(state);
     let spent_line = if spent > 0.0 || state.policy.max_total_usd > 0.0 {
         format!(
             "\n已花费：${spent:.2}{}",

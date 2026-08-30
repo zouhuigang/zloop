@@ -211,6 +211,34 @@ pub struct InProgress {
     pub session: Option<String>,
 }
 
+/// `compact` 搬走的 tick 留下的汇总。**归档只该让账本变小，不该让账变少。**
+///
+/// 花费记在每条 tick 的 `cost_usd` 上，而 `policy.max_total_usd` 的语义是「这个目标一共
+/// 只准花这么多」。`compact` 把老 todo 名下的 tick 连同它们的花费一起搬进 `archive/`，
+/// 没有这份汇总，一次例行整理就是一次**静默提额**：预算闸复位成「最近 keep_days 天只准
+/// 花这么多」，而 `status` 连花过钱这件事都不再显示（A-18）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Archived {
+    /// 累计搬走了多少条 tick（只为让人看懂这份汇总是从哪来的）。
+    #[serde(default)]
+    pub ticks: usize,
+    /// 搬走的那些 tick 上记的花费之和（USD）。`tick::spent_total` 会把它加回来。
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// 最后一次 compact 的时间。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl Archived {
+    /// 从没整理过的目标不该因为这个字段多出一段 JSON。
+    pub fn is_empty(&self) -> bool {
+        self.ticks == 0 && self.cost_usd == 0.0 && self.at.is_none() && self.extra.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
     pub version: u64,
@@ -224,6 +252,9 @@ pub struct State {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_progress: Option<InProgress>,
+    /// 已被 `compact` 归档走的 tick 的汇总（见 `Archived`）。
+    #[serde(default, skip_serializing_if = "Archived::is_empty")]
+    pub archived: Archived,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -331,6 +362,7 @@ pub fn default_state(goal_text: &str, goal_id: &str) -> State {
         next_id: 1,
         updated_at: ts,
         in_progress: None,
+        archived: Archived::default(),
         extra: Map::new(),
     }
 }

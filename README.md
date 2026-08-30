@@ -1524,8 +1524,14 @@ zloop 的 `SKILL.md` 却是**全局**的（`~/.claude/skills/zloop/`），把某
 | 参数 | 说明 |
 |---|---|
 | `--keep-days <N>` | 完成在 N 天内的留着（默认 7） |
+| `--force` | runner 在跑 / 有轮次没写回时照常整理 |
 
 技术文档（`.zloop/log/*.md`）不会被搬走，永远留在原地。
+
+**账不跟着 tick 走**：搬走的 tick 上记的花费会累加进 `state.json` 的 `archived.cost_usd`，
+`policy.max_total_usd`（这个目标一共只准花这么多）照旧按**累计**算——整理账本不是提额，
+带走了钱它会在输出里说一声。同理，`compact` 改的是 runner 下一轮要读的轮次记录，
+所以和 `zloop goal switch` 一样：runner 在跑、或有轮次没写回的时候会拒绝，`--force` 放行。
 
 #### 看情况
 
@@ -1880,6 +1886,8 @@ paused/done  >  unplanned / all_done  >  user_gate / blocked  >  fail_streak  > 
                 "host": "claude", "session": "11111111-…", "log": "log/20260827-055458-t1-done.md",
                 "cost_usd": 0.12, "num_turns": 7, "duration_ms": 42000 } ],
   "in_progress": { "todo": "t2", "started_at": "…", "round": 2, "via": "runner", "host": "claude" },
+  // compact 搬走的 tick 留下的汇总（没整理过就没有这一段）：账本变小，账不变少
+  "archived": { "ticks": 12, "cost_usd": 9.5, "at": "…" },
   "next_id": 3,
   "updated_at": "…"
 }

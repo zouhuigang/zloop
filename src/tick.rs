@@ -269,6 +269,15 @@ pub fn spent_usd(ticks: &[Tick]) -> f64 {
     ticks.iter().filter_map(|t| t.cost_usd).sum()
 }
 
+/// 这个目标**一辈子**花了多少：账本里现有的 tick + 已被 `compact` 归档走的那些。
+///
+/// 预算闸和所有显示花费的地方都必须走这一个函数。只数现有 tick 的话，一次
+/// `zloop compact` 就把 `max_total_usd`（「这个目标一共只准花这么多」）悄悄改成
+/// 「最近 keep_days 天只准花这么多」——而且没有任何痕迹（A-18）。
+pub fn spent_total(state: &State) -> f64 {
+    spent_usd(&state.ticks) + state.archived.cost_usd
+}
+
 pub fn window_ticks<'a>(state: &'a State, at: DateTime<FixedOffset>) -> Vec<&'a Tick> {
     let since = at - Duration::hours(state.policy.window_hours);
     state
@@ -331,7 +340,7 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
     if fail_streak(state) >= policy.max_fail_streak {
         return Decision::stop("fail_streak");
     }
-    if policy.max_total_usd > 0.0 && spent_usd(ticks) >= policy.max_total_usd {
+    if policy.max_total_usd > 0.0 && spent_total(state) >= policy.max_total_usd {
         return Decision::stop("budget");
     }
     let candidate = &state.todos[runnable[0]];

@@ -1229,7 +1229,7 @@ A-16 只是一个样本。这一轮把问题反过来问：**runner 的判断一
 | `feedback` | **`feedback` tick** | 4 5 **9 10** | 9 与 4 已在 A-17 修掉；**5（`progress_streak`）和 10 未修** → A-19 |
 | `replan --apply` | `replan` tick、换 todo | 2 **9** | 对 streak 透明是有意的；9 已在 A-17 修掉 |
 | `pause` / `resume` | `goal.status` | 1 | 有意 |
-| `compact` | **删 todo + 删 tick** | 4 5 **7** 8 | → A-18 |
+| `compact` | **删 todo + 删 tick** | 4 5 **7** 8 | → A-18；7（花费）已修，且现在也被 `ensure_idle` 挡住 |
 | `goal new/switch/rm` | 换掉整个 `state.json` | 全部 | 已被 `goals::ensure_idle` 挡住（runner 在跑就拒绝，除非 `--force`） |
 | `reflect --apply` / `remember` | 只写 `NOTES.md` | — | 不碰账本 |
 | `status` `stats` `context` `log` `doc` `doctor` `sessions` `next --peek` `replan`（不带 `--apply`）`hook-stop` | 只读 | — | 不碰账本 |
@@ -1335,7 +1335,7 @@ A/B 实测（`scripts/repro-a17-interactive-write-masks-a-failed-round.sh`），
 → 这两条就是第 11 节的 **A-20 / A-21**，都已复现并修掉（「`edit` 意味着计划真的动了」
 只在改的**正是当事那条 todo** 时成立——改别的 todo 时计划动的不是这条活）。
 
-### A-18（中）`zloop compact` 把花费一起归档走，`max_total_usd` 静默复位
+### A-18（中）`zloop compact` 把花费一起归档走，`max_total_usd` 静默复位 — 已修
 
 A-16 / A-17 是交互式命令**写进**账本串了调度，这条是**从账本里删掉**东西串了调度。
 runner 读的所有累计量（第 4 / 5 / 7 / 8 项）都是从 `ticks` 现算的，
@@ -1367,9 +1367,40 @@ runner 读的所有累计量（第 4 / 5 / 7 / 8 项）都是从 `ticks` 现算�
 （同一时刻 `zloop goal new` 会被拒——`zloop: runner 正在跑（pid …）：换目标会让它中途换活`）。
 两条命令动的都是 runner 下一轮要读的账，闸只装了一条。
 
-修的方向：把已归档的花费/轮次留一个汇总在 `state.json` 里（例如
-`policy.spent_before_compact`），`spent_usd` 加上它；或者 compact 时显式提示
-「这次整理让已记录花费从 $X 降到 $Y，预算闸会跟着放开」，让人自己决定。
+**修法**（两半，缺一半都不算修完）：
+
+1. **账不跟着 tick 走**。`state.json` 多一个 `archived`（`state.rs`，
+   `{ticks, cost_usd, at}`，空的时候不落盘），`compact` 搬走多少花费就往里记多少；
+   新的 `tick::spent_total(state)` = 现有 tick 之和 + `archived.cost_usd`，
+   预算闸（`tick.rs:decide`）和四个显示花费的地方（`status` / `context` / `stats` /
+   `start` 的预检说明）全部改走它。`spent_usd(ticks)` 原样留着——它答的是
+   「**这些 tick** 花了多少」，是另一个问题。
+2. **整理这件事本身要被挡一下**。`compact` 删 tick = 改 `fail_streak` /
+   `progress_streak` / 花费 / 配额窗口这四道闸的输入，和 `goal switch` 同一类，
+   所以走同一个 `goals::ensure_idle`（runner 在跑、或有轮次没写回就拒绝，`--force` 放行）。
+   `ensure_idle` 顺带加了个 `why` 参数：拒绝的时候得说清楚是"换目标会让它中途换活"
+   还是"整理账本会动它正在读的轮次记录"。
+
+外加一行痕迹：带走了钱就在输出里说出来
+（`归档里带走 $9.50 花费，已记进累计账（累计 $9.50）：policy.max_total_usd 不受整理影响`）。
+
+```
+$ sh scripts/repro-a18-compact-resets-budget-cap.sh
+  === 整理之后 ===
+    should_run=False reason=budget
+     ⛔ 已停   跑了 0 轮 · 花了 $9.50（上限 $5.00）      ← 轮次归档走了，钱没有
+  [OK] 整理不再抹掉花费：预算闸还在
+```
+
+| 测试 | 盯住的是 | 撤掉修复之后 |
+|---|---|---|
+| `cli_test::compacting_the_ledger_does_not_disarm_the_budget_cap` | 撞到上限的目标整理一次之后：`next --peek` 仍是 `budget`、`start` 仍拒绝、`status` 仍显示 $9.50；整理两次不会把同一笔钱记两遍 | `整理之后预算闸没了：… "reason": "ready"` |
+| `cli_test::compacting_is_refused_while_the_runner_is_running` | runner 在跑 / 有轮次没写回时 `compact` 被拒且不动账本，`--force` 才放行 | `runner 跑着还让整理：compacted 1 todos and 1 ticks → …` |
+
+**没顺手改的**：`rounds`（「跑了几轮」）照旧只数现有 tick，整理之后会掉下来——
+`status` 和 `stats` 共用同一个 `tick::rounds`，两处一起改才不会自相矛盾，而
+`stats` 的返工率是 `rework/rounds`，分母加了归档、分子没加就成了另一个数。
+它不是停机闸（没有哪道闸读 `rounds`），留给一条单独的活。
 
 ### A-19（中高）人留一句反馈，下一轮无头 runner 就 `--resume` 进人的对话里 — 已修
 
@@ -1570,4 +1601,6 @@ A/B 实测（假宿主每轮都 `zloop done t1 --outcome progress`，`max_progre
 A-19（`pick_session` 认错会话）跟 streak 无关，但归到同一句话下面：它串的不是停机判断，
 是「这一轮 `--resume` 谁」，判据换成同一个 `tick::is_writeback` 就修好了——
 **人写的 tick 不是宿主跑过的一轮**，三条 streak 和会话谱系都按这一句办。
-这一类剩下没修的只有 A-18（`compact` 抹掉花费），在第 10 节。
+A-18（`compact` 抹掉花费）是这一类的另一头——**从账本里删东西**同样串了调度，
+它的修法也就成了另一句话：**归档只该让账本变小，不该让账变少**（累计花费单独存一份），
+而且**动账本的命令要和 `goal switch` 走同一道闸**（`ensure_idle`）。这一类到此全部修完。
