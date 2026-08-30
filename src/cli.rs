@@ -937,10 +937,11 @@ fn cmd_done(
     let evidence = doc.evidence.clone();
     let note = note.unwrap_or_default();
     let result = state::transaction(path, |st| {
-        let (mut tick_rec, idx) = match tick::apply_done(st, id, outcome, &note, block.as_deref(), next.as_deref(), &who) {
-            Ok(v) => v,
-            Err(e) => return Ok(Err(e)),
-        };
+        let tick::Written { tick: mut tick_rec, idx, kept_status } =
+            match tick::apply_done(st, id, outcome, &note, block.as_deref(), next.as_deref(), &who) {
+                Ok(v) => v,
+                Err(e) => return Ok(Err(e)),
+            };
         let todo_snapshot = st.todos[idx].clone();
         let rel = log::write(root, st, &tick_rec, &todo_snapshot, &doc)?;
         // Only a finished todo owes a technical document; progress / fail / block rounds are exempt,
@@ -959,9 +960,9 @@ fn cmd_done(
         tick_rec.rethink = rethink;
         st.in_progress = None; // the round is written back; phase goes back to idle/stopped
         let d = tick::decide(st, state::now());
-        Ok(Ok((tick_rec, d, todo::remaining(st), todo_snapshot.acceptance.clone())))
+        Ok(Ok((tick_rec, d, todo::remaining(st), todo_snapshot.acceptance.clone(), kept_status)))
     })?;
-    let (tick_rec, decision, remaining, acceptance) = match result {
+    let (tick_rec, decision, remaining, acceptance, kept_status) = match result {
         Ok(v) => v,
         Err(e) => {
             eprintln!("done: {e}");
@@ -970,6 +971,12 @@ fn cmd_done(
     };
     let note = if tick_rec.note.is_empty() { String::new() } else { format!(": {}", tick_rec.note) };
     println!("{id} {}{}", tick_rec.outcome, note);
+    // 这一轮收掉了，但状态是人早就判好的——说出来，别让人以为自己刚把 deferred 改成了 done。
+    if let Some(kept) = &kept_status {
+        println!(
+            "hint: {id} 早就是 {kept} 了：这一轮只记了账、清掉派活，状态没动（要接着做先 zloop edit {id} --status open）"
+        );
+    }
     if let (Some(a), true, None) = (&acceptance, tick_rec.outcome == "done", evidence.as_deref()) {
         println!("hint: {id} 有验收标准但这次 done 没带 --evidence —— 验收：{a}");
     }
@@ -2355,10 +2362,10 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<
     }
     if let Some(id) = &c.in_flight {
         println!("  ⏸ 留下 {id} 没搬：还有一轮正拿着它没写回（--force 也不搬）");
-        // 出口只给真的能用的那条：这条 todo 必然已经了结（`old_ids` 只收终态），
-        // 而 `zloop done` 对终态的 todo 退 2「is already done/deferred」——
-        // `ensure_idle` 印的两条出口在这个状态下只有 `--status open` 那条走得通。
-        println!("  ↳ 先让那一轮收尾：zloop edit {id} --status open 放回去，再 zloop done {id} …");
+        // 这条 todo 必然已经了结（`old_ids` 只收终态）。T42 之前 `zloop done` 在这个状态下
+        // 退 2「is already done/deferred」，所以这里得绕一圈 `--status open` 先把它放回去；
+        // 现在 `done` 自己收得了尾（状态不改），出口就只剩一条命令。
+        println!("  ↳ 先让那一轮收尾：zloop done {id} --note \"<一句话结果>\" --approach \"<怎么做的>\"（{id} 已了结，状态不会被改回去）");
     }
     Ok(0)
 }

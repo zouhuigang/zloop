@@ -95,6 +95,15 @@ pub fn reason_zh(r: &str) -> String {
     }
 }
 
+/// 终态的两种说法，和 `status` 那张表用的是同一组词（`cli.rs` 的 `⏭ 已延后` / `✓ 完成`）。
+fn zh_status(status: &str) -> &str {
+    match status {
+        "deferred" => "延后",
+        "done" => "完成",
+        other => other,
+    }
+}
+
 pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase {
     if let Some(ip) = &state.in_progress {
         let host = ip.host.as_deref().unwrap_or("cli");
@@ -112,25 +121,39 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
         } else {
             format!(" ⚠ 超过 {}m 没动静", state.policy.stale_after_min)
         };
+        // 派活指着一条已经了结的 todo（`edit --status deferred/done` 不碰 `in_progress`）：
+        // 不说这一句，`zloop status` 会在同一屏上一边把 t1 印成「⏭ 已延后」、一边说
+        // 「claude 正在做 t1」——两块屏对同一份 state 说相反的话（T42）。
+        let settled =
+            state.todos.iter().find(|t| t.id == ip.todo).map(|t| t.status.as_str()).filter(|s| crate::todo::is_terminal(s));
+        let (settled_long, settled_short) = match settled {
+            Some(s) => (
+                format!(" ⚠ already {s}; write-back only clears the hand-out"),
+                format!(" ⚠ 已经{}了，写回只清派活", zh_status(s)),
+            ),
+            None => (String::new(), String::new()),
+        };
         return Phase {
             kind: "executing",
             summary: format!(
-                "executing {} · round {} · since {} ({} ago) · host {} · via {}{}",
+                "executing {} · round {} · since {} ({} ago) · host {} · via {}{}{}",
                 ip.todo,
                 ip.round,
                 when(&ip.started_at, now),
                 elapsed(&ip.started_at, now),
                 host,
                 ip.via,
-                stale
+                stale,
+                settled_long
             ),
             detail: format!(
-                "{} 正在做 {} · 第 {} 轮 · 已跑 {}{}",
+                "{} 正在做 {} · 第 {} 轮 · 已跑 {}{}{}",
                 host,
                 ip.todo,
                 ip.round,
                 elapsed(&ip.started_at, now),
-                stale_short
+                stale_short,
+                settled_short
             ),
         };
     }

@@ -2149,3 +2149,79 @@ nothing compacted：到期的 1 条都留下了，还在清单里
 `cargo test` 187 全过（原 185）。三处老的 compact 测试一个字没改——它们用的场景里
 四道闸都不响（backdate 时把 tick 一起改老了、`--keep-days 0` 下秒级截断的时间戳严格早于
 `cutoff`），说明新增的闸没有顺手改掉正常整理的行为。
+
+## 17. 第十五轮：T42（中高）派活指着一条已了结的 todo 时，四处出口一起坏 — 已修
+
+§16.3 那句「入口不同、影响面更大，单独排一条」就是这一条。
+
+### 17.1 造这个状态不需要 `--force`，也不需要手改文件
+
+两步都在最普通的用法里：`zloop next` 派出 t1，人看了一眼判它不做了 →
+`zloop edit t1 --status deferred`。`cmd_edit` 从头到尾不碰 `in_progress`（`cli.rs:1037-1111`），
+于是派活指针留在一条 `deferred` 的 todo 上。**这是「派出去之后人改主意」，不是异常路径**——
+T40-② 需要 `--force` 才走得到，这一条一道闸都不响。
+
+### 17.2 四处出口同时失效（实测，修复前）
+
+| 出口 | 印的 / 做的 | 实际 |
+|---|---|---|
+| `zloop done t1 …` | `status` 的「写回」那一行、`next --json` 的 `writeback`、runner 每轮塞给模型的写回指令 | 💥 exit 2 `done: t1 is already deferred` |
+| `goals::ensure_idle`（`compact` / `goal new` / `goal switch` 共用） | 「有会话正拿着 t1 第 1 轮还没写回：先 `zloop done t1` 收尾」 | 指的正是上面那条退 2 的命令 |
+| `zloop status` | 同一屏上「清单 t1 ⏭ 已延后」+「阶段 claude 正在做 t1 · 第 1 轮」 | 两块屏对同一份 state 说相反的话 |
+| `zloop doctor` | — | 一声不吭 exit 0「没发现问题」 |
+
+最狠的是第一条落在**无头轮次**上：runner 每轮的收尾指令写死是「本轮结束前必须执行写回命令
+`zloop done <id> …`」，模型手里只有这一条命令，而它保证失败。第四条是老熟人——A-7 同一个形状：
+三条命令被拦下，唯一负责回答「哪儿不对」的那个没话说。
+
+### 17.3 修法：让 `done` 收得了尾，且**不改状态**
+
+两个候选：把出口全改成 `edit --status open`，或者让 `done` 在这个状态下能收尾。选后者，
+因为前者是**劝人撤销自己刚做的决定**（把 deferred 改回 open 再 done），而且要在三处分别
+判一次状态。
+
+`tick::apply_done` 的终态闸从「一律拒绝」收窄成「**`in_progress` 不指着它才拒绝**」：
+
+```rust
+let settled = todo::is_terminal(&status) && state.in_progress.as_ref().is_some_and(|ip| ip.todo == id);
+if todo::is_terminal(&status) && !settled { bail!("{id} is already {status}"); }
+```
+
+`settled` 为真时四个分支（block / done / progress / fail）**全部跳过对 todo 的写**——
+状态、note、`blocked_by` 一个字都不动，只 `record` 这一轮的 tick，再由 `cmd_done` 清掉
+`in_progress`。把 `deferred` 写成 `done` 才是 §15.3 说的那条「假的完成」：人判过的东西
+不该被一次机械的写回覆盖回去。
+
+「为什么状态没动」是**结构化字段**不是回显自己判的：`apply_done` 返回
+`Written { tick, idx, kept_status }`，`kept_status: Option<String>` 就是那条终态；
+`cmd_done` 只渲染它。（§16 的教训：判断和回显分成两处写，回显迟早替一个不存在的行为背书。）
+
+配套的三处：
+
+- `ensure_idle` 点出状态并只给一条出口：`t1 已经 deferred 了，但第 1 轮的派活还挂在它上面：
+  先 zloop done t1 … 收尾（状态不会被改回去），或加 --force`。不再劝 `--status open`。
+- `phase::compute` 在 `executing` 这一行后面接一句 `⚠ 已经延后了，写回只清派活`
+  （`summary` 里是 `⚠ already deferred; write-back only clears the hand-out`）。
+  改在 `phase` 而不是 `status`：`status` / `context` / `next --json` 读的是同一个函数。
+- `doctor` 新增 `settled_in_progress`（warn）：`第 1 轮派出去的 t1 已经是 deferred 了，
+  派活指针还挂在它上面` → 修法给的是现在真能敲的那条 `zloop done t1 …`。
+  判 warn 不判 err：一条正常的 `done` 就收得掉，循环也照跑（下一次 `next` 会重新派活、
+  顺手盖掉这个指针）。
+- `compact` 的 in-flight 提示（§16.3 那个两步走）收敛成一条命令。
+
+### 17.4 闸只对在飞的那条开
+
+`in_progress` 不指着它时一切照旧退 2 —— 三种情形实测：写回之后再 `done` 一次
+（`done` 自己把指针清了）、在飞的是 t2 却去 `done t1`、从没派过活的 todo。
+`done_twice_is_rejected`（`tick_test`）和 `done_errors`（`cli_test`）一个字没改，全过。
+
+### 17.5 回归测试
+
+| 测试 | 钉住什么 | 撤掉后 |
+|---|---|---|
+| `cli_test::writing_back_a_round_whose_todo_was_already_settled` | ① `doctor --json` 里有 `settled_in_progress` 且 `fix` 给的是 `zloop done t1`；② `status` 同屏上「已延后」和「正在做 t1」被一句话接上；③ `ensure_idle` 点名 `t1 已经 deferred 了`、不再劝 `--status open`；④ `done` 退 0、印「状态没动」、`in_progress` 清掉、**t1 仍是 deferred**、tick 照记；收尾后 doctor 干净、闸放行 | 把 `settled` 写死成 `false` → `panicked … 写回得收得了尾：done: t1 is already deferred / left: 2 right: 0` |
+| `cli_test::done_twice_is_still_rejected_when_nothing_is_in_flight` | 闸只对在飞的那条开：写回之后再 `done`、在飞的是 t2 时 `done t1`，都退 2 `already done` | 把 `settled` 放宽成 `is_terminal(&status)` → 两处都退 0，重复写回 |
+
+`cargo test` 189 全过（原 187）。`compact_leaves_the_round_that_is_still_in_flight`
+改了两行——它原来断言的出口是 `zloop edit t1 --status open`（当时 `done` 走不通），
+现在断言 `zloop done t1` 并直接敲它。

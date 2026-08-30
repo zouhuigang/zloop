@@ -1643,9 +1643,9 @@ fn compact_leaves_the_round_that_is_still_in_flight() {
     assert!(o.out.contains("留下 t1 没搬"), "留下了就要说：{}", o.out);
     assert!(o.out.contains("--force 也不搬"), "要说清 --force 也不管用：{}", o.out);
     assert!(state::load(&p).unwrap().todos.iter().any(|t| t.id == "t1"), "t1 得留在清单里");
-    // 回显给的出口得真的能用（`zloop done t1` 对终态的 todo 本来就退 2，所以不给那条）
-    assert!(o.out.contains("zloop edit t1 --status open"), "欠一个出口：{}", o.out);
-    assert_eq!(zloop(d, &["edit", "t1", "--status", "open"], None, &[]).code, 0);
+    // 回显给的出口得真的能用。T42 之前这里只能给 `edit --status open`（`done` 对终态的 todo
+    // 退 2），现在 `done` 自己收得了尾，出口就收敛成一条命令——不再劝人撤销刚做的延后。
+    assert!(o.out.contains("zloop done t1"), "欠一个出口：{}", o.out);
     let o = zloop(d, &["done", "t1", "--note", "收尾", "--no-doc"], None, &[]);
     assert_eq!(o.code, 0, "修复前这里是 exit 2 unknown todo id：{}{}", o.out, o.err);
     assert!(state::load(&p).unwrap().in_progress.is_none(), "收尾之后 in_progress 该清掉");
@@ -1653,6 +1653,92 @@ fn compact_leaves_the_round_that_is_still_in_flight() {
     let o = zloop(d, &["compact", "--keep-days", "0"], None, &[]);
     assert!(o.out.contains("compacted 1 todos"), "写回之后就该搬走：{}", o.out);
     assert!(!o.out.contains("留下"), "{}", o.out);
+}
+
+/// T42：派活指着一条**已经了结**的 todo 时，四处出口印的那条写回命令得真的能敲。
+///
+/// 造这个状态不需要 `--force`、不需要手改文件，两步都在正常用法里：`zloop next` 派出 t1，
+/// 人看了一眼判它不做了 → `zloop edit t1 --status deferred`（`edit` 从头到尾不碰
+/// `in_progress`）。这是最普通的「派出去之后人改主意」。
+///
+/// 修复前四处一起坏：
+/// - `zloop done t1 …`（`status` 的「写回」那一行、runner 每轮塞给模型的写回指令）→ exit 2
+///   `done: t1 is already deferred`——**一条保证失败的命令**，而无头轮次里模型只有它可敲；
+/// - `ensure_idle`（`compact` / `goal new` / `goal switch` 共用）说「有会话正拿着 t1 还没
+///   写回：先 `zloop done t1` 收尾」，指的正是上面那条退 2 的命令；
+/// - `zloop status` 同一屏上一边把 t1 印成「⏭ 已延后」、一边说「claude 正在做 t1」；
+/// - `zloop doctor` 一声不吭退 0——三条命令被拦下，唯一负责回答「哪儿不对」的那个没话说。
+///
+/// 修法是让 `done` 在这个状态下收得了尾，且**不改状态**：人判过的不该被一次机械的写回
+/// 覆盖回去（把 `deferred` 写成 `done` 才是那条「假的完成」）。
+#[test]
+fn writing_back_a_round_whose_todo_was_already_settled() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let p = state::state_path(d);
+    zloop(d, &["init", "alpha"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 一", "--add", "[P1] 二"], None, &[]);
+    zloop(d, &["next"], None, &[]);
+    zloop(d, &["edit", "t1", "--status", "deferred"], None, &[]);
+    assert_eq!(state::load(&p).unwrap().in_progress.unwrap().todo, "t1", "前提：edit 不碰 in_progress");
+
+    // ① doctor 得先开口：这一步以前是「没发现问题」
+    let o = zloop(d, &["doctor", "--json"], None, &[]);
+    let rep: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    let kinds: Vec<&str> = rep["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap()).collect();
+    assert!(kinds.contains(&"settled_in_progress"), "doctor 该说这一句：{}", o.out);
+    let fix = rep["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "settled_in_progress").unwrap()["fix"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(fix.contains("zloop done t1"), "修法得给能敲的那条：{fix}");
+
+    // ② status 不再自相矛盾：同一屏上「已延后」和「正在做 t1」得有一句话把它们接上
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("已延后") && o.out.contains("正在做 t1"), "前提：两行都在 {}", o.out);
+    assert!(o.out.contains("已经延后了，写回只清派活"), "两行得接上：{}", o.out);
+    assert!(o.out.contains("zloop done t1"), "写回那一行照旧给 done：{}", o.out);
+
+    // ③ ensure_idle 的报错要点出状态，且不再劝人撤销刚做的延后
+    let o = zloop(d, &["goal", "new", "beta"], None, &[]);
+    assert_eq!(o.code, 2, "{}{}", o.out, o.err);
+    assert!(o.err.contains("t1 已经 deferred 了"), "得说清是哪种状态：{}", o.err);
+    assert!(o.err.contains("zloop done t1"), "出口还是 done：{}", o.err);
+    assert!(!o.err.contains("--status open"), "别劝人把刚延后的撤回去：{}", o.err);
+
+    // ④ 那条命令真的能敲——修复前这里是 exit 2 `done: t1 is already deferred`
+    let o = zloop(d, &["done", "t1", "--note", "收尾", "--approach", "只清派活", "--no-doc"], None, &[]);
+    assert_eq!(o.code, 0, "写回得收得了尾：{}{}", o.out, o.err);
+    assert!(o.out.contains("状态没动"), "收尾得说清楚状态没被改：{}", o.out);
+    let st = state::load(&p).unwrap();
+    assert!(st.in_progress.is_none(), "派活指针该清掉");
+    assert_eq!(st.todos[0].status, "deferred", "人判的延后不该被写回覆盖成 done");
+    assert_eq!(st.ticks.last().unwrap().outcome, "done", "这一轮照旧记进账本");
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 0);
+    assert!(!zloop(d, &["doctor"], None, &[]).out.contains("settled_in_progress"), "收尾之后不该还在报");
+    // 闸也跟着放行了
+    assert_eq!(zloop(d, &["goal", "new", "beta"], None, &[]).code, 0);
+}
+
+/// T42 的反面：`in_progress` **不**指着它时，第二次 `done` 照旧被挡——闸只对在飞的那条开。
+#[test]
+fn done_twice_is_still_rejected_when_nothing_is_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "alpha"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 一", "--add", "[P1] 二"], None, &[]);
+    // 走一遍完整的派活 → 写回：done 自己会把 in_progress 清掉
+    zloop(d, &["next"], None, &[]);
+    assert_eq!(zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]).code, 0);
+    let o = zloop(d, &["done", "t1", "--note", "再来一次", "--no-doc"], None, &[]);
+    assert_eq!(o.code, 2, "没有在飞的派活就不许重复写回：{}{}", o.out, o.err);
+    assert!(o.err.contains("already done"), "{}", o.err);
+    // 别人的派活也不算：in_progress 指着 t2，t1 依旧关着门
+    zloop(d, &["next"], None, &[]);
+    assert_eq!(state::load(&state::state_path(d)).unwrap().in_progress.unwrap().todo, "t2");
+    let o = zloop(d, &["done", "t1", "--note", "蹭一条", "--no-doc"], None, &[]);
+    assert_eq!(o.code, 2, "在飞的是 t2，t1 不该被放行：{}{}", o.out, o.err);
+    assert!(o.err.contains("already done"), "{}", o.err);
 }
 
 /// 做完 / 延后的那条不在等谁：给它印「等不到」是噪音，`⏳` 也该原样留着。

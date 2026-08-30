@@ -451,8 +451,26 @@ pub fn record(state: &mut State, outcome: &str, todo_id: Option<&str>, note: &st
     Ok(tick)
 }
 
+/// `apply_done` 的结果：这一轮记了什么、动的是哪条 todo、以及**有没有不动它的状态**。
+#[derive(Debug)]
+pub struct Written {
+    pub tick: Tick,
+    pub idx: usize,
+    /// `Some(status)` = 这条 todo 早就了结了，这次写回只收了这一轮，状态原样留着。
+    /// 回显那句「状态没动」只渲染这个字段，不再自己判一次——判断和回显共用一份数据。
+    pub kept_status: Option<String>,
+}
+
 /// The single write-back: record a tick, move the todo, optionally append a successor.
-/// Returns the tick and the index of the affected todo.
+///
+/// 一条 todo 已经是终态、而 `in_progress` 还指着它，写回**照样收得了尾**（T42）：
+/// `zloop edit --status done/deferred` 从头到尾不碰 `in_progress`（`cli.rs` 的 `cmd_edit`），
+/// 所以人一判「这条不做了」，派活指针就留在一条 `deferred` 的 todo 上。以前这时
+/// `done` 退 2「is already deferred」，而 `ensure_idle` 的报错、`status` 的写回提示、
+/// `compact` 的 in-flight 提示印的正是这条命令——三处出口一起变成**保证失败的命令**。
+///
+/// 收尾时状态**不改**：人已经判过了，写回只负责记这一轮 + 让 `cmd_done` 清掉指针。
+/// 反过来把 `deferred` 改回 `done` 就是拿一次机械的写回覆盖人的决定。
 pub fn apply_done(
     state: &mut State,
     id: &str,
@@ -461,24 +479,32 @@ pub fn apply_done(
     block: Option<&str>,
     next_text: Option<&str>,
     who: &HostSession,
-) -> Result<(Tick, usize)> {
+) -> Result<Written> {
     let idx = todo::index_of(state, id)?;
     let status = state.todos[idx].status.clone();
-    if todo::is_terminal(&status) {
+    // 闸只对**在飞的那一条**开：`in_progress` 不指着它，就还是老规矩——第二次 `done`
+    // 退 2「already done」，账目不会重复（`done_twice_is_rejected` / `done_errors`）。
+    let settled = todo::is_terminal(&status) && state.in_progress.as_ref().is_some_and(|ip| ip.todo == id);
+    if todo::is_terminal(&status) && !settled {
         bail!("{id} is already {status}");
     }
+    let kept_status = settled.then(|| status.clone());
     let tick = if let Some(question) = block {
-        todo::set_status(state, id, "blocked", Some(question))?;
-        let t = &mut state.todos[idx];
-        if !t.blocked_by.iter().any(|d| d == todo::USER) {
-            t.blocked_by.push(todo::USER.to_string());
+        if !settled {
+            todo::set_status(state, id, "blocked", Some(question))?;
+            let t = &mut state.todos[idx];
+            if !t.blocked_by.iter().any(|d| d == todo::USER) {
+                t.blocked_by.push(todo::USER.to_string());
+            }
         }
         record(state, "block", Some(id), question, who)?
     } else if outcome == "done" {
-        todo::set_status(state, id, "done", Some(note))?;
+        if !settled {
+            todo::set_status(state, id, "done", Some(note))?;
+        }
         record(state, "done", Some(id), note, who)?
     } else if outcome == "progress" || outcome == "fail" {
-        {
+        if !settled {
             let t = &mut state.todos[idx];
             if !note.is_empty() {
                 t.note = note.to_string();
@@ -501,7 +527,7 @@ pub fn apply_done(
     if todo::open_ordered(state).is_empty() && !todo::all_deferred(state) {
         state.goal.status = "done".into();
     }
-    Ok((tick, idx))
+    Ok(Written { tick, idx, kept_status })
 }
 
 // --- projection -----------------------------------------------------------

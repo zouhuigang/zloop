@@ -293,6 +293,24 @@ fn check_ledger(root: &Path, gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
                 format!("[{who}] 第 {} 轮派出去的 {} 已经不在待办里了", ip.round, ip.todo),
                 format!("`zloop done` 认不出这个 id；手工把 state.json 里的 in_progress 删掉，或 `zloop goal switch --force` 绕开{scope}"),
             ));
+        } else if let Some(t) = st.todos.iter().find(|t| t.id == ip.todo) {
+            // 2b. 派活指着一条**已经了结**的 todo（T42）。`zloop edit --status deferred/done`
+            //     从头到尾不碰 `in_progress`，所以人一判「这条不做了」，指针就留在原地。
+            //     没人报的时候它是这样咬人的：`status` 一边把它印成「⏭ 已延后」一边说
+            //     「正在做 t1」，`compact` / `goal new` / `goal switch` 全被 `ensure_idle`
+            //     拦下要 `--force`——而唯一一个专门回答「哪儿不对」的命令一声不吭地退 0。
+            //     判 warn 不判 err：一条正常的 `zloop done` 就收得掉，循环也照跑
+            //     （下一次 `zloop next` 会重新派活、顺手盖掉这个指针）。
+            if crate::todo::is_terminal(&t.status) {
+                f.push(Finding::warn(
+                    "settled_in_progress",
+                    format!("[{who}] 第 {} 轮派出去的 {} 已经是 {} 了，派活指针还挂在它上面", ip.round, ip.todo, t.status),
+                    format!(
+                        "`zloop done {} --note \"…\" --approach \"…\"` 收尾（状态不会被改回去），或 `zloop edit {} --status open` 放回去接着做{scope}",
+                        ip.todo, ip.todo
+                    ),
+                ));
+            }
         }
     }
 

@@ -222,13 +222,27 @@ pub fn ensure_idle(root: &Path, force: bool, why: &str) -> Result<()> {
     }
     if let Ok(st) = state::load(&state::state_path(root)) {
         if let Some(ip) = &st.in_progress {
-            bail!(
-                "有会话正拿着 {} 第 {} 轮还没写回：先 `zloop done {}` 收尾（或 `zloop edit {} --status open` 放回去），或加 --force",
-                ip.todo,
-                ip.round,
-                ip.todo,
-                ip.todo
-            );
+            // 指着一条**已经了结**的 todo 时，人的记忆是「我早就把 t1 延后了」，而这句话
+            // 说的是「还没写回」——不点出状态，两边对不上，人只会以为 zloop 记错了（T42）。
+            // 这时也别再劝 `--status open`：那是把人刚做的延后撤销，`done` 自己收得了尾。
+            let settled =
+                st.todos.iter().find(|t| t.id == ip.todo).map(|t| t.status.clone()).filter(|s| crate::todo::is_terminal(s));
+            match settled {
+                Some(status) => bail!(
+                    "{} 已经 {} 了，但第 {} 轮的派活还挂在它上面：先 `zloop done {} --note \"…\" --approach \"…\"` 收尾（状态不会被改回去），或加 --force",
+                    ip.todo,
+                    status,
+                    ip.round,
+                    ip.todo
+                ),
+                None => bail!(
+                    "有会话正拿着 {} 第 {} 轮还没写回：先 `zloop done {}` 收尾（或 `zloop edit {} --status open` 放回去），或加 --force",
+                    ip.todo,
+                    ip.round,
+                    ip.todo,
+                    ip.todo
+                ),
+            }
         }
     }
     Ok(())
