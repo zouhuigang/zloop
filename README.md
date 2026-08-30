@@ -1147,7 +1147,7 @@ goal is now active
 
 | 数字 | 怎么算的 |
 |---|---|
-| 轮次 | `done` + `progress` + `fail` 的 tick 数（`block` / `noop` / `edit` / `feedback` / `reflect` / `replan` 都不算）；`zloop status` 标题上的「跑了 N 轮」用的是同一个定义 |
+| 轮次 | `done` + `progress` + `fail` 的 tick 数（`block` / `noop` / `edit` / `feedback` / `reflect` / `replan` 都不算）；`zloop status` 标题上的「跑了 N 轮」用的是同一个定义。被 [`compact`](#zloop-compact) 归档走的轮次**也算**——这是目标一辈子的数，整理账本不会让它掉下去 |
 | 返工 | `progress` + `fail` 的轮数；括号里是它占轮次的比例 |
 | 一次过 | 一轮做完、中间没返工过的 todo 数 ÷ 已完成的 todo 数 |
 | 无文档 | `documented == false` 的轮次（`zloop log` 里带 ⚠ 的那些） |
@@ -1556,9 +1556,17 @@ compacted 1 todos and 1 ticks → .zloop/archive/compact-….json
 todo 没有命令能捡回来**，唯一的出路是把 t2 的依赖断开，连"它当初依赖谁"也一起丢。
 留下不是永久钉住：等的人一做完或一了结，下一次 `compact` 自然会带上它。
 
-**账不跟着 tick 走**：搬走的 tick 上记的花费会累加进 `state.json` 的 `archived.cost_usd`，
-`policy.max_total_usd`（这个目标一共只准花这么多）照旧按**累计**算——整理账本不是提额，
-带走了钱它会在输出里说一声。同理，`compact` 改的是 runner 下一轮要读的轮次记录，
+**账不跟着 tick 走**：搬走的 tick 会在 `state.json` 的 `archived` 里留下一份汇总——花费
+（`cost_usd`）、按结果分的轮数（`outcomes`）、无文档轮数、宿主耗时。所以整理**不会**让
+这些数掉下去：`policy.max_total_usd`（这个目标一共只准花这么多）照旧按累计算，
+`zloop status` 的「跑了 N 轮」、`zloop stats` 的轮次/返工率、`zloop replan` 的返工信号
+也都还是这个目标**一辈子**的数——整理账本不是重新开始。带走了钱它会在输出里说一声，
+`zloop stats` 会多印一行「归档」说明清单为什么比轮数短。
+
+只有**从 todo 数出来**的两个数会跟着清单缩短：`status` 的进度条百分比，和 `stats` 的
+「一次过 X/Y 条」。整理走的 todo 连 id 都不在了，这两处只讲还在清单里的那些。
+
+同理，`compact` 改的是 runner 下一轮要读的轮次记录，
 所以和 `zloop goal switch` 一样：runner 在跑、或有轮次没写回的时候会拒绝，`--force` 放行。
 
 #### 看情况

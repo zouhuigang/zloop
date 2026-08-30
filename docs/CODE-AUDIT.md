@@ -2466,3 +2466,116 @@ pid 也不是屏障：macOS pid 顺序递增、`ps` 看得见，提前把候选�
 它要么弹密码、要么就真的动这台机器的 `/etc/sudoers.d/`，都不是审查该做的事。这一步涉及的
 只有「root 去读一个属主是本人的 0600 文件」——root 不受权限位约束，且**修前修后它读的都是
 同一个临时目录底下的文件**，这一层没有变化。真正变了的是那条路径别人还占不占得住名字。
+
+## 20. 第十八轮：T29 —— `compact` 搬走的不只是花费，还有「这个目标跑了多久」
+
+### T29（中）一次例行整理，把 `status` / `stats` / `replan` / 轮次编号四处读数一起清零 — 已修
+
+A-18（§见前）修的是**花费**：`compact` 把老 todo 名下的 tick 搬进 `archive/`，而钱记在
+tick 上，于是预算闸被静默复位。当时的修法是给 `Archived` 加一个 `cost_usd` 累计，
+`tick::spent_total` 把它加回来。
+
+问题在于：**花费只是第一个被搬走的累计量，不是唯一一个**。`state.ticks` 同时还是
+「跑了几轮」「返工几轮」「失败几次」「无文档几轮」「宿主累计多久」「现在是第几轮」
+的唯一数据源，而这些数全是**现算**的。搬走 tick，它们一起掉下去。
+
+### 20.1 复现（`sh scripts/repro-t29-compact-drops-round-count.sh`，修之前退 1）
+
+一个跑了 4 轮（done / progress / fail / done）、完成过 2 条 todo、返工率 50% 的目标，
+把前两条 todo 和它们的 tick 做旧到一个月前，然后跑一次**默认参数之外什么都没做**的整理：
+
+```
+=== 整理之前 ===
+  status    ▶  就绪      ██████████░░░░░░ 66%  跑了 4 轮
+  next    round = 3
+  stats   轮次    4 轮 · 返工 2（50%）· 失败 1
+  replan  [rework] 返工率 50%（最费劲的是 t2）
+
+=== 人做了一次例行整理：zloop compact --keep-days 30 ===
+  compacted 2 todos and 4 ticks → …/.zloop/archive/compact-….json
+
+=== 整理之后 ===
+  status    ▶  就绪      ░░░░░░░░░░░░░░░░ 0%  跑了 0 轮
+  next    round = 0
+  stats   还没有跑过任何一轮 · zloop next 开始
+  replan  （没有返工信号：重估不会被触发了）
+```
+
+四处读数，坏法各不相同：
+
+| 读数 | 坏成什么样 | 为什么这不只是好看不好看 |
+|---|---|---|
+| `status`「跑了 N 轮」 | 4 → 0 | 交接包和 `status` 是人判断「这轮循环干了多少」的唯一入口 |
+| `stats` | **整页消失**：`rounds == 0` 时它印一句「还没有跑过任何一轮 · zloop next 开始」就 `return` | 跑了 4 轮、完成过 2 条的目标被劝去「开始跑第一轮」 |
+| `replan` 的 rework 信号 | 熄火（阈值是 `rounds >= 3 && rate >= 0.5`） | 这是**自动重估**的触发条件之一，不是显示——一次整理等于把这条闸拆了 |
+| 轮次**编号**（`tick.round` / 交接包的 `round N`） | 3 → 0，下一条 tick 又从 1 开始 | 编号不是余额，它只该增：归档里已经有 `round 1`，现在账本里又有一条 |
+
+`stats` 那一处最值得单说：它不是数字小了，是**整页不见了**——`rounds == 0` 的早退分支
+本来是给「刚 init 完还没跑」准备的，而 compact 把一个跑了很久的目标伪装成了那个状态。
+「一轮都没跑过」和「跑过的都被整理走了」是两回事，只有前者该劝人去 `zloop next`。
+
+### 20.2 修法：记的不是「几轮」，是**按 outcome 分的计数**
+
+顺着 A-18 再加一个 `archived.rounds` 是能把这一条摁下去的，但那是在等下一个字段被发现。
+根因是「`compact` 搬走了 ticks，而所有累计量都从 ticks 现算」，所以归档汇总里存的应该是
+**能重算出任何一个累计量的那份原料**：
+
+```rust
+pub struct Archived {
+    pub ticks: usize,                              // 总条数（A-18 就有）
+    pub outcomes: BTreeMap<String, usize>,         // 新：按 outcome 分的条数
+    pub undocumented: usize,                       // 新
+    pub duration_ms: u64,                          // 新
+    pub cost_usd: f64,                             // A-18
+    pub at: Option<String>,
+}
+```
+
+`Archived::rounds()` 从 `outcomes` 里按 `tick::COUNTED`（done/progress/fail）求和——
+和 `tick::rounds` **共用同一个定义**，不再手写第二遍。读的一侧多两个函数：
+
+* `tick::rounds_total(state)` = `rounds(&state.ticks) + archived.rounds()`，`status` 和
+  `stats` 共用（和 `spent_total` 是同一件事的两个面）；
+* `tick::round_number(state)` = `current_round(&state.ticks) + 归档里的 done+progress`，
+  盖在新 tick 上、印在交接包里的那个编号，5 处调用一起换过去。
+
+`stats::compute` 里那个 `counted(o)` 闭包一处加上 `+ archived.count(o)`，
+轮次/返工/失败/被挡/反馈/回看/重估七个数一起补齐。**返工率的分子和分母必须同源**——
+只补分母（或只补分子）会让一次整理把返工率冲歪，而 `replan` 拿这个数当信号。
+
+### 20.3 口径：哪些数是「一辈子」，哪些只是「账本里还剩的」
+
+修完之后 `stats` 的表头和它下面那张 todo 清单**必然对不上**（40 轮 vs 清单里 2 条），
+因为归档走的 todo 连 id 都不在了。这不是 bug，是 compact 的本意——但不说出来，
+下一个人只能当它是 bug。所以 `stats` 多一行、`reflect` 的材料包多一句：
+
+```
+  归档    上面含整理走的 4 轮 · 4 条记录在 .zloop/archive/（清单只列账本里的）
+```
+
+**老状态文件**（T29 之前的 compact 只记了 `ticks` 和 `cost_usd`）那些轮次是真的补不回来了。
+这时 `Archived::rounds_unknown()` 为真，`stats` 说的是「老版本整理走 N 条记录，轮次没记」——
+不知道就说不知道，**不许把「不知道」印成「0 轮」**，更不许接着劝人去 `zloop next`。
+
+### 20.4 没修的那一半（说清楚，别当没看见）
+
+同一次整理还会让两个**从 todo 现算**的数掉下去，这一轮没动：
+
+* `status` 的进度条和百分比：66% → **0%**（`finished/planned` 数的是 `state.todos`）；
+* `stats` 的「一次过 X/Y 条」：Y 是 done 的 todo 数，整理走的那些不在了。
+
+它们和轮次不是同一个判断：清单缩短本来就是 compact 的目的，「还剩几步」理应只算还剩的；
+可百分比又确实在回答「这个目标做到哪儿了」。要不要把归档的 todo 数也算进分母，
+是个口径决定（还牵扯清单里「步骤 1..N」的编号），单独排一条，别混在这一轮里。
+
+### 20.5 回归测试
+
+| 测试 | 钉住什么 | 撤掉修复后 |
+|---|---|---|
+| `cli_test::compact_does_not_reset_how_many_rounds_this_goal_has_run` | 整理前后 `status`「跑了 4 轮」、`stats`「4 轮 · 返工 2（50%）· 失败 1」「无文档 2 轮」、`replan` 的「返工率 50%」全都不变；`stats --json` 的 rounds/rework/fails/rework_rate/archived_rounds；再整理一次不重复计数；老版本汇总走 `rounds_unknown` 那一支 | 把 `rounds_total` / `counted` 的归档项去掉 → `整理之后 status 的轮数掉了：… 0%  跑了 0 轮` |
+| `cli_test::compact_does_not_hand_out_a_round_number_twice` | 整理之后 `next --json` 的 `round` 不掉、`in_progress.round` 接着数、新 tick 的编号不撞归档里用过的 | 把 `round_number` 换回 `current_round` → `整理之后编号掉回去了：{… "round":0 … "phase":"executing t3 · round 1 …"}` |
+| `scripts/repro-t29-compact-drops-round-count.sh` | 四处读数一起看（status / next 的 round / stats / replan 信号） | 退出码 0 → 1，并印出上面 §20.1 那段「整理之后」 |
+
+`cargo test` 194 全过（原 192）。`cargo fmt --check` 干净；`cargo clippy --all-targets`
+的 4 条 warning 和 HEAD 逐条相同（`awake.rs` / `notify.rs` 的 doc 缩进、`tick.rs` 的 lifetime），
+没新增。

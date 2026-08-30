@@ -248,6 +248,15 @@ pub fn current_round(ticks: &[Tick]) -> u64 {
     ticks.iter().filter(|t| t.outcome == "done" || t.outcome == "progress").count() as u64
 }
 
+/// **第几轮**：盖在每条新 tick 上、印在交接包「round N」那一格里的那个编号。
+///
+/// 和 `current_round` 差的就是归档走的那些（T29）。这个数必须**只增不减**：它是编号，
+/// 不是余额。只数现有 tick 的话，一次 `zloop compact` 就让它掉回去——账本里从此有两条
+/// 「round 7」，而交接包一边写「跑了 40 轮」一边写「round 1」，自己跟自己打架。
+pub fn round_number(state: &State) -> u64 {
+    current_round(&state.ticks) + (state.archived.count("done") + state.archived.count("progress")) as u64
+}
+
 /// 「跑了几轮」：干活的轮次（`COUNTED`：done / progress / fail），失败也算跑过。
 ///
 /// `status` 和 `stats` 必须共用这一个定义，否则同一份账本会报出两个数——
@@ -255,6 +264,19 @@ pub fn current_round(ticks: &[Tick]) -> u64 {
 /// reflect / replan / feedback / edit / block 都不是"跑了一轮活"，不进这个数。
 pub fn rounds(ticks: &[Tick]) -> usize {
     ticks.iter().filter(|t| COUNTED.contains(&t.outcome.as_str())).count()
+}
+
+/// 这个目标**一辈子**跑了几轮：账本里现有的 + 已被 `compact` 归档走的（T29）。
+///
+/// 和 `spent_total` 是同一件事的两个面。只数现有 tick 的话，一次例行整理就让
+/// 「跑了 N 轮」掉回去：`status` 印「跑了 0 轮 · 0%」，`zloop stats` 更狠——它在
+/// `rounds == 0` 时直接印「还没有跑过任何一轮 · zloop next 开始」然后返回，
+/// 一个跑了几十轮、完成过一半 todo 的目标被说成从没开工。
+///
+/// 凡是回答「这个目标跑得怎么样」的地方都走这一个函数；只回答「账本里还剩什么」的
+/// 地方（`stats` 的 todo 清单、`log` 的轮次列表）才用 `rounds(&state.ticks)`。
+pub fn rounds_total(state: &State) -> usize {
+    rounds(&state.ticks) + state.archived.rounds()
 }
 
 /// Total host-reported spend recorded on ticks (USD).
@@ -432,7 +454,7 @@ pub fn record(state: &mut State, outcome: &str, todo_id: Option<&str>, note: &st
     let bump = matches!(outcome, "done" | "progress") as u64;
     let tick = Tick {
         at: format_iso(&now()),
-        round: current_round(&state.ticks) + bump,
+        round: round_number(state) + bump,
         todo: todo_id.map(str::to_string),
         outcome: outcome.to_string(),
         note: note.to_string(),
@@ -550,7 +572,7 @@ pub fn to_json(decision: &Decision, state: &State) -> Value {
     let todo = decision.todo.as_ref();
     json!({
         "goal": state.goal.text,
-        "round": current_round(&state.ticks),
+        "round": round_number(state),
         "should_run": decision.should_run,
         "reason": decision.reason,
         "todo": todo.map(|t| {

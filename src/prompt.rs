@@ -75,7 +75,7 @@ pub fn render_md(state: &State, root: &Path, max_ticks: usize) -> String {
     if state.todos.is_empty() {
         out.push_str("- (none yet — run `zloop plan`)\n");
     }
-    out.push_str(&format!("\n## Recent ticks (round {})\n\n", tick::current_round(&state.ticks)));
+    out.push_str(&format!("\n## Recent ticks (round {})\n\n", tick::round_number(state)));
     let start = state.ticks.len().saturating_sub(max_ticks);
     for t in &state.ticks[start..] {
         let who = match &t.todo {

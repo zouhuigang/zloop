@@ -801,7 +801,7 @@ fn cmd_next(root: &Path, path: &Path, json: bool, peek: bool) -> Result<i32> {
                 st.in_progress = Some(state::InProgress {
                     todo: t.id.clone(),
                     started_at: state::format_iso(&now),
-                    round: tick::current_round(&st.ticks) + 1,
+                    round: tick::round_number(st) + 1,
                     via: "next".into(),
                     host: Some(who.host.as_str().to_string()),
                     session: who.session.clone(),
@@ -1452,9 +1452,10 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         "  {icon} {head}{bar}{}  {}",
         c.bold(&format!("{pct}%")),
         // 干活的轮次，失败也算 —— `tick::current_round` 只数成事的那些，
-        // 连着失败三轮之后会读成"0 轮"。和 `zloop stats` 共用 `tick::rounds` 的定义。
+        // 连着失败三轮之后会读成"0 轮"。和 `zloop stats` 共用 `tick::rounds_total` 的定义：
+        // 这个目标一辈子跑了几轮，被 `compact` 归档走的那些也算（T29）。
         // 「几条待办」交给下面的步骤清单说，标题只留轮数和花费。
-        c.dim(&format!("跑了 {} 轮{money}", tick::rounds(&st.ticks)))
+        c.dim(&format!("跑了 {} 轮{money}", tick::rounds_total(&st)))
     );
     println!("  {}    {}", c.dim("目标"), style::truncate(&st.goal.text, text.saturating_sub(8)));
 
@@ -1994,7 +1995,8 @@ fn cmd_stats(path: &Path, json: bool, c: style::Style) -> Result<i32> {
     println!();
     println!("  {}    {}", c.dim("统计"), style::truncate(&s.goal, text.saturating_sub(8)));
     println!();
-    if s.rounds == 0 {
+    // 「一轮都没跑过」和「跑过的都被整理走了」是两回事，只有前者该劝人去 `zloop next`。
+    if s.rounds == 0 && !s.archived_rounds_unknown {
         println!("  {}", c.dim("还没有跑过任何一轮 · zloop next 开始"));
         return Ok(0);
     }
@@ -2032,6 +2034,21 @@ fn cmd_stats(path: &Path, json: bool, c: style::Style) -> Result<i32> {
                 r.rework,
                 if r.blocks > 0 { format!("、被挡 {} 次", r.blocks) } else { String::new() }
             ),
+        ));
+    }
+    // 口径：上面几行是「这个目标一辈子」，下面那张清单只有账本里还剩的 todo。
+    // 整理过的目标上这两者对不上（40 轮 vs 清单里 2 条），不说人只能当它是个 bug。
+    if s.archived_ticks > 0 {
+        rows.push((
+            "归档",
+            if s.archived_rounds_unknown {
+                format!("老版本整理走 {} 条记录，轮次没记（没算进上面的 {} 轮）", s.archived_ticks, s.rounds)
+            } else {
+                format!(
+                    "上面含整理走的 {} 轮 · {} 条记录在 .zloop/archive/（清单只列账本里的）",
+                    s.archived_rounds, s.archived_ticks
+                )
+            },
         ));
     }
     for (k, v) in &rows {
@@ -2287,8 +2304,15 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<
         st.ticks = kept_ticks;
         // 花费跟着 tick 一起走，但账不能跟着走：搬走多少就往累计里记多少，
         // `tick::spent_total` 再把它加回预算闸（A-18）。
+        // 轮次同理，而且不止轮次：`status` / `stats` / `replan` 读的每一个累计量都是从
+        // ticks 现算的，所以按 outcome 逐种记下来，一次补齐（T29）。
         let carried: f64 = gone_ticks.iter().filter_map(|t| t.cost_usd).sum();
         st.archived.ticks += gone_ticks.len();
+        for k in &gone_ticks {
+            *st.archived.outcomes.entry(k.outcome.clone()).or_default() += 1;
+        }
+        st.archived.undocumented += gone_ticks.iter().filter(|t| t.documented == Some(false)).count();
+        st.archived.duration_ms += gone_ticks.iter().filter_map(|t| t.duration_ms).sum::<u64>();
         st.archived.cost_usd += carried;
         st.archived.at = Some(state::now_iso());
         let dir = root.join(state::STATE_DIR).join("archive");

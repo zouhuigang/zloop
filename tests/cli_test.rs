@@ -887,6 +887,134 @@ fn compacting_the_ledger_does_not_disarm_the_budget_cap() {
     assert!((st.archived.cost_usd - 9.5).abs() < 1e-9, "{:?}", st.archived);
 }
 
+/// T29：A-18 修的是花费，可花费只是**第一个**被 `compact` 搬走的累计量。
+///
+/// `status` 的「跑了 N 轮」、`stats` 的轮次/返工/失败/无文档、`replan` 的返工率信号，
+/// 全都是从 `state.ticks` 现算的。整理一次账本，这些数一起掉回去：
+/// 一个跑了 4 轮、返工率 50% 的目标，`status` 印「跑了 0 轮」，`stats` 更狠——
+/// 它在 rounds==0 时直接印「还没有跑过任何一轮 · zloop next 开始」然后返回，
+/// 而 `replan` 的 rework 信号（`rounds >= 3 && rate >= 0.5`）也跟着熄火。
+/// （复现脚本：`scripts/repro-t29-compact-drops-round-count.sh`）
+#[test]
+fn compact_does_not_reset_how_many_rounds_this_goal_has_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 老活一", "--add", "[P0] 老活二", "--add", "[P1] 还没做的活"], None, &[]);
+    // 4 轮：done / progress / fail / done —— 返工 2，返工率正好压在 replan 的 0.5 上
+    zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "只做了一半", "--outcome", "progress", "--no-doc"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "挂了", "--outcome", "fail", "--no-doc"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "ok", "--no-doc"], None, &[]);
+
+    let p = state::state_path(d);
+    let old = "2026-01-01T00:00:00+08:00";
+    let mut st = state::load(&p).unwrap();
+    for t in st.todos.iter_mut().filter(|t| t.id != "t3") {
+        t.done_at = Some(old.into());
+        t.updated_at = old.into();
+    }
+    for k in st.ticks.iter_mut() {
+        k.at = old.into();
+    }
+    state::save(&p, &mut st).unwrap();
+
+    let stats_json =
+        |d: &Path| -> serde_json::Value { serde_json::from_str(&zloop(d, &["stats", "--json"], None, &[]).out).unwrap() };
+    // 前提：整理之前这三处都看得见这 4 轮
+    assert!(zloop(d, &["status"], None, &[]).out.contains("跑了 4 轮"));
+    assert!(zloop(d, &["stats"], None, &[]).out.contains("4 轮 · 返工 2（50%）· 失败 1"));
+    assert!(zloop(d, &["replan"], None, &[]).out.contains("返工率 50%"));
+
+    let o = zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("compacted 2 todos and 4 ticks"), "{}", o.out);
+
+    // tick 搬走了，轮次没走
+    let st = state::load(&p).unwrap();
+    assert!(st.ticks.is_empty(), "tick 应该被搬走：{:?}", st.ticks);
+    assert_eq!(st.archived.rounds(), 4, "{:?}", st.archived);
+    assert_eq!(st.archived.rework(), 2, "{:?}", st.archived);
+    assert_eq!(st.archived.count("fail"), 1, "{:?}", st.archived);
+    assert_eq!(st.archived.undocumented, 2, "{:?}", st.archived);
+    assert!(!st.archived.rounds_unknown(), "记了 outcome 就不该再说'补不回来'");
+
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("跑了 4 轮"), "整理之后 status 的轮数掉了：{}", o.out);
+    let o = zloop(d, &["stats"], None, &[]);
+    assert!(o.out.contains("4 轮 · 返工 2（50%）· 失败 1"), "整理之后 stats 的轮次掉了：{}", o.out);
+    assert!(o.out.contains("无文档 2 轮"), "{}", o.out);
+    assert!(!o.out.contains("还没有跑过任何一轮"), "跑过 4 轮的目标被说成从没开工：{}", o.out);
+    // 口径要说出来：上面几行是一辈子的账，下面的清单只有账本里还剩的
+    assert!(o.out.contains("归档") && o.out.contains("整理走的 4 轮"), "没交代清单和轮数为什么对不上：{}", o.out);
+    let j = stats_json(d);
+    for (k, want) in [("rounds", 4), ("rework", 2), ("fails", 1), ("archived_rounds", 4), ("archived_ticks", 4)] {
+        assert_eq!(j[k], want, "stats --json 的 {k}：{j}");
+    }
+    assert_eq!(j["rework_rate"], 0.5, "{j}");
+    assert_eq!(j["archived_rounds_unknown"], false, "{j}");
+    // 返工率是 replan 的信号源：分子分母同源才不会被一次整理冲掉
+    assert!(zloop(d, &["replan"], None, &[]).out.contains("返工率 50%"), "整理之后 replan 的返工信号熄火了");
+
+    // 再整理一次不会把同一批轮次记两遍
+    zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert_eq!(state::load(&p).unwrap().archived.rounds(), 4);
+    assert_eq!(stats_json(d)["rounds"], 4);
+
+    // 老版本 compact 留下的账（只有 ticks / cost_usd，没有 outcomes）：轮次补不回来，
+    // 但也不许把它当成"一轮都没跑过"——那是把不知道说成了 0。
+    let mut st = state::load(&p).unwrap();
+    st.archived.outcomes.clear();
+    st.archived.undocumented = 0;
+    state::save(&p, &mut st).unwrap();
+    let o = zloop(d, &["stats"], None, &[]);
+    assert!(!o.out.contains("还没有跑过任何一轮"), "整理过的目标被劝去 zloop next：{}", o.out);
+    assert!(o.out.contains("老版本整理走 4 条记录"), "没说明轮次为什么是 0：{}", o.out);
+    assert_eq!(stats_json(d)["archived_rounds_unknown"], true);
+}
+
+/// T29 的第三处读数：**轮次编号**（盖在每条 tick 上、印在交接包「round N」那一格）。
+///
+/// 它和「跑了 N 轮」是同一个根因的另一面，但坏法不一样——编号不是余额，它只该增。
+/// 修之前 `compact` 一走，`next --json` 的 `round` 从 2 掉回 0，下一条 tick 又盖上
+/// `round 1`：归档里已经有一条 `round 1` 了，同一份账本从此有两条同号的记录，
+/// 而交接包会一边写「跑了 2 轮」一边写「round 1」，自己跟自己打架。
+#[test]
+fn compact_does_not_hand_out_a_round_number_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 老活一", "--add", "[P0] 老活二", "--add", "[P1] 新活"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "ok", "--no-doc"], None, &[]);
+
+    let p = state::state_path(d);
+    let old = "2026-01-01T00:00:00+08:00";
+    let mut st = state::load(&p).unwrap();
+    for t in st.todos.iter_mut().filter(|t| t.id != "t3") {
+        t.done_at = Some(old.into());
+        t.updated_at = old.into();
+    }
+    for k in st.ticks.iter_mut() {
+        k.at = old.into();
+    }
+    let used_before: Vec<u64> = st.ticks.iter().map(|k| k.round).collect();
+    state::save(&p, &mut st).unwrap();
+    assert_eq!(used_before, [1, 2], "前提：这两轮编号是 1、2");
+
+    assert!(zloop(d, &["compact", "--keep-days", "30"], None, &[]).out.contains("compacted 2 todos"));
+
+    let j: serde_json::Value = serde_json::from_str(&zloop(d, &["next", "--json"], None, &[]).out).unwrap();
+    assert_eq!(j["round"], 2, "整理之后编号掉回去了：{j}");
+    assert_eq!(state::load(&p).unwrap().in_progress.unwrap().round, 3, "派活写下的编号也该接着数");
+
+    zloop(d, &["done", "t3", "--note", "ok", "--no-doc"], None, &[]);
+    let st = state::load(&p).unwrap();
+    let fresh = st.ticks.last().unwrap().round;
+    assert_eq!(fresh, 3, "新 tick 的编号：{:?}", st.ticks);
+    assert!(!used_before.contains(&fresh), "编号撞上归档里已经用过的：{fresh}");
+}
+
 /// A-18 的另一半：`compact` 动的是 runner 下一轮要读的账，所以和 `goal switch` 走同一道闸。
 #[test]
 fn compacting_is_refused_while_the_runner_is_running() {

@@ -217,11 +217,28 @@ pub struct InProgress {
 /// 只准花这么多」。`compact` 把老 todo 名下的 tick 连同它们的花费一起搬进 `archive/`，
 /// 没有这份汇总，一次例行整理就是一次**静默提额**：预算闸复位成「最近 keep_days 天只准
 /// 花这么多」，而 `status` 连花过钱这件事都不再显示（A-18）。
+///
+/// 花费只是**第一个**被搬走的累计量，不是唯一一个：`status` 的「跑了 N 轮」、`stats` 的
+/// 轮次/返工/失败、`replan` 的返工率信号全都是从 `state.ticks` 现算的，搬走一次就一起
+/// 掉下来（T29）。所以这里存的不是「几条 tick」而是**按 outcome 分的计数**：
+/// 凡是「从 ticks 现算的累计量」都能从这一份汇总里补回来，不用每发现一个就加一个字段。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Archived {
     /// 累计搬走了多少条 tick（只为让人看懂这份汇总是从哪来的）。
     #[serde(default)]
     pub ticks: usize,
+    /// 搬走的那些 tick 按 `outcome` 分的条数（done / progress / fail / …）。
+    ///
+    /// **老状态文件里没有这一项**（T29 之前的 `compact` 只记 `ticks` 和 `cost_usd`）：
+    /// 那些轮次补不回来了，`stats` 会把这件事说出来，而不是把它们算成 0 轮悄悄带过。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub outcomes: std::collections::BTreeMap<String, usize>,
+    /// 搬走的那些 tick 里「完成却没留下实现思路」的条数（`stats` 的「无文档 N 轮」）。
+    #[serde(default)]
+    pub undocumented: usize,
+    /// 搬走的那些 tick 上记的宿主耗时之和（毫秒）。
+    #[serde(default)]
+    pub duration_ms: u64,
     /// 搬走的那些 tick 上记的花费之和（USD）。`tick::spent_total` 会把它加回来。
     #[serde(default)]
     pub cost_usd: f64,
@@ -235,7 +252,36 @@ pub struct Archived {
 impl Archived {
     /// 从没整理过的目标不该因为这个字段多出一段 JSON。
     pub fn is_empty(&self) -> bool {
-        self.ticks == 0 && self.cost_usd == 0.0 && self.at.is_none() && self.extra.is_empty()
+        self.ticks == 0
+            && self.outcomes.is_empty()
+            && self.undocumented == 0
+            && self.duration_ms == 0
+            && self.cost_usd == 0.0
+            && self.at.is_none()
+            && self.extra.is_empty()
+    }
+
+    /// 归档里某种 outcome 的条数。
+    pub fn count(&self, outcome: &str) -> usize {
+        self.outcomes.get(outcome).copied().unwrap_or(0)
+    }
+
+    /// 归档里「干活的轮次」（`tick::COUNTED`：done / progress / fail），和 `tick::rounds`
+    /// 同一个定义——两处必须共用，否则整理过的目标会报出两个数。
+    pub fn rounds(&self) -> usize {
+        crate::tick::COUNTED.iter().map(|o| self.count(o)).sum()
+    }
+
+    /// 归档里的返工轮数（progress + fail）。返工率的分子和分母必须同源：
+    /// 只把分母补上去，整理一次就把返工率冲淡成 0。
+    pub fn rework(&self) -> usize {
+        self.count("progress") + self.count("fail")
+    }
+
+    /// 老版本 compact 留下的汇总：搬走过 tick，却没记它们的 outcome。
+    /// 这时上面那些数只能报 0，而这**不等于**那些轮次不存在——由调用方说明白。
+    pub fn rounds_unknown(&self) -> bool {
+        self.ticks > 0 && self.outcomes.is_empty()
     }
 }
 

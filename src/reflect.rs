@@ -124,6 +124,16 @@ pub fn packet(state: &State, root: &Path, window: usize, rule_limit: usize) -> S
         s.undocumented,
         s.feedback
     ));
+    // 口径：上面那行是「这个目标一辈子」，底下的清单和日志只有账本里还剩的。
+    // 不说明，模型会拿「跑了 40 轮」去对一张只有 2 条 todo 的清单，然后开始编解释（T29）。
+    if s.archived_ticks > 0 {
+        let how = if s.archived_rounds_unknown {
+            format!("{} 条记录（老版本没记轮次，没算进上面的轮数）", s.archived_ticks)
+        } else {
+            format!("其中 {} 轮", s.archived_rounds)
+        };
+        out.push_str(&format!("（{how}已被 `zloop compact` 归档，下面的清单和日志只有还在账本里的那些）\n"));
+    }
     if let Some(r) = stats::roughest(&s) {
         out.push_str(&format!("最费劲的是 {}：返工 {} 次\n", r.id, r.rework));
     }
