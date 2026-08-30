@@ -489,3 +489,104 @@ $ zloop doctor
 - **`cargo test` 漏进程**：机器上确实躺着一个 2026-08-29 11:44 起、活了 20 小时的 runner，
   但今天完整跑了两遍 `cargo test`（132 测试全绿），临时进程都正常收掉了，**没能复现漏的那一下**。
   那个残留进程为什么至今不死，是 A-5 而不是漏进程——它自己带着 `--exit-on-wait`。
+
+---
+
+## 6. 第四轮：调度逻辑的边界
+
+全部用真命令构造，`zloop next --json` 读结果。
+
+| 场景 | 实际行为 | 判断 |
+|---|---|---|
+| 0 条 todo（刚 init） | `unplanned` + "还没有待办 · 先用 zloop plan" | ✅ |
+| 全部 deferred | `done` + "0 条待办全部完成，目标结束（另有 2 条延后）" | ⚠ B-3 |
+| 自依赖 `t1←t1` | `blocked`，"30 分钟后重试"，doctor 沉默 | ❌ A-9 |
+| 二元环 `t1←t2←t1` | 同上 | ❌ A-9 |
+| tick 时间戳在 2099 | `ready`（不撞配额时无影响） | ✅ |
+| tick 时间戳在 1970 | `ready` | ✅ |
+| tick 时间戳是乱码 | `ready`，不崩 | ✅ |
+| **tick 在未来 + 撞配额** | `throttled`，`interval_min=38048610`（72 年） | ❌ **A-11** |
+| `max_runs = -5` | 反序列化就拒绝："expected usize"，exit 1 | ✅ |
+| 五个阈值分别设 0 | 三个当"关闭"，两个当"永远触发" | ❌ A-10 |
+
+### A-11（高）时钟跳到未来 + 撞配额 = runner 睡 72 年，而 status 看着一切正常
+
+`tick.rs` 的 throttle 分支拿"窗口内最老那条 tick"算还要等多久：
+
+```rust
+let frees_in = oldest + Duration::hours(policy.window_hours) - at;
+let minutes = (frees_in.num_seconds().div_euclid(60) + 1).max(1) as u32;
+```
+
+`oldest` 要是在未来，`minutes` 就是个天文数字。**没有上限**，
+`runner.rs` 的 `secs(units, fast) = units * 60` 也不封顶。实测：
+
+```
+$ zloop start
+runner started in the background (pid 88578, host claude)
+
+journal:  {"event":"sleep","until":"2099-01-02T00:00:09+08:00","reason":"throttled"}
+$ zloop status
+  阶段    两轮之间的休息 · 睡到 00:00 醒，还有 38048608m55s
+```
+
+**两个问题叠在一起才致命**：
+
+1. 等待时间没有上限——一次时钟跳变就能让 runner 睡到下个世纪；
+2. `status` 只印 `00:00`**不印日期**，"睡到 00:00 醒"和正常的轮次间隔长得一模一样。
+   那串 `38048608m55s` 是唯一的线索，而它长得像个 ID。
+
+触发条件不需要有人手改文件：NTP 校时、改时区、虚拟机挂起恢复、笔记本电池耗尽后时钟重置，
+都会让已有的 tick 落在"未来"。**这正是"跑了一夜回来发现没进展"的一种，而且状态面板还告诉你一切正常。**
+
+修法：(a) 等待时间封顶（比如不超过 `window_hours`，本来就没有等更久的道理）；
+(b) `status` 的"睡到"跨天就带上日期；(c) 顺手在 `doctor` 里报一句"账本里有未来时间戳"。
+
+### A-9（中高）依赖成环没人拦，永久卡死且无诊断
+
+`zloop edit t1 --blocked-by t1` 直接被接受。此后：
+
+```
+zloop next   → should_run=false  reason=blocked  interval=10
+zloop status → 阶段  等依赖 · 30 分钟后重试
+zloop doctor → 没发现问题
+```
+
+**"30 分钟后重试"会一直重试下去**——依赖永远不会满足。二元环 `t1←t2`、`t2←t1` 一模一样。
+
+`doctor` 已经有一条 `dangling_blocked_by`（依赖指向不存在的 todo），但**环不在它的检查范围里**。
+
+修法：`edit --blocked-by` 拒绝自依赖；`doctor` 加一条环检测（不必挡住 edit 的多跳环，
+但至少要报出来）。
+
+### A-10（中）"0 = 关掉这个检查"只对三个阈值成立
+
+```
+max_runs > 0 &&              ← 0 = 关
+max_total_usd > 0.0 &&       ← 0 = 关
+max_progress_streak > 0 &&   ← 0 = 关
+fail_streak(ticks) >= policy.max_fail_streak      ← 没有 > 0 守卫
+noops >= policy.max_noop_streak                   ← 没有 > 0 守卫
+```
+
+实测：全新项目、**一次失败都没有**，`max_fail_streak: 0` →
+`should_run=false, reason=fail_streak, interval=None`。目标当场永久卡死。
+
+`max_noop_streak: 0` 稍隐蔽：它不改 `should_run`，但让 `exhausted` 恒真，
+于是被依赖挡住时 `interval_min` 从 30 变成 `None`（"停下等人"）而不是继续轮询。
+
+想关掉某个检查的人，按另外三个的先例写 0，得到的是相反的效果。
+
+### B-3（低）全部 deferred 时说"目标结束"
+
+`is_terminal` 把 `done` 和 `deferred` 一视同仁，所以全部延后 = 没有未完成的 = "目标结束"。
+括号里的"（另有 2 条延后）"救了它，但主句"0 条待办全部完成，目标结束"字面就是错的。
+和 `unplanned` 当初从 `all_done` 里分出来是同一类问题。
+
+### 试过但没复现的
+
+- **坏时间戳把调度器搞崩**：tick 的 `at` 换成 `not-a-time`，`decide` 照常返回 `ready`，
+  不崩也不误判（`parse_iso` 失败的那条被跳过）。
+- **负数 policy 造成下溢**：`max_runs: -5` 在反序列化阶段就被拒（"expected usize"），
+  exit 1 且信息清楚，压根进不了调度器。
+- **0 条 todo 被当成"全部完成"**：报的是 `unplanned`，措辞也对。这条以前是 bug，已经修过了。
