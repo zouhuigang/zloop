@@ -112,8 +112,10 @@ fn row_of(path: &Path, current: bool) -> Option<Row> {
         id: st.goal.id.clone(),
         text: st.goal.text.clone(),
         status: st.goal.status.clone(),
-        done: st.todos.iter().filter(|t| t.status == "done").count(),
-        total: st.todos.len(),
+        // 「做到哪儿了」是一辈子的账：`compact` 归档走的 todo 也算，否则整理过的目标
+        // 在这张表上显示成 0/1（同 `status` 的百分比，T44）。
+        done: st.todos.iter().filter(|t| t.status == "done").count() + st.archived.done(),
+        total: st.todos.len() + st.archived.todos,
         last: st.ticks.last().map(|t| t.at.clone()).unwrap_or_else(|| st.goal.created_at.clone()),
         current,
         path: path.to_path_buf(),

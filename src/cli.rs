@@ -1410,11 +1410,18 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     // 进度的分母里——否则会出现"✅ 完成 + 8 条全部完成 + 75%"这种自相矛盾的一屏。
     let deferred = st.todos.iter().filter(|t| t.status == "deferred").count();
     let planned = total - deferred;
+    // 进度条和百分比回答的是「这个目标做到哪儿了」，和同一行的「跑了 N 轮」「花了 $X」
+    // 一样是**一辈子的账**，所以 `compact` 归档走的 todo 也算（T44）。下面那张清单不一样：
+    // 它回答「还剩什么」，只列账本里还在的——两个口径同屏，靠清单那行的注脚说清楚。
+    let done_all = finished + st.archived.done();
+    let planned_all = planned + st.archived.planned();
     let later = if deferred > 0 { format!(" · {deferred} 条延后") } else { String::new() };
     let first_deferred = st.todos.iter().find(|t| t.status == "deferred").map(|t| t.id.clone());
     let (icon, word, code): (&str, &str, &str) = match () {
-        // 刚开的目标还没有待办：说"待规划"，别说"全部完成"（decide 对空清单返回 all_done）
-        _ if total == 0 => ("◦", "待规划", "34"),
+        // 刚开的目标还没有待办：说"待规划"，别说"全部完成"（decide 对空清单返回 all_done）。
+        // 「刚开的」这三个字是 `st.archived.todos == 0` 保的：一次 compact 能把干完活的目标
+        // 清空成同一副样子，而那不是待规划（同 T29 里 `stats` 的 rounds==0 早退）。
+        _ if total == 0 && st.archived.todos == 0 => ("◦", "待规划", "34"),
         _ if st.goal.status == "done" => ("✅", "完成", "32"),
         _ if st.goal.status == "paused" => ("⏸", "已暂停", "33"),
         // 一条没做完、全推到了以后：这不是"完成"，也不是"空闲"，别让它跟正常收工同一个词
@@ -1427,7 +1434,7 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         _ if d.should_run => ("▶", "就绪", "34"),
         _ => ("•", "空闲", "2"),
     };
-    let pct = (finished * 100).checked_div(planned).unwrap_or(0);
+    let pct = (done_all * 100).checked_div(planned_all).unwrap_or(0);
     let spent = tick::spent_total(&st);
     let money = if spent > 0.0 {
         let cap = if st.policy.max_total_usd > 0.0 {
@@ -1446,7 +1453,7 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         " ".repeat(10usize.saturating_sub(style::width(word)).max(1))
     );
     // The bar is the first thing to go in a narrow window; the percentage carries the same news.
-    let bar = if w >= 70 { format!("{} ", style::bar(finished, planned, 16, c)) } else { String::new() };
+    let bar = if w >= 70 { format!("{} ", style::bar(done_all, planned_all, 16, c)) } else { String::new() };
     println!();
     println!(
         "  {icon} {head}{bar}{}  {}",
@@ -1614,7 +1621,10 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
         };
 
         println!();
-        println!("  {}    {}", c.dim("清单"), c.bold(&format!("{finished}/{planned} 完成{later}")));
+        // 这一行数的是**清单里的**（下面那张表），不是上面那个百分比——整理过的目标两者
+        // 必然对不上（0/1 完成 vs 66%），所以归档条数就挂在这行末尾，底下 `归档` 那行细说。
+        let arch = if st.archived.todos > 0 { format!(" · 归档 {} 条", st.archived.todos) } else { String::new() };
+        println!("  {}    {}", c.dim("清单"), c.bold(&format!("{finished}/{planned} 完成{later}{arch}")));
         println!("  {}", rule("┌", "┬", "┐"));
         println!(
             "  {bar_ch} {}{} {bar_ch} {}{} {bar_ch} {}{} {bar_ch} {}{} {bar_ch}",
@@ -1693,7 +1703,11 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     let mut rows: Vec<(&str, String)> = Vec::new();
     // 「现在在哪一步」是用户最想要的一行，所以它常驻：phase 没有新消息时，
     // 就由状态本身兜底成一句人话，而不是让这一行消失。
-    let stage = if total == 0 {
+    let stage = if total == 0 && st.archived.todos > 0 {
+        // 整理干净的目标和刚 init 的目标在 `st.todos` 上长得一模一样，可该说的话是反的：
+        // 一个是"还没开始"，一个是"做完的都收进归档了"。
+        format!("{} 条待办全部整理归档了 · 要接着做就 zloop plan 加几条", st.archived.todos)
+    } else if total == 0 {
         "还没有待办 · 先用 zloop plan 加几条".to_string()
     } else if !ph.detail.is_empty() {
         ph.detail.clone()
@@ -1738,6 +1752,20 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
     let undocumented = st.ticks.iter().filter(|t| t.documented == Some(false)).count();
     if undocumented > 0 {
         rows.push(("文档", c.yellow(&format!("{undocumented} 轮缺实现思路 · zloop log 里带 ⚠"))));
+    }
+    // 口径就写在屏幕上：上面的百分比是「这个目标一辈子」，清单只有账本里还剩的。
+    // 不说，下一个人只能把「0/1 完成」和「66%」当成一个 bug（同 `stats` 的归档行，T29/T44）。
+    if st.archived.todos > 0 {
+        rows.push((
+            "归档",
+            c.dim(&style::truncate(
+                &format!("整理走 {} 条待办（完成 {} 条），已算进上面的 {}%", st.archived.todos, st.archived.done(), pct),
+                val,
+            )),
+        ));
+    } else if st.archived.todos_unknown() {
+        // 老版本 compact 搬走过 todo 却没记条数：补不回来就说补不回来，别让百分比替它背书。
+        rows.push(("归档", c.dim(&style::truncate("老版本整理走过待办，条数没记（没算进上面的百分比）", val))));
     }
     let parked = crate::goals::parked(root).len();
     if parked > 0 {
@@ -2038,18 +2066,23 @@ fn cmd_stats(path: &Path, json: bool, c: style::Style) -> Result<i32> {
     }
     // 口径：上面几行是「这个目标一辈子」，下面那张清单只有账本里还剩的 todo。
     // 整理过的目标上这两者对不上（40 轮 vs 清单里 2 条），不说人只能当它是个 bug。
-    if s.archived_ticks > 0 {
-        rows.push((
-            "归档",
-            if s.archived_rounds_unknown {
-                format!("老版本整理走 {} 条记录，轮次没记（没算进上面的 {} 轮）", s.archived_ticks, s.rounds)
-            } else {
-                format!(
-                    "上面含整理走的 {} 轮 · {} 条记录在 .zloop/archive/（清单只列账本里的）",
-                    s.archived_rounds, s.archived_ticks
-                )
-            },
-        ));
+    if s.archived_ticks > 0 || s.archived_todos > 0 {
+        // 轮次和 todo 两侧各自可能「没记」（老状态文件），所以分开说：把两句合成一句
+        // 「整理走 N 轮 M 条」会在只有一侧有数时印出一个假的 0（T29 的教训，T44 同理）。
+        let rounds_part = if s.archived_rounds_unknown {
+            format!("老版本整理走 {} 条记录，轮次没记（没算进上面的 {} 轮）", s.archived_ticks, s.rounds)
+        } else {
+            format!("上面含整理走的 {} 轮 · {} 条记录", s.archived_rounds, s.archived_ticks)
+        };
+        let todos_part = if s.archived_todos_unknown {
+            " · 待办条数没记".to_string()
+        } else {
+            format!(" · {} 条待办（完成 {} 条）", s.archived_todos, s.archived_done)
+        };
+        rows.push(("归档", format!("{rounds_part}{todos_part}")));
+        // 第二行不重复标签：一行装不下就换行，别让 80 列的窗口把「清单为什么对不上」截掉——
+        // 那句话正是这一行存在的理由（T29）。
+        rows.push(("", "都在 .zloop/archive/，下面的清单只列账本里还剩的".to_string()));
     }
     for (k, v) in &rows {
         println!(
@@ -2312,6 +2345,15 @@ fn cmd_compact(root: &Path, path: &Path, keep_days: i64, force: bool) -> Result<
             *st.archived.outcomes.entry(k.outcome.clone()).or_default() += 1;
         }
         st.archived.undocumented += gone_ticks.iter().filter(|t| t.documented == Some(false)).count();
+        // todo 那一侧同理：`status` 的百分比、`stats` 的「一次过 X/Y 条」是从 `state.todos`
+        // 现数的，搬走一次一起掉（T44）。「一次过」得在这里算——它要的是这条 todo 名下的
+        // 轮数，而 tick 下一行就不在账本里了。
+        st.archived.todos += gone_todos.len();
+        for t in &gone_todos {
+            *st.archived.statuses.entry(t.status.clone()).or_default() += 1;
+            let mine: Vec<&state::Tick> = gone_ticks.iter().filter(|k| k.todo.as_deref() == Some(t.id.as_str())).collect();
+            st.archived.first_try += usize::from(crate::stats::first_try(&t.status, &mine));
+        }
         st.archived.duration_ms += gone_ticks.iter().filter_map(|t| t.duration_ms).sum::<u64>();
         st.archived.cost_usd += carried;
         st.archived.at = Some(state::now_iso());

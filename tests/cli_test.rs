@@ -1015,6 +1015,144 @@ fn compact_does_not_hand_out_a_round_number_twice() {
     assert!(!used_before.contains(&fresh), "编号撞上归档里已经用过的：{fresh}");
 }
 
+/// T44：T29 修的是从 **ticks** 现算的那一族，从 **todo** 现算的这一族当时留着没动。
+///
+/// 一次例行整理之后：`status` 的进度条 66% → 0%（分子分母一起被搬走）、
+/// `stats` 的「一次过 2/2 条」→「0/0」（同一张表上面还写着「跑了 2 轮」）、
+/// `goals` 那张表里的 2/3 → 0/1。
+///
+/// 口径（这一条要定的就是它）：**百分比 / 一次过 / goals 的进度回答「这个目标做到哪儿了」**，
+/// 和同一行的「跑了 N 轮」「花了 $X」一样是一辈子的账，归档走的 todo 要算进去；
+/// **清单和「步骤 1..N」只讲账本里还剩的**——那是 compact 的本意，而且归档走的 todo
+/// 不一定是清单的前缀（compact 挑的是「了结且过期」的，中间的也会被挑走），
+/// 拿一个条数去给步骤号加偏移只会印出一个理直气壮的错号。两个口径同屏，靠 `归档` 行说明。
+/// （复现脚本：`scripts/repro-t44-compact-drops-progress-percent.sh`）
+#[test]
+fn compact_does_not_reset_how_far_this_goal_has_got() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 老活一", "--add", "[P0] 老活二", "--add", "[P1] 还没做的活"], None, &[]);
+    // t1 一次过；t2 返工过一轮才成 —— 「一次过」的分子分母得分得开
+    zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "只做了一半", "--outcome", "progress", "--no-doc"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "ok", "--no-doc"], None, &[]);
+
+    let p = state::state_path(d);
+    let old = "2026-01-01T00:00:00+08:00";
+    let mut st = state::load(&p).unwrap();
+    for t in st.todos.iter_mut().filter(|t| t.id != "t3") {
+        t.done_at = Some(old.into());
+        t.updated_at = old.into();
+    }
+    for k in st.ticks.iter_mut() {
+        k.at = old.into();
+    }
+    state::save(&p, &mut st).unwrap();
+
+    let stats_json =
+        |d: &Path| -> serde_json::Value { serde_json::from_str(&zloop(d, &["stats", "--json"], None, &[]).out).unwrap() };
+    // 前提：整理之前这三处都看得见 2/3
+    assert!(zloop(d, &["status"], None, &[]).out.contains("66%"));
+    assert!(zloop(d, &["stats"], None, &[]).out.contains("一次过 1/2 条"));
+    assert!(zloop(d, &["goals"], None, &[]).out.contains("2/3"));
+
+    let o = zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(o.out.contains("compacted 2 todos"), "{}", o.out);
+
+    // todo 搬走了，进度没走
+    let st = state::load(&p).unwrap();
+    assert_eq!(st.todos.len(), 1, "只该剩没做完的那条：{:?}", st.todos);
+    assert_eq!(st.archived.todos, 2, "{:?}", st.archived);
+    assert_eq!(st.archived.done(), 2, "{:?}", st.archived);
+    assert_eq!(st.archived.planned(), 2, "{:?}", st.archived);
+    assert_eq!(st.archived.first_try, 1, "返工过的那条不算一次过：{:?}", st.archived);
+    assert!(!st.archived.todos_unknown(), "记了条数就不该再说'补不回来'");
+
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("66%"), "整理之后 status 的百分比掉了：{}", o.out);
+    // 清单那一侧仍然只讲账本里还剩的，而且要说清楚为什么和上面的百分比对不上
+    assert!(o.out.contains("0/1 完成 · 归档 2 条"), "清单该只数账本里的、并挂上归档条数：{}", o.out);
+    assert!(o.out.contains("整理走 2 条待办（完成 2 条），已算进上面的 66%"), "没交代百分比和清单为什么对不上：{}", o.out);
+    let o = zloop(d, &["stats"], None, &[]);
+    assert!(o.out.contains("一次过 1/2 条"), "整理之后 stats 的一次过掉了：{}", o.out);
+    assert!(o.out.contains("2 条待办（完成 2 条）"), "归档行没说 todo 那一侧：{}", o.out);
+    assert!(o.out.contains("下面的清单只列账本里还剩的"), "{}", o.out);
+    assert!(zloop(d, &["goals"], None, &[]).out.contains("2/3"), "整理之后 goals 那张表的进度掉了");
+    let j = stats_json(d);
+    for (k, want) in [("done", 2), ("first_try", 1), ("archived_todos", 2), ("archived_done", 2)] {
+        assert_eq!(j[k], want, "stats --json 的 {k}：{j}");
+    }
+    assert_eq!(j["archived_todos_unknown"], false, "{j}");
+
+    // 再整理一次不会把同一批 todo 记两遍
+    zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    assert_eq!(state::load(&p).unwrap().archived.todos, 2);
+    assert_eq!(stats_json(d)["done"], 2);
+
+    // T44 之前的 compact 搬走过 todo 却没记条数：补不回来就说补不回来，
+    // 别让一个只算了账本的百分比替归档里的那些背书（同 T29 的 rounds_unknown）。
+    let mut st = state::load(&p).unwrap();
+    st.archived.todos = 0;
+    st.archived.statuses.clear();
+    st.archived.first_try = 0;
+    state::save(&p, &mut st).unwrap();
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("老版本整理走过待办，条数没记"), "没说明百分比为什么是 0：{}", o.out);
+    assert_eq!(stats_json(d)["archived_todos_unknown"], true);
+}
+
+/// T44 的两个边角：延后的 todo 不进分母（同 `status` 里 `planned` 的口径），
+/// 以及**整理干净**的目标不许再被说成「待规划」——那是给刚 init 的目标准备的词，
+/// 一次 compact 能把干完活的目标伪装成同一副样子（同 T29 里 `stats` 的 rounds==0 早退）。
+#[test]
+fn compact_keeps_deferred_out_of_the_denominator_and_does_not_forge_a_fresh_goal() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "g"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] a", "--add", "[P0] b", "--add", "[P1] c", "--add", "[P1] d"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "ok", "--no-doc"], None, &[]);
+    zloop(d, &["done", "t2", "--note", "ok", "--no-doc"], None, &[]);
+    zloop(d, &["edit", "t3", "--status", "deferred"], None, &[]);
+    // 完成 2 条、延后 1 条、还剩 1 条 → 分母是 3 不是 4
+    assert!(zloop(d, &["status"], None, &[]).out.contains("66%"));
+
+    let p = state::state_path(d);
+    let old = "2026-01-01T00:00:00+08:00";
+    let mut st = state::load(&p).unwrap();
+    for t in st.todos.iter_mut().filter(|t| t.id != "t4") {
+        t.done_at = Some(old.into());
+        t.updated_at = old.into();
+    }
+    for k in st.ticks.iter_mut() {
+        k.at = old.into();
+    }
+    state::save(&p, &mut st).unwrap();
+    assert!(zloop(d, &["compact", "--keep-days", "30"], None, &[]).out.contains("compacted 3 todos"));
+
+    let st = state::load(&p).unwrap();
+    assert_eq!(st.archived.todos, 3, "{:?}", st.archived);
+    assert_eq!(st.archived.planned(), 2, "延后的那条不进分母：{:?}", st.archived);
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(o.out.contains("66%"), "延后的 todo 被算进了归档的分母：{}", o.out);
+
+    // 最后一条也做完、也整理走：清单空了，但这个目标不是「刚开的」
+    zloop(d, &["done", "t4", "--note", "ok", "--no-doc"], None, &[]);
+    let mut st = state::load(&p).unwrap();
+    st.todos[0].done_at = Some(old.into());
+    st.todos[0].updated_at = old.into();
+    st.ticks[0].at = old.into();
+    state::save(&p, &mut st).unwrap();
+    zloop(d, &["compact", "--keep-days", "30"], None, &[]);
+    let st = state::load(&p).unwrap();
+    assert!(st.todos.is_empty(), "{:?}", st.todos);
+    let o = zloop(d, &["status"], None, &[]);
+    assert!(!o.out.contains("待规划"), "整理干净的目标被说成刚开的：{}", o.out);
+    assert!(o.out.contains("100%"), "3 条完成 1 条延后，整理干净之后还是 100%：{}", o.out);
+    assert!(o.out.contains("4 条待办全部整理归档了"), "空清单要说清楚是整理走的：{}", o.out);
+}
+
 /// A-18 的另一半：`compact` 动的是 runner 下一轮要读的账，所以和 `goal switch` 走同一道闸。
 #[test]
 fn compacting_is_refused_while_the_runner_is_running() {

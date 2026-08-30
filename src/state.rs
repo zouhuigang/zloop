@@ -236,6 +236,21 @@ pub struct Archived {
     /// 搬走的那些 tick 里「完成却没留下实现思路」的条数（`stats` 的「无文档 N 轮」）。
     #[serde(default)]
     pub undocumented: usize,
+    /// 累计搬走了多少条 todo。和 `ticks` 同一个作用：让 `statuses` 有个总数对照，
+    /// 也是「这份汇总记没记 todo」的判据（`todos_unknown`）。
+    #[serde(default)]
+    pub todos: usize,
+    /// 搬走的那些 todo 按 `status` 分的条数（done / deferred / …）。
+    ///
+    /// 和 `outcomes` 同一个理由：`status` 的百分比、`stats` 的「一次过 X/Y 条」
+    /// 都是从 `state.todos` 现数的，搬走一次就一起掉（T44）。存**按状态分的原料**，
+    /// 而不是「已完成 N 条」这样一个数——下一个从 todo 现算的数不用再加字段。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub statuses: std::collections::BTreeMap<String, usize>,
+    /// 搬走的那些 todo 里「一次过」的条数（`stats::first_try` 的判据，见那里）。
+    /// 这一个补不出来：它要的是每条 todo 名下的轮数，而 tick 已经不在账本里了。
+    #[serde(default)]
+    pub first_try: usize,
     /// 搬走的那些 tick 上记的宿主耗时之和（毫秒）。
     #[serde(default)]
     pub duration_ms: u64,
@@ -255,6 +270,9 @@ impl Archived {
         self.ticks == 0
             && self.outcomes.is_empty()
             && self.undocumented == 0
+            && self.todos == 0
+            && self.statuses.is_empty()
+            && self.first_try == 0
             && self.duration_ms == 0
             && self.cost_usd == 0.0
             && self.at.is_none()
@@ -282,6 +300,29 @@ impl Archived {
     /// 这时上面那些数只能报 0，而这**不等于**那些轮次不存在——由调用方说明白。
     pub fn rounds_unknown(&self) -> bool {
         self.ticks > 0 && self.outcomes.is_empty()
+    }
+
+    /// 归档里某种 status 的 todo 条数。
+    pub fn todo_count(&self, status: &str) -> usize {
+        self.statuses.get(status).copied().unwrap_or(0)
+    }
+
+    /// 归档里**已完成**的 todo 条数（进度的分子）。
+    pub fn done(&self) -> usize {
+        self.todo_count("done")
+    }
+
+    /// 归档里算进进度分母的 todo 条数：延后的不算，和 `status` 里 `planned` 同一口径
+    /// （`todo::is_terminal` 眼里 deferred 已了结，把它留在分母里会印出「全部完成 75%」）。
+    pub fn planned(&self) -> usize {
+        self.todos.saturating_sub(self.todo_count("deferred"))
+    }
+
+    /// T44 之前的 compact 只搬 todo 不记 todo：`at` 有值说明整理过（一次成功的整理至少
+    /// 搬走一条 todo），而 `todos` 还是 0，就说明这份汇总里的 todo 数补不回来。
+    /// 同 `rounds_unknown`：**不许把「不知道」印成「一条都没完成」**。
+    pub fn todos_unknown(&self) -> bool {
+        self.at.is_some() && self.todos == 0
     }
 }
 

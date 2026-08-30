@@ -2568,6 +2568,9 @@ pub struct Archived {
 可百分比又确实在回答「这个目标做到哪儿了」。要不要把归档的 todo 数也算进分母，
 是个口径决定（还牵扯清单里「步骤 1..N」的编号），单独排一条，别混在这一轮里。
 
+> **已在 §21（T44）做掉**：口径定成「做到哪儿了」含归档、「还剩什么」不含，
+> 步骤号钉死为「剩下这张清单里的执行顺序」。那一轮还数出第三个出口（`goals` 的进度列）。
+
 ### 20.5 回归测试
 
 | 测试 | 钉住什么 | 撤掉修复后 |
@@ -2579,3 +2582,103 @@ pub struct Archived {
 `cargo test` 194 全过（原 192）。`cargo fmt --check` 干净；`cargo clippy --all-targets`
 的 4 条 warning 和 HEAD 逐条相同（`awake.rs` / `notify.rs` 的 doc 缩进、`tick.rs` 的 lifetime），
 没新增。
+
+---
+
+## 21. 第十九轮：T44 —— 「这个目标做到哪儿了」也是 `compact` 搬得走的
+
+### T44（中）整理一次账本，进度条 66% → 0%、「一次过 2/2」→「0/0」 — 已修
+
+T29 修的是从 **ticks** 现算的那一族（轮次 / 返工 / 失败 / 无文档 / 耗时 / 轮次编号），
+当时明写了「没修的那一半」（§20.4）：从 **todo** 现算的还有两个。这一轮把它们做掉，
+顺带发现第三个出口。
+
+### 21.1 复现（`sh scripts/repro-t44-compact-drops-progress-percent.sh`，修之前退 1）
+
+三条待办、完成两条（进度 2/3），把它们做旧到一个月前，跑一次默认参数的整理：
+
+```
+=== 整理之前 ===
+  status    ▶  就绪      ██████████░░░░░░ 66%  跑了 2 轮
+  stats   质量    一次过 2/2 条 · 无文档 2 轮 · 被挡 0 次 · 用户反馈 0 条
+  goals   ▸ t44-repro  进行中  2/3  … t44 repro
+
+=== 人做了一次例行整理：zloop compact --keep-days 30 ===
+  compacted 2 todos and 2 ticks → …/.zloop/archive/compact-….json
+
+=== 整理之后 ===
+  status    ▶  就绪      ░░░░░░░░░░░░░░░░ 0%  跑了 2 轮
+  stats   质量    一次过 0/0 条 · 无文档 2 轮 · 被挡 0 次 · 用户反馈 0 条
+  goals   ▸ t44-repro  进行中  0/1  … t44 repro
+```
+
+| 读数 | 坏成什么样 | 为什么这不只是好看不好看 |
+|---|---|---|
+| `status` 的进度条 / 百分比 | 66% → **0%** | 同一行左边写着「跑了 2 轮」（T29 修好了，一辈子的账），右边说做到 0%——**一行两个口径**，而且没有任何标记 |
+| `stats` 的「一次过 X/Y 条」 | 2/2 → **0/0** | 同一张表上面写着「2 轮」，质量行说一条都没完成过；`0/0` 还会让 `pct()` 印出 `—` |
+| `goals` 的进度列 | 2/3 → **0/1**（§20.4 没数到的第三处） | 多目标那张表是「哪个目标做到哪儿了」的唯一入口 |
+
+分子分母**一起**掉是这一条和 T29 的区别：不是数字变小，是比例被重置成 0%——
+一个跑了两轮、完成两条的目标，在三个出口上同时显示成「没开始」。
+
+### 21.2 口径（这一条 todo 要定的就是它）
+
+**「做到哪儿了」的数含归档；「清单里还剩什么」不含。** 一句话把四处都判了：
+
+| 读数 | 口径 | 理由 |
+|---|---|---|
+| `status` 的百分比 / 进度条 | 含归档 | 它和同一行的「跑了 N 轮」「花了 $X」是同一个问题的三个面，那两个 T29/A-18 已经定成一辈子的账 |
+| `stats` 的「一次过 X/Y」 | 含归档 | 它和同一行的「无文档 N 轮」同源，问的是「跑得怎么样」 |
+| `goals` 的 done/total | 含归档 | 同上，只是换了个屏 |
+| `status` 的清单、`stats` 的 todo 表、`stats::remaining`、「N 条待办全部完成」 | **不含** | 它们回答「还剩什么」，清单变短本来就是 compact 的目的 |
+| 清单里的**步骤 1..N** | **不含**，而且不许加偏移 | 归档走的 todo 不一定是清单的前缀：compact 挑的是「已了结且过期」的，中间的照样被挑走。拿一个条数去给步骤号加偏移，只会把「剩下的第 1 步」印成理直气壮的「第 3 步」。步骤号的定义就此钉死：**它是剩下这张清单里的执行顺序**，不是这个目标的第几步 |
+
+两个口径同屏必然对不上（`66%` vs `清单 0/1 完成`），所以**把它印出来**，
+和 T29 给 `stats` 加那一行是同一个做法：
+
+```
+  清单    0/1 完成 · 归档 2 条
+  归档    整理走 2 条待办（完成 2 条），已算进上面的 66%
+```
+
+### 21.3 修法：归档汇总里再存一份「todo 那一侧的原料」
+
+沿用 T29 定下的形状——存**能重算出这一族的原料**，不是再加一个计数器：
+
+```rust
+pub struct Archived {
+    // …… T29 的 ticks / outcomes / undocumented / duration_ms / cost_usd
+    pub todos: usize,                            // 新：搬走的 todo 条数
+    pub statuses: BTreeMap<String, usize>,       // 新：按 status 分（done / deferred / …）
+    pub first_try: usize,                        // 新：其中「一次过」的
+}
+```
+
+`statuses` 一份原料喂三个读数：`done()` = 分子、`planned()` = `todos - deferred`（延后的
+不进分母，和 `status` 里 `planned` 同一口径）。**只有 `first_try` 必须当场算**——
+它要的是每条 todo 名下的轮数，而 tick 下一行就不在账本里了；判据抽成
+`stats::first_try(status, &mine)`，`compute` 和 `compact` 共用，不许写两遍。
+
+### 21.4 顺带修掉的：整理干净的目标被说成「刚开的」
+
+`status` 那句「◦ 待规划」的分支条件是 `total == 0`，写它时想的是「刚 init 完还没规划」。
+可 compact 能把干完活的目标清空成一模一样的样子——**和 T29 里 `stats` 的 `rounds == 0`
+早退是同一个坑的第二次出现**：一个为「从没开始」准备的早退分支，被 compact 伪造了前提。
+加上 `st.archived.todos == 0` 之后它落回「• 空闲」（和没整理过的全做完目标一致），
+阶段行也改说「4 条待办全部整理归档了 · 要接着做就 zloop plan 加几条」。
+
+**老状态文件**（T44 之前的 compact 只搬 todo 不记条数）走 `Archived::todos_unknown()`：
+判据是 `at.is_some() && todos == 0`（一次成功的整理至少搬走一条 todo）。这时百分比只算
+账本里的，`status` 多一行「老版本整理走过待办，条数没记（没算进上面的百分比）」——
+不知道就说不知道，别让百分比替归档里的那些背书。
+
+### 21.5 回归测试
+
+| 测试 | 钉住什么 | 撤掉修复后 |
+|---|---|---|
+| `cli_test::compact_does_not_reset_how_far_this_goal_has_got` | 整理前后 `status` 的 66%、`stats` 的「一次过 1/2 条」、`goals` 的 2/3 全不变；`archived.todos/done()/planned()/first_try`（返工过的那条不算一次过）；两处归档说明行；`stats --json` 的 done/first_try/archived_todos/archived_done；再整理一次不重复计数；老版本汇总走 `todos_unknown` 那一支 | `tests/cli_test.rs:1074` `整理之后 status 的百分比掉了：… ░░░ 0%  跑了 2 轮` |
+| `cli_test::compact_keeps_deferred_out_of_the_denominator_and_does_not_forge_a_fresh_goal` | 延后的 todo 归档后不进分母（66% 不变）；全部整理干净之后不说「待规划」、还是 100%、阶段行说明是整理走的 | `tests/cli_test.rs:1138` `延后的 todo 被算进了归档的分母：` |
+| `scripts/repro-t44-compact-drops-progress-percent.sh` | 三处出口一起看（status 百分比 / stats 一次过 / goals 进度） | 退出码 0 → 1，并印出上面 §21.1 那段「整理之后」 |
+
+`cargo test` 196 全过（原 194）。`cargo fmt --check` 干净；`cargo clippy --all-targets`
+的 4 条 warning 和 HEAD 逐条相同，没新增。

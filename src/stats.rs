@@ -64,10 +64,27 @@ pub struct Stats {
     /// 老版本 compact 留下的账：搬走过 tick 却没记 outcome，那些轮次补不回来。
     /// 这时 `archived_rounds` 是 0，但它**不代表**归档里没有轮次——别把它当 0 用。
     pub archived_rounds_unknown: bool,
+    /// `compact` 归档走的 todo 条数（`done` / `first_try` 里含它们，下面那张清单里没有）。
+    pub archived_todos: usize,
+    /// 其中已完成的（`done` 里含这一部分）。
+    pub archived_done: usize,
+    /// T44 之前的 compact 搬走过 todo 却没记条数：这时 `archived_todos` / `archived_done`
+    /// 是 0，但归档里**并不是**没有 todo——同 `archived_rounds_unknown`。
+    pub archived_todos_unknown: bool,
 }
 
 fn round_of(pct: f64) -> f64 {
     (pct * 1000.0).round() / 1000.0
+}
+
+/// 「一次过」的判据：完成了，而且只花了一轮、没返工过。`mine` 是这条 todo 名下的全部 tick。
+///
+/// `compute` 和 `compact` 的归档汇总**共用这一份定义**：判据写两遍，一次整理就能让
+/// 「一次过 X/Y」的 X 换一套标准（T44）。同 `Archived::rounds` 与 `tick::rounds`。
+pub fn first_try(status: &str, mine: &[&crate::state::Tick]) -> bool {
+    let rounds = mine.iter().filter(|k| tick::COUNTED.contains(&k.outcome.as_str())).count();
+    let rework = mine.iter().filter(|k| k.outcome == "progress" || k.outcome == "fail").count();
+    status == "done" && rounds == 1 && rework == 0
 }
 
 pub fn compute(state: &State) -> Stats {
@@ -93,7 +110,7 @@ pub fn compute(state: &State) -> Stats {
             cost_usd: mine.iter().filter_map(|k| k.cost_usd).sum(),
             duration_ms: mine.iter().filter_map(|k| k.duration_ms).sum(),
             documented,
-            first_try: t.status == "done" && rounds == 1 && rework == 0,
+            first_try: first_try(&t.status, &mine),
         });
     }
 
@@ -103,7 +120,10 @@ pub fn compute(state: &State) -> Stats {
     let counted = |o: &str| state.ticks.iter().filter(|k| k.outcome == o).count() + state.archived.count(o);
     let rounds = tick::rounds_total(state);
     let rework = counted("progress") + counted("fail");
-    let done = state.todos.iter().filter(|t| t.status == "done").count();
+    // 「一次过 X/Y 条」问的是「这个目标做得怎么样」，和它同一行的「无文档 N 轮」一样是
+    // 一辈子的账，所以分子分母都要补上归档走的那些（T44）。只补一头会让一次整理
+    // 把这个比例冲歪——同 `rework_rate`。
+    let done = state.todos.iter().filter(|t| t.status == "done").count() + state.archived.done();
     Stats {
         goal: state.goal.text.clone(),
         rounds,
@@ -117,13 +137,16 @@ pub fn compute(state: &State) -> Stats {
         cost_usd: tick::spent_total(state),
         duration_ms: state.ticks.iter().filter_map(|k| k.duration_ms).sum::<u64>() + state.archived.duration_ms,
         done,
-        first_try: todos.iter().filter(|t| t.first_try).count(),
+        first_try: todos.iter().filter(|t| t.first_try).count() + state.archived.first_try,
         // 分子分母同源：只补分母（或只补分子）都会让一次整理把返工率冲歪，而
         // `replan` 拿这个数当「该重估了」的信号（`replan::signals` 的 rework 一路）。
         rework_rate: if rounds > 0 { round_of(rework as f64 / rounds as f64) } else { 0.0 },
         archived_rounds: state.archived.rounds(),
         archived_ticks: state.archived.ticks,
         archived_rounds_unknown: state.archived.rounds_unknown(),
+        archived_todos: state.archived.todos,
+        archived_done: state.archived.done(),
+        archived_todos_unknown: state.archived.todos_unknown(),
         todos,
     }
 }
