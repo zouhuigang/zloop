@@ -257,6 +257,60 @@ fn compact_dumps_are_not_mistaken_for_broken_archives() {
     assert_eq!(code, 0);
 }
 
+/// NOTES.md 里混进非 UTF-8 字节。写路径已经会当场拒绝（A-4），**读路径不会**：
+/// `zloop context` 用宽容版 read，读失败就当"什么都没记过"，「约定」「经验」两整节
+/// 一声不吭地消失、命令还 exit 0——下一轮的 agent 就这么在没有护栏的情况下开工。
+/// 这个测试先复现那个静默，再钉住 doctor 必须把它说出来。
+#[test]
+fn unreadable_notes_reported_because_context_drops_the_rules_silently() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    init(d, "alpha");
+    plan(d, "[P0] first\n");
+    assert_eq!(zloop(d, &["remember", "--rule", "done 之前必须 cargo test 全过"]).code, 0);
+    assert_eq!(zloop(d, &["remember", "bench 要在 release 下跑"]).code, 0);
+    // 对照组：好好的时候约定进得了交接包，doctor 也不该报
+    assert!(zloop(d, &["context"]).out.contains("done 之前必须 cargo test 全过"));
+    assert!(zloop(d, &["doctor"]).out.contains("没发现问题"));
+
+    // 真实来路：编辑器存错编码、别的工具往里追加了二进制。read_to_string 从此直接失败
+    let notes = d.join(".zloop/NOTES.md");
+    let mut raw = fs::read(&notes).unwrap();
+    raw.extend_from_slice(&[0xff, 0xfe]);
+    fs::write(&notes, &raw).unwrap();
+
+    // 先复现坏结果本身：整节消失，没有一个字提到出了事，退出码还是 0
+    let o = zloop(d, &["context"]);
+    assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+    assert!(!o.out.contains("本项目的约定"), "复现前提变了，约定还在：{}", o.out);
+    assert!(!o.out.contains("bench 要在 release"), "经验也一起没了才是这个 bug：{}", o.out);
+
+    // doctor 就是替这条静默路径出声的那个
+    let (ks, code) = kinds(d);
+    assert!(ks.contains(&"unreadable_notes".to_string()), "{ks:?}");
+    assert_eq!(code, 1, "护栏整节没了是要修的问题，不是留意");
+    let o = zloop(d, &["doctor"]);
+    assert!(o.out.contains(".zloop/NOTES.md 读不出来"), "得指名道姓是哪个文件：{}", o.out);
+    assert!(o.out.contains("约定") && o.out.contains("经验"), "得说清楚丢的是什么：{}", o.out);
+
+    // 修好就该闭嘴：文件恢复成能读的，体检回到干净
+    fs::write(&notes, &raw[..raw.len() - 2]).unwrap();
+    assert!(zloop(d, &["doctor"]).out.contains("没发现问题"), "修好之后不该还在报");
+    assert!(zloop(d, &["context"]).out.contains("done 之前必须 cargo test 全过"));
+}
+
+/// 没有 NOTES.md 是**合法**状态（还没记过任何东西），不是病。
+#[test]
+fn a_project_that_never_recorded_notes_is_healthy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    init(d, "alpha");
+    assert!(!d.join(".zloop/NOTES.md").exists());
+    let (ks, code) = kinds(d);
+    assert!(ks.is_empty(), "{ks:?}");
+    assert_eq!(code, 0);
+}
+
 #[test]
 fn leftover_temp_files_get_reported() {
     // 账本的写法是 tmp → sync → rename，所以进程被杀不会损坏正本（实测 386 次 SIGKILL

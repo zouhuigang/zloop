@@ -202,12 +202,12 @@ E3 之后 `.zloop/` 里躺着一个 3926 字节的半截 `state.json.tmp`。它*
 | 环境变量 | `COLUMNS` = 0/1/2/-5/abc/超 u64、`NO_COLOR=`、`CLICOLOR_FORCE=1`、`ZLOOP_AWAKE_POLL_SECS=abc` | ✅ 9 种全部 exit 0，输出不变形 |
 | state.json · 非 UTF-8 | 追加一个 `\xff` | ✅ 报错 exit 2，拒绝继续 |
 | state.json · 数值越界 | `policy.window_hours` 手改大 | 💥 **A-7**：`next`/`status`/`context` 全 panic |
-| NOTES.md · 非 UTF-8 | 追加一个 `\xff`；粘一行 GBK | 💥 **A-4**：静默清零 + 下一次写入真删 |
+| NOTES.md · 非 UTF-8 | 追加一个 `\xff`；粘一行 GBK | 💥 **A-4**（已修）：静默清零 + 下一次写入真删 |
 | 子进程 · 超时 | preflight / 宿主留下后台进程 | 💥 **A-6**：超时形同虚设，SIGTERM 也叫不动 |
 | 信号 · SIGPIPE | `zloop status \| head` | ✅ `main.rs` 恢复了默认处置，安静退出 |
 | 信号 · SIGTERM | `zloop stop` 打断正常轮次 | ✅ 干净退出并记 journal（已有测试） |
 
-### A-4（高）NOTES.md 里一个非 UTF-8 字节 → 约定和经验静默清零，下一次 `remember --rule` 把它们真删掉
+### A-4（高）NOTES.md 里一个非 UTF-8 字节 → 约定和经验静默清零，下一次 `remember --rule` 把它们真删掉 — 已修
 
 `src/notes.rs:76`：
 
@@ -253,10 +253,17 @@ $ zloop context | grep -c '粘进来的一条'
 | `.zloop/state.json` | `zloop: stream did not contain valid UTF-8`，exit 2 | 拒绝继续，数据安全 |
 | `.zloop/NOTES.md` | 无声无息 | 交接包空了，下一次写入把原件删掉 |
 
-修法三条，缺一不可：
-1. `notes::read` 区分「文件不存在」（返回 default 是对的）和「读失败」（要说话）；
-2. 读失败时 `add_rule` / `replace` **拒绝写**，不许在空 `Notes` 上重建文件；
-3. `doctor` 加一条：NOTES.md 存在但读不出来 → 报出来并说该怎么办。
+修法三条，缺一不可（**三条都已修**）：
+1. ✅ `notes::read` 区分「文件不存在」（返回 default 是对的）和「读失败」（要说话）：
+   拆出 `try_read`（区分，给写路径）和 `read`（宽容，只给纯读路径）；
+2. ✅ 读失败时 `add_rule` / `replace` **拒绝写**，不许在空 `Notes` 上重建文件（exit 2，原件一字不动）；
+3. ✅ `doctor` 加一条 `unreadable_notes`：NOTES.md 存在但读不出来 → 报出来并说该怎么办。
+
+第 3 条为什么不能省：1、2 只让**写**路径坏在明处，**读**路径照旧是静默降级——
+`zloop context` 少掉「约定」「经验」两整节、退出码还是 0，模型当轮没有任何项目护栏而不自知，
+而"下一轮一定会去写一次 NOTES"根本没人保证。体检就是替这条静默的读路径出声的地方
+（`doctor_test.rs::unreadable_notes_reported_because_context_drops_the_rules_silently`
+先复现那个静默，再钉住 doctor 必须报）。
 
 ### A-5（高）`--exit-on-wait` 在「等人」时从不生效——它只在一种 runner 自己走不到的状态下才管用
 

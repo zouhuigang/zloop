@@ -82,15 +82,33 @@ fn split_stamp(line: &str) -> (Option<String>, String) {
 /// 而且一声不吭——实测往 NOTES.md 末尾加两个非 UTF-8 字节再 `remember --rule`，
 /// 旧的 1 条约定 + 1 条经验当场消失，命令还 exit 0 打印"约定 +1（共 1 条）"。
 pub fn try_read(root: &Path) -> Result<Notes> {
-    let p = path(root);
-    match fs::read_to_string(&p) {
-        Ok(raw) => Ok(parse(&raw)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Notes::default()),
+    match read_raw(root) {
+        Ok(Some(raw)) => Ok(parse(&raw)),
+        Ok(None) => Ok(Notes::default()),
         Err(e) => Err(anyhow::anyhow!(
             "{} 读不出来（{e}）。先把它修好或挪走，别让下一次写入把它盖掉",
-            p.display()
+            path(root).display()
         )),
     }
+}
+
+/// 「不存在」和「读不出来」在这里分家，只此一处：`Ok(None)` = 文件不在（合法状态），
+/// `Err` = 文件在但拿不到内容。[`try_read`] 和 [`read_error`] 都从这里取判断，
+/// 免得体检说"读得出来"而写入路径说"读不出来"。
+fn read_raw(root: &Path) -> std::io::Result<Option<String>> {
+    match fs::read_to_string(path(root)) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// 「文件在，但读不出来」的原因；`None` = 读得出来，或者根本没这个文件。
+///
+/// 给 `zloop doctor` 用。纯读路径（[`read`]）对读失败是**静默降级**的，坏在明处的只有
+/// 写路径（[`add_rule`] 会整个放弃）——可没人保证下一轮一定会去写。体检得替读路径出这个声。
+pub fn read_error(root: &Path) -> Option<std::io::Error> {
+    read_raw(root).err()
 }
 
 /// 宽容版：只给**纯读**路径用（交接包注入、计数、材料包）。读不出来就当空的——

@@ -1638,9 +1638,11 @@ claude 11111111-2222-3333-4444-555555555555  ticks 7   2026-08-28T20:15:11+08:00
 | `dangling_blocked_by` | 要修 | 依赖指向不存在的 todo（`compact` 把被依赖的那条搬走就会这样）——这条 todo 永远轮不到 |
 | `duplicate_todo_id` | 要修 | 同一个 todo id 有多条，`done` / `edit` 只改得到第一条 |
 | `next_id_reuse` | 要修 | `next_id` 已经被用过，下一条 `plan` 会造出重复 id |
+| `unreadable_notes` | 要修 | `NOTES.md` 在、但读不出来（非 UTF-8 / 权限）——`context` 会**静默**少掉「约定」「经验」两整节，模型当轮没有任何项目护栏，命令还退 0 |
 | `missing_log` | 留意 | tick 记着的日志文件被删了（信息没了，循环照跑） |
 | `broken_archive` / `archive_id_collision` | 留意 | 归档文件读不出 / 归档里多份同名，只影响翻旧账 |
 | `stale_pid` / `bad_pid_file` | 留意 | `runner/pid` 指着一个不在的进程（`status` / `stop` 会顺手清） |
+| `leftover_tmp` | 留意 | 上次写入被打断留下的 `*.tmp`（正本没事：写法是 tmp → rename），没人清 |
 
 ```
 $ zloop doctor

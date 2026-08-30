@@ -130,6 +130,7 @@ pub fn check(root: &Path) -> Report {
     }
     check_pid(root, &mut f);
     check_leftovers(root, &mut f);
+    check_notes(root, &mut f);
 
     // 先要修的，后留意的；同级保持发现顺序（大致是从目标清单到账本再到运行时）
     f.sort_by_key(|x| match x.level {
@@ -355,6 +356,29 @@ fn check_leftovers(root: &Path, f: &mut Vec<Finding>) {
         "leftover_tmp",
         format!("有 {n} 个上次写入没写完就被打断的临时文件：{}", hits.join(" / ")),
         "账本正本没事（写法是 tmp → rename，正本要么是旧的要么是新的）。这些残留可以直接删".into(),
+    ));
+}
+
+/// NOTES.md 在，但读不出来（非 UTF-8、权限、IO 错）。
+///
+/// 写路径已经会当场拒绝（`remember --rule` / `reflect --apply` 走 `notes::try_read`，
+/// 见 A-4），坏在明处。**纯读路径不是**：`zloop context` 用宽容版 `notes::read`，
+/// 读失败就当成"什么都没记过"——交接包里的「约定」「经验」两整节一声不吭地消失，
+/// 命令照样 exit 0。下一轮的 agent 于是在没有任何项目护栏的情况下开工，而且不自知。
+/// 这一条就是替那条静默的读路径把话说出来。
+fn check_notes(root: &Path, f: &mut Vec<Finding>) {
+    let Some(e) = crate::notes::read_error(root) else { return };
+    let p = crate::notes::path(root);
+    f.push(Finding::err(
+        "unreadable_notes",
+        format!("{} 读不出来（{e}）：`zloop context` 会静默少掉「约定」和「经验」两整节", rel(root, &p)),
+        format!(
+            "交接包的护栏就这么没了，命令还 exit 0——先看一眼文件（多半是被写进了非 UTF-8 字节），\
+             修好它。在那之前 `zloop remember --rule` / `zloop reflect --apply` 会拒绝写入（原件不会被盖掉），\
+             而 `zloop remember` 照旧往末尾追加——追进去的那几条同样没人读得到。\
+             实在救不回来：`mv {p} {p}.bad`，从头再记",
+            p = rel(root, &p)
+        ),
     ));
 }
 
