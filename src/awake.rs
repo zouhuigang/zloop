@@ -296,6 +296,106 @@ pub fn sudoers_rule(user: &str) -> String {
     )
 }
 
+/// 规则文件的暂存处：一个**只有自己进得去**的 0700 目录，里面放一个 0600 的文件。
+/// `Drop` 负责清场，所以中途 `bail!`（visudo 拒绝、sudo 失败）也不会在临时目录里留东西——
+/// 修之前那条路只在 `sudo install` 之后删一次，visudo 拒绝那一支的文件是漏着的。
+pub struct StagedRule {
+    dir: PathBuf,
+    file: PathBuf,
+}
+
+impl StagedRule {
+    /// 交给 `visudo -c -f` / `sudo install` 的那条路径。
+    pub fn file(&self) -> &Path {
+        &self.file
+    }
+    /// 装着它的私有目录（只有自己能进）。
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Drop for StagedRule {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.file);
+        let _ = fs::remove_dir(&self.dir);
+    }
+}
+
+/// 把 sudoers 规则暂存到 `base` 底下，交给调用方去 `visudo -c` / `sudo install`。
+///
+/// **为什么不能直接写 `base/zloop-pmset.<pid>`（T43）**：那条路径名字可猜（pid），而
+/// `fs::write` 既不 `O_EXCL` 也不 `O_NOFOLLOW`。`TMPDIR` 指向共享目录时
+/// （`export TMPDIR=/tmp` 是常见的手工设置，`/tmp` 是 1777），别的 uid 能提前占住这个名字：
+/// 占成他自己的 0666 普通文件（我们只是 truncate 后写一遍，属主还是他），或占成一条软链接
+/// （我们顺着写进他的文件）。随后 `sudo install` 从**同一条路径**重新读一次，装进
+/// `/etc/sudoers.d/` 的就是他那一份 —— 一条 `NOPASSWD: ALL` 就是把 root 送出去。
+/// 窗口也不止「write 到 install」那一瞬：中间还夹着一次交互式密码输入，人想多久它就有多久。
+/// 实测两种占名方式见 `scripts/repro-t43-sudoers-tmp-swap.sh`。
+///
+/// 现在的做法：`mkdir` 一个随机名的 0700 目录，文件用 `create_new` + 0600 建在里面。
+/// `mkdir` 是原子的——名字被占就是 `EEXIST`，我们换个名字重来，绝不会悄悄接手别人的目录。
+/// 于是安全边界不再取决于 `TMPDIR` 指向哪儿：父目录是我们自己刚建的，别人进不去也换不掉里面的东西。
+/// 名字随机是为了让「预先把候选名字占满」这种拒绝服务也不成立，它不是边界本身。
+pub fn stage_rule_in(base: &Path, rule: &str) -> Result<StagedRule> {
+    use std::io::Write;
+    for _ in 0..8 {
+        let dir = base.join(format!("zloop-sudoers.{:016x}", random_tag()));
+        match private_dir(&dir) {
+            Ok(()) => {
+                // 先接管，后面写文件失败也能靠 Drop 把目录清掉
+                let staged = StagedRule { file: dir.join("zloop-pmset"), dir };
+                private_file(&staged.file)
+                    .and_then(|mut f| f.write_all(rule.as_bytes()))
+                    .with_context(|| format!("writing {}", staged.file.display()))?;
+                return Ok(staged);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("creating {}", dir.display())),
+        }
+    }
+    bail!("could not create a private staging directory under {}", base.display())
+}
+
+/// 随机后缀。撞名不是安全问题（`mkdir` 会 `EEXIST`，我们重来），所以 `/dev/urandom` 读不到时
+/// 退到 `RandomState`（进程起来时由内核播种）+ 时间戳就够了。
+fn random_tag() -> u64 {
+    use std::io::Read;
+    let mut b = [0u8; 8];
+    if fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_ok() {
+        return u64::from_ne_bytes(b);
+    }
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+    h.write_u64(nanos);
+    h.write_u32(std::process::id());
+    h.finish()
+}
+
+/// `mkdir` 一个 0700 的新目录；已经存在（哪怕是别人的软链接）就是 `AlreadyExists`，绝不复用。
+/// umask 只会**再削**权限位，不会加，所以拿到的目录不可能比 0700 更松。
+#[cfg(unix)]
+fn private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
+#[cfg(not(unix))]
+fn private_dir(path: &Path) -> std::io::Result<()> {
+    fs::DirBuilder::new().create(path)
+}
+
+/// 新建一个 0600 的文件：`create_new` = `O_EXCL`，撞上任何已存在的东西都失败而不是跟着写。
+#[cfg(unix)]
+fn private_file(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+}
+#[cfg(not(unix))]
+fn private_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new().write(true).create_new(true).open(path)
+}
+
 /// Write the sudoers rule (validates with `visudo -c`, then `sudo install`; prompts for a password once).
 pub fn install_sudoers() -> Result<PathBuf> {
     if !supported() {
@@ -303,10 +403,10 @@ pub fn install_sudoers() -> Result<PathBuf> {
     }
     let user = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).context("cannot determine current user")?;
     let rule = sudoers_rule(&user);
-    let tmp = std::env::temp_dir().join(format!("zloop-pmset.{}", std::process::id()));
-    fs::write(&tmp, &rule)?;
+    // `sudo install` 会从这条路径**重新读一遍**，所以这条路径必须是别人够不着的（见 stage_rule_in）
+    let staged = stage_rule_in(&std::env::temp_dir(), &rule)?;
     let mut c = Command::new("visudo");
-    c.args(["-c", "-f"]).arg(&tmp);
+    c.args(["-c", "-f"]).arg(staged.file());
     // `visudo -c` 只读一个文件、不问任何问题，所以它走闸；读不出来（超时/起不来）就当
     // 「没能检查」，跟原来 `Err` 那条分支一样放行——真正的判官是下面的 `sudo install`。
     if let Some(o) = power_cmd(c, "visudo -c") {
@@ -324,11 +424,11 @@ pub fn install_sudoers() -> Result<PathBuf> {
     // 它只在人手敲这一条命令时跑，不在 runner 的任何路径上，挂住也只挂住人自己那个终端。
     let status = Command::new("sudo")
         .args(["install", "-o", "root", "-g", "wheel", "-m", "0440"])
-        .arg(&tmp)
+        .arg(staged.file())
         .arg(SUDOERS_FILE)
         .status()
         .context("running sudo install")?;
-    let _ = fs::remove_file(&tmp);
+    // 清场交给 `staged` 的 Drop：走哪条出口都清，包括上面 visudo 拒绝时的 `bail!`
     if !status.success() {
         bail!("sudo install failed; you can install the rule by hand: sudo visudo -f {SUDOERS_FILE}");
     }

@@ -2342,3 +2342,127 @@ disablesleep 0
 （`TMPDIR` 没设）文件名是可预测的。macOS 上 `TMPDIR` 默认是每用户 0700 的
 `/var/folders/…`，所以实际可利用性低——但这是提权面上的 TOCTOU，值得单独排一条查清楚，
 不该混在这一轮的子进程收口里。
+
+→ 已在 §19（T43）查完并修掉。**上一段括号里那半句「`TMPDIR` 没设」是错的**，真正的触发条件
+见 §19.1。
+
+## 19. 第十七轮：T43 —— §18.6 那条尾巴查到底
+
+### T43（中）`install_sudoers` 的暂存路径别人也能占名，装进 `/etc/sudoers.d/` 的可以不是我们写的那份 — 已修
+
+修之前的三步（`src/awake.rs`，HEAD~1 的 306–330 行）：
+
+```rust
+let tmp = env::temp_dir().join(format!("zloop-pmset.{}", process::id()));  // 名字可猜
+fs::write(&tmp, &rule)?;                                                   // 不 O_EXCL、不 O_NOFOLLOW
+visudo -c -f $tmp                                                          // 语法检查
+sudo install -o root -g wheel -m 0440 $tmp /etc/sudoers.d/zloop-pmset      // 从**同一条路径**重新读一遍
+```
+
+`fs::write` 和 `sudo install` 是对同一条路径的**两次独立解析**，中间那段时间里这条路径指向什么，
+装进 `/etc/sudoers.d/` 的就是什么。而这条路径的名字是 `pid`，猜得到。
+
+### 19.1 先纠正 §18.6 里写错的那半句前提
+
+§18.6 写的是「落到 `/tmp` 时（`TMPDIR` 没设）」。**这半句是错的**，实测（rustc 1.98，macOS 26.5）：
+
+```
+$ env -i ./probe                 # 环境里一个变量都没有
+temp_dir = /var/folders/ym/md7fzwnn27961mm7xh48mmgc0000gn/T/
+$ env -i ./confstr_probe
+confstr n=50 val=/var/folders/ym/md7fzwnn27961mm7xh48mmgc0000gn/T/
+$ TMPDIR=/tmp ./probe
+temp_dir = /tmp
+```
+
+Rust 在 Apple 平台上的 `env::temp_dir()` 不是「`TMPDIR` 没设就 `/tmp`」——没设时它走
+`confstr(_CS_DARWIN_USER_TEMP_DIR)`，拿到的仍然是那个每用户 0700 的 `/var/folders/…/T/`
+（`drwx------ zouhuigang staff`）。所以**默认的 mac 落不到共享目录里**，别的 uid 连那个目录都进不去。
+
+要落到共享目录，得有人**显式**把 `TMPDIR` 指过去——`export TMPDIR=/tmp` 是绕开
+`/var/folders` 长路径（Unix socket 107 字节上限之类）的常见手工设置，`/tmp` 是 `drwxrwxrwt`。
+
+于是完整前提是两条，**缺一不可**，这也是它定 P2 而不是 P0 的原因：
+
+1. `TMPDIR` 指向一个别的 uid 也写得进的目录；
+2. 机器上有第二个非 root uid 在跑代码（另一个登录用户，或被拿下的 `_www` / `nobody` 之类服务账号）。
+
+### 19.2 前提成立时，两种占名方式都成（实测）
+
+`sh scripts/repro-t43-sudoers-tmp-swap.sh` 的第一部分照抄修之前那三行跑：
+
+```
+=== 修之前 · 占名方式 A：软链接指到攻击者的文件 ===
+  源路径 = /tmp/zloop-pmset.4145   ← temp_dir + pid，猜得到
+  fs::write 之后 mode = 0644（属主/权限位都还是他挑的）
+  真正落地的实体 = /private/tmp/zloop-t43.XFt9JY/attacker/payload
+  install 退出码 = Some(0)
+  → 装进 sudoers.d 的是：
+      # zloop: 攻击者的规则
+      attacker ALL=(root) NOPASSWD: ALL
+
+=== 修之前 · 占名方式 B：攻击者自己的 0666 普通文件（连软链接都不用） ===
+  fs::write 之后 mode = 0666（属主/权限位都还是他挑的）
+  → 装进 sudoers.d 的是：
+      attacker ALL=(root) NOPASSWD: ALL
+```
+
+两种都能走通，因为**代码对属主一个字都没检查**：
+
+* A：`fs::write` = `File::create`，没有 `O_NOFOLLOW`，顺着软链接写进他的文件；随后 `install`
+  再顺一次，读到的是他那一刻放进去的内容。
+* B：`File::create` 撞上已存在的文件不是失败而是 `O_TRUNC` 接着写——**属主和权限位都不动**。
+  所以那句「文件是 0644」也是乐观的：权限位是占名的人挑的（实测 0666），我们写完他照样改得动。
+
+`/tmp` 的 sticky 位（`t`）挡的是「删掉/改名别人的文件」，挡不住「先占住一个还不存在的名字」。
+pid 也不是屏障：macOS pid 顺序递增、`ps` 看得见，提前把候选名字铺满是几十 KB 软链接的事。
+
+### 19.3 两道看起来像闸的东西，都不拦这个
+
+* **`visudo -c`**：它检查的是语法，攻击者的规则语法完全合法（实测 `parsed OK`）；何况它跑在
+  窗口**之前**，换内容发生在它之后。
+* **那次密码提示**：`sudo install` 会停下来等人打密码——这不是保护，这是把窗口**拉长**到
+  「人在键盘前想多久」。窗口从来不是「write 到 install 那一瞬」。
+
+### 19.4 修法：换掉的不是名字，是**父目录**
+
+只把名字改随机是不够的（那只解决「猜得到」，没解决「那个目录别人写得进」）。现在的
+`awake::stage_rule_in(base, rule)`：
+
+* `mkdir` 一个随机名的 **0700** 目录。`mkdir` 是原子的：名字被占（哪怕被占成一条软链接）就是
+  `EEXIST`，我们换个名字重来，**绝不会悄悄接手别人的目录**；
+* 规则文件用 `create_new`（`O_EXCL`）+ **0600** 建在这个目录里面。父目录是我们自己刚建的，
+  别人进不去，也就没有「占名」这回事了——安全边界不再取决于 `TMPDIR` 指向哪儿。
+* umask 只会再削权限位、不会加，所以拿到的东西不可能比 0700/0600 更松。
+* 随机名只是让「预先把候选名字铺满」这种拒绝服务也不成立，**它不是边界本身**。
+
+顺手补掉的一处漏：清场从「`sudo install` 之后删一次」改成 `StagedRule` 的 `Drop`。修之前
+`visudo` 拒绝那一支是直接 `bail!` 的，临时文件留在原地没人管。
+
+### 19.5 回归测试
+
+| 测试 | 钉住什么 | 撤掉修复后 |
+|---|---|---|
+| `runner_test::the_sudoers_rule_is_staged_out_of_reach_of_other_users` | 在一个 0777 的 base 里：① 预先按老名字 `zloop-pmset.<pid>` 占的位一个字都没动 ② 同进程两次暂存路径不同（名字不可猜）③ 父目录 0700 且是新建的（只有我们那一个文件）④ 文件 0600 ⑤ `Drop` 之后目录和文件都没了 | 把函数体换回老写法 → 第一条就红：<br>`assertion left == right failed: 别人占住的名字不该被我们接手`<br>`  left: "# zloop: let the runner keep the Mac awake…"`<br>` right: "# 攻击者占的位\n"` |
+| `scripts/repro-t43-sudoers-tmp-swap.sh` | 第二部分把同一手占名打在**仓库里现在这个** `stage_rule_in` 上（链 `target/debug/libzloop.rlib`，不是抄一份） | 退出码 0 → 1，并印出 `[FAIL] 回归了：别人占住名字之后，stage_rule_in 又跟着写了` |
+
+`cargo test` 192 全过（原 191）。`cargo fmt --check` 干净；`cargo clippy --all-targets`
+的 4 条 warning 和 HEAD 逐条相同（`awake.rs:9` / `notify.rs:8,9` 的 doc 缩进、`tick.rs:293`
+的 lifetime），没新增。
+
+### 19.6 顺手确认过的
+
+* `grep -rn "temp_dir" src/` 全仓库只有这一处，没有第二个同型的暂存点。
+* `visudo -c -f` 读得动新暂存的文件（0600、在 0700 目录里、默认 `TMPDIR`），实测：
+
+  ```
+  暂存 = /var/folders/ym/…/T/zloop-sudoers.f5d7cb9f3a1b5de9/zloop-pmset
+  visudo -c → …/zloop-pmset: parsed OK   退出码 = Some(0)
+  ```
+
+### 19.7 没验的那一步（说清楚，别当验过）
+
+最后那下 `sudo install -o root -g wheel -m 0440 <暂存> /etc/sudoers.d/zloop-pmset` **没有在本机跑**：
+它要么弹密码、要么就真的动这台机器的 `/etc/sudoers.d/`，都不是审查该做的事。这一步涉及的
+只有「root 去读一个属主是本人的 0600 文件」——root 不受权限位约束，且**修前修后它读的都是
+同一个临时目录底下的文件**，这一层没有变化。真正变了的是那条路径别人还占不占得住名字。

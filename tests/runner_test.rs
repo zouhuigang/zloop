@@ -2004,3 +2004,53 @@ fn sigterm_reaches_the_runner_while_a_grandchild_holds_the_pipe() {
         journal(&d)
     );
 }
+
+fn perm_bits(p: &Path) -> u32 {
+    fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777
+}
+
+/// T43：sudoers 规则的暂存路径不能是「别人也写得进的地方 + 猜得到的名字」。
+///
+/// 修之前是 `env::temp_dir()/zloop-pmset.<pid>` + `fs::write`（既不 `O_EXCL` 也不 `O_NOFOLLOW`），
+/// 而 `sudo install` 之后会从**同一条路径**重新读一遍。`TMPDIR` 指向共享目录时
+/// （`export TMPDIR=/tmp` 是常见的手工设置，`/tmp` 是 1777），别的 uid 提前占住那个名字
+/// （他的 0666 普通文件，或一条软链接）就能替换掉最终装进 `/etc/sudoers.d/` 的内容——
+/// 一条 `NOPASSWD: ALL` 就是 root。两种占名方式的实测见
+/// `scripts/repro-t43-sudoers-tmp-swap.sh`。
+#[test]
+fn the_sudoers_rule_is_staged_out_of_reach_of_other_users() {
+    // 模拟最坏的 TMPDIR：一个人人可写的目录
+    let base = tempfile::tempdir().unwrap().keep();
+    fs::set_permissions(&base, fs::Permissions::from_mode(0o777)).unwrap();
+    let rule = zloop::awake::sudoers_rule("victim");
+
+    // ① 攻击者按修之前那个可猜的名字提前占位
+    let decoy = base.join(format!("zloop-pmset.{}", std::process::id()));
+    fs::write(&decoy, "# 攻击者占的位\n").unwrap();
+
+    let a = zloop::awake::stage_rule_in(&base, &rule).unwrap();
+    let b = zloop::awake::stage_rule_in(&base, &rule).unwrap();
+
+    // 占住的那个文件一个字都不该动（修之前：它就是我们要写的那条路径）
+    assert_eq!(fs::read_to_string(&decoy).unwrap(), "# 攻击者占的位\n", "别人占住的名字不该被我们接手");
+    assert_ne!(a.file(), decoy.as_path());
+
+    // ② 名字不可预测：同一个进程里连着两次，路径必须不同（修之前 = pid，两次一模一样）
+    assert_ne!(a.file(), b.file(), "两次暂存撞在同一条路径上，说明名字还是可猜的");
+
+    for s in [&a, &b] {
+        // ③ 规则不躺在共享目录里，而在我们自己刚 mkdir 出来的 0700 目录里
+        assert_eq!(s.dir().parent().unwrap(), base.as_path());
+        assert_ne!(s.file().parent().unwrap(), base.as_path(), "规则文件不能直接躺在共享目录里");
+        assert_eq!(perm_bits(s.dir()), 0o700, "暂存目录必须只有自己进得去");
+        assert_eq!(perm_bits(s.file()), 0o600, "规则文件必须只有自己读得到");
+        assert_eq!(fs::read_to_string(s.file()).unwrap(), rule, "写进去的得是那条规则");
+        // 目录确实是新建的：除了我们这一个文件什么都没有
+        assert_eq!(fs::read_dir(s.dir()).unwrap().count(), 1, "暂存目录里有别人的东西：{}", s.dir().display());
+    }
+
+    // ④ 走完就清干净（修之前只在 `sudo install` 之后删一次，visudo 拒绝那一支把文件漏在 /tmp）
+    let (dir, file) = (a.dir().to_path_buf(), a.file().to_path_buf());
+    drop(a);
+    assert!(!file.exists() && !dir.exists(), "暂存的东西没清掉：{}", dir.display());
+}

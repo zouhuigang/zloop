@@ -43,6 +43,8 @@ runner 正常退出 → 注销 holder → 没有其他存活 holder 就 disables
 - **没有 sudo 免密**：只做 `caffeinate` 层，打印一次提示 `zloop install --sudoers`；不报错、不阻塞。
 - **`zloop install --sudoers`**：写 `/etc/sudoers.d/zloop-pmset`，只放行三条精确命令：
   `pmset -a disablesleep 1` / `pmset -a disablesleep 0` / `pmset -g`。用 `visudo -c` 校验后再 `sudo install -m 0440`，会弹一次密码。
+  规则先落在一个随机名的 **0700 私有目录**里（文件 0600），不落在临时目录本身：`sudo install` 会从那条路径**重新读一遍**，
+  路径要是别人也占得住名字，装进 `/etc/sudoers.d/` 的就可能不是我们写的那份（T43，见 docs/CODE-AUDIT.md §19）。
 - **引用计数**：holder 文件按 pid 存在 `~/.zloop/awake/`；`reconcile` 清掉 pid 已死的 holder，只要还有存活的就保持 1，否则恢复 0。两个项目同时跑、一个先停，不会误关另一个。
 - **`zloop status`** 增加一行 `sleep:`：`default` / `lid-close sleep disabled by zloop (N runner)` / `⚠ SleepDisabled=1 but no runner alive → zloop awake reconcile`。`zloop start` 与 `zloop stop` 都先 `reconcile` 一次，顺手清理上次没来得及恢复的状态。
 - **`--no-keep-awake`**：不想动睡眠策略时关掉。
