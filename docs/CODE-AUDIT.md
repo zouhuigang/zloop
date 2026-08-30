@@ -79,6 +79,66 @@ blame 从 `ac040d3` 回到真正的作者提交 `dfe739c7`）。
 **仍然没有 CI**：仓库里没有 `.github/`，所以这道闸目前只是"人可以跑的一条命令"，不是自动拦截。
 真要拦，得再配一条 workflow 或本地 pre-commit——记在待办里，不在本条范围内。
 
+### 2.2 闸有了定义，但没人自动去按（已修，t31）
+
+t30 把格式闸从"永远红"修成"能过"，但它仍然只是**人可以跑的一条命令**。t31 补上自动那一半。
+
+三件事：
+
+**（一）先让 `clippy -D warnings` 真的能过。** 加闸之前先跑一遍，4 条红：
+`awake.rs:9` / `notify.rs:8` / `notify.rs:9` 三条 `doc_lazy_continuation`（模块头注释里
+一段列表后面直接跟正文，rustdoc 会把它并进最后一个列表项），`tick.rs:315` 一条
+`needless_lifetimes`（`window_ticks<'a>` 的 `'a` 可以省）。
+**这一步不能跳**：一道开局就红的闸和没有闸是同一件事，t30 已经在 `cargo fmt` 上踩过一次。
+
+**（二）闸只写一份定义：`scripts/check.sh`。**
+`fmt --check` → `clippy --all-targets --all-features -D warnings` → `cargo test`，按"越便宜越靠前"
+排序、fail-fast。CI 调它，人也调它，两边永远是同一件事。带参数可只跑前几道
+（`sh scripts/check.sh fmt clippy`）。
+
+`cargo test` 这一道**故意不加 `--all-targets`**：加了会跳过 doc test，而这仓库的模块头注释是
+主要的交接材料，doc test 是它们唯一的编译检查。
+
+**（三）`.github/workflows/ci.yml` 跑在 macOS 上，不是 ubuntu。**
+`awake::supported()` 是 `cfg!(target_os = "macos")`，非 macOS 上整个 keep-awake 层是 no-op，
+而 7 个测试断言的正是 `pmset` 真的被调过。实测（把 `supported()` 临时改成 `false` 再 `cargo test`）：
+
+```
+failures:
+    awake_reconcile_fixes_a_stale_setting
+    hung_pmset_cannot_wedge_the_awake_probes
+    runner_disables_lid_sleep_while_alive_and_restores_after
+    sigterm_still_lets_the_runner_restore_the_sleep_default
+    sleep_stays_disabled_until_the_task_finishes_by_itself
+    watchdog_restores_default_after_kill_9_and_holders_are_reference_counted
+    without_passwordless_sudo_runner_degrades_to_caffeinate_with_a_hint
+test result: FAILED. 37 passed; 7 failed
+```
+
+在 ubuntu 上跑 = 开局 7 红，又回到 t30 那个坑里。
+
+**闸真的会咬**（两次注入，跑完都还原了）：
+
+| 注入 | 结果 |
+|---|---|
+| `src/notes.rs` 里塞一段缩进歪掉的函数 | 第一道 `fmt --check` 退 1，clippy / test **没有开跑**（fail-fast 生效） |
+| 改成 `fn(v: &Vec<String>)`（格式干净） | 第一道过，第二道 clippy `ptr_arg` 退 101 |
+
+**钉住"只有一份定义"**：`tests/gate_test.rs` 三条断言——CI 必须调 `scripts/check.sh`、
+workflow 里不许内联那几条命令、`runs-on` 必须是 macOS。抄成两份之后它们会各走各的，
+到那天"本地过了"和"CI 过了"就不是同一句话，而这种漂移平时看不出来。
+
+**没做的两件（有意）**：
+
+* **工具链没 pin**。跟着 runner 镜像的 stable 走，新版 clippy 加 lint 会让 CI 突然变红。
+  代价是偶尔的意外红，换来的是不用维护一个越来越旧的版本号；真红了处置是"修掉或
+  `allow` 掉"，不是把 `-D warnings` 摘了。当前绿在 rustc / clippy 1.98.0。
+* **没把整道闸塞进 `policy.preflight_cmd`**。preflight 失败会记一笔 `fail` 而**不调宿主**，
+  连红 `max_fail_streak` 轮 runner 就停机——把 `cargo test` 放进去等于让一棵红树把整个长跑
+  卡死，runner 再也走不到"修好它"那一步。想要每轮开跑前过一道，用便宜的前两道——
+  在 `.zloop/state.json` 的 `policy` 里写
+  `"preflight_cmd": "sh scripts/check.sh fmt clippy"`（没有 `zloop policy` 这个命令，policy 是手改的）。
+
 ## 3. 测试覆盖空白
 
 用"pub 函数名在 `tests/` 里一次都没出现"粗测（会低估：很多函数是通过 CLI 测试间接跑到的）：

@@ -1,0 +1,48 @@
+# 仓库的自动闸：fmt --check + clippy -D warnings + cargo test。
+#
+# 跑的是 `scripts/check.sh`，不是在这里再抄一遍三条命令——闸只有一份定义，
+# 本地敲的和 CI 跑的永远是同一件事（`tests/gate_test.rs` 把这条钉成断言）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# CI 只读代码，不需要写任何东西
+permissions:
+  contents: read
+
+# 同一个分支连推几次时，只留最后一次：macOS runner 的分钟数比 Linux 贵 10 倍
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    # **必须是 macOS，不是 ubuntu**：`awake::supported()` 是 `cfg!(target_os = "macos")`，
+    # 非 macOS 上整个 keep-awake 层是 no-op，而 7 个测试（disablesleep / 看门狗 / SIGTERM 收尾 …）
+    # 断言的正是 pmset 真的被调过。在 ubuntu 上跑 = 开局就 7 红，等于没有闸。
+    # 实测：把 supported() 改成 false 再 cargo test → runner_test 7 failed / 37 passed。
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustfmt / clippy 在 GitHub 的 macOS 镜像里是随 rustup 预装的；
+      # 万一哪天镜像瘦身了，这一行补上，已装则是空操作。
+      - name: Install rustfmt + clippy
+        run: rustup component add rustfmt clippy
+
+      # 版本记进日志：闸红了先看是代码变了还是工具链变了。
+      # 已知取舍——这里跟着 runner 镜像的 stable 走，没有 pin。新版 clippy 加一条 lint
+      # 会让 CI 突然变红；那时候的处置是「修掉或 allow 掉」，不是把 -D warnings 摘了。
+      # 当前绿在 rustc / clippy 1.98.0。
+      - name: Toolchain versions
+        run: rustc --version && cargo --version && cargo fmt --version && cargo clippy --version
+
+      - name: Gate (fmt + clippy + test)
+        run: sh scripts/check.sh

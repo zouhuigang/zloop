@@ -800,7 +800,7 @@ for d in ~/work/*/; do [ -d "$d/.zloop" ] && (cd "$d" && echo "== $(basename "$d
 | `max_total_usd` | `0`（不限） | 本目标累计花费上限（来自 `claude -p` 返回的 `total_cost_usd`），达到即 `stopped (budget)` |
 | `notify_url` | 无 | 通知 webhook。飞书自定义机器人地址会自动用飞书消息格式 |
 | `notify_cmd` | 无 | 通知命令（`sh -c`），事件 JSON 从 stdin 进，另有 `ZLOOP_EVENT` / `ZLOOP_TEXT` / `ZLOOP_ROOT` 环境变量 |
-| `preflight_cmd` | 无 | runner 每轮开始前先跑它（如 `./init.sh && cargo test`）；失败记一笔 `fail` 不调宿主，通过则把摘要放进 prompt |
+| `preflight_cmd` | 无 | runner 每轮开始前先跑它（如 `./init.sh && cargo test`）；失败记一笔 `fail` 不调宿主，通过则把摘要放进 prompt。**放便宜的检查**：连红 `max_fail_streak` 轮就停机，一道跑得慢又容易红的闸会把长跑卡死在「走不到修好它那一步」 |
 | `require_doc` | `true` | 完成一条 todo 必须带 `--approach`（见 [6.1](#61-每条-todo-留一份技术文档)）；设为 `false` 关闭强制 |
 | `require_pitfall` | `true` | `--outcome fail` 必须带 `--pitfall`，失败的原因才有落点；设为 `false` 关闭强制 |
 
@@ -1962,11 +1962,24 @@ paused/done  >  unplanned / all_done  >  user_gate / blocked  >  fail_streak  > 
 ### 开发
 
 ```bash
-cargo test                       # 167 个用例（tick / todo / state / cli / runner / doctor，runner 用假宿主，约 2 分钟）
-cargo fmt --check                # 格式闸，配置见 rustfmt.toml
-cargo clippy --all-targets       # 目前 4 条告警（3 条 doc 缩进 + 1 条可省的生命周期），无正确性问题
+sh scripts/check.sh              # 整道闸：fmt --check → clippy -D warnings → cargo test（约 2 分钟）
+sh scripts/check.sh fmt clippy   # 只跑便宜的前两道（秒级，改完随手过一下）
 cargo build --release && install -m755 target/release/zloop ~/.local/bin/zloop
 ```
+
+**闸只有一份定义。** `scripts/check.sh` 就是 CI（`.github/workflows/ci.yml`）跑的那个文件——
+本地过了和 CI 过了永远是同一句话。`tests/gate_test.rs` 把这条钉成断言：workflow 里不许把
+`cargo fmt --all` / `-D warnings` / `cargo test` 再抄一遍，只能去调这个脚本。
+
+**CI 跑在 macOS 上，不是 ubuntu。** `awake::supported()` 是 `cfg!(target_os = "macos")`，
+非 macOS 上整个 keep-awake 层是 no-op，而 7 个测试断言的正是 `pmset` 真的被调过——
+在 ubuntu 上跑等于开局 7 红。工具链跟着 runner 镜像的 stable 走（没 pin），
+新版 clippy 加一条 lint 会让 CI 突然变红；那时候的处置是修掉或 `allow` 掉，不是摘掉 `-D warnings`。
+
+想让 runner 每轮开跑前也过一道，在 `.zloop/state.json` 的 `policy` 里写
+`"preflight_cmd": "sh scripts/check.sh fmt clippy"`。
+**别把 `test` 也塞进去**：preflight 失败会记 `fail` 而不调宿主，连红 `max_fail_streak` 轮就停机——
+一棵红树会把整个长跑卡死在"走不到修好它那一步"。
 
 **格式：`rustfmt.toml` 是必须的，别删。** 这份代码是 ~125 列的密排风格，rustfmt 的两个默认值都跟它对不上：
 

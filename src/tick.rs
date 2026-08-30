@@ -312,7 +312,7 @@ pub fn window_span(policy: &crate::state::Policy) -> Duration {
     Duration::hours(policy.window_hours.clamp(0, WINDOW_HOURS_MAX))
 }
 
-pub fn window_ticks<'a>(state: &'a State, at: DateTime<FixedOffset>) -> Vec<&'a Tick> {
+pub fn window_ticks(state: &State, at: DateTime<FixedOffset>) -> Vec<&Tick> {
     // 钳完还有 `checked_`：`at` 也可能是从账本里读来的（不是 now），谁都不信一遍
     let span = window_span(&state.policy);
     let since = at.checked_sub_signed(span).unwrap_or(at);

@@ -6,6 +6,7 @@
 //!     rule (`zloop install --sudoers`). Holders are counted in `~/.zloop/awake/<pid>` so several
 //!     runners can share the setting, and a detached watchdog runs `zloop awake reconcile` when the
 //!     runner dies, so even `kill -9` restores the default.
+//!
 //! On non-macOS platforms every function is a no-op.
 
 use crate::runner::{CapturedBytes, Group, Stop};

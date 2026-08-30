@@ -5,6 +5,7 @@
 //!     `{"msg_type":"text","content":{"text":…}}` shape, everything else `{"text":…,"event":…}`.
 //!   * `notify_cmd` — run through `sh -c`; the event JSON arrives on stdin and as
 //!     `ZLOOP_EVENT` / `ZLOOP_TEXT` environment variables.
+//!
 //! Zero dependencies: the surveyed harnesses (Ralph, Anthropic's, Codex /goal) all assume
 //! the human comes back on their own; a loop that runs overnight needs to call them.
 
