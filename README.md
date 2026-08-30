@@ -2002,7 +2002,12 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 目录：`src/` 实现 · `tests/` 集成测试 · `docs/`：[`FINDINGS.md`](docs/FINDINGS.md) 确认缺陷清册（**按缺陷查看这一份**）、[`CODE-AUDIT.md`](docs/CODE-AUDIT.md) 全量代码审查正文（按轮次读）、`RUST-DESIGN.md` 当前设计、`LONG-RUN-AUDIT.md` 长程加固审计、`OPEN-SOURCE-REVIEW.md` 开源方案对照与借鉴、`TEST-REPORT.md` 自测报告、`loopx-principles.md` / `loopx-scheduling-notes.md` loopx 研究、`DESIGN.md` v0.1 Python 原型设计记录。
 
 文档里的跨文件链接和锚点由 `python3 scripts/check-doc-links.py` 守着（`sh scripts/check.sh` 的第一道，CI 也跑）：
-链接指向不存在的文件或对不上的标题就红。`CODE-AUDIT.md` 的节号还多一条约束——不重复、不跳号，
-因为整份清册靠「正文 §N」把人送回正文，而这种引用**没有编译器**，写歪了不会有任何东西报错。
+链接指向不存在的文件或对不上的标题就红。节号还多两条约束——**不重复、不跳号、第一节只能是 `§0` 或 `§1`**，
+以及**每个 `§N` 都得指得到**（先判这个号说的是哪份文档：待在链接里就按链接指向的那份，
+否则看同一行前面提到的 `xxx.md`，都没有才算自指），因为整份清册靠「正文 §N」把人送回正文，
+而这种引用**没有编译器**，写歪了不会有任何东西报错。这两条 t46 之前只管 `CODE-AUDIT.md` 和
+`FINDINGS.md`，现在覆盖 README + `docs/` 全部 15 份，共 166 处 `§N`。
+闸自己也有回归测试：`--self-test` 拿一组合成文档跑一遍，报出来的必须**正好**是期待的那 9 条
+（少一条 = 规则失灵，多一条 = 规则误伤），`cargo test` 里的 `the_doc_link_gate_rules_still_bite` 调的就是它。
 
 MIT License.

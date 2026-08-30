@@ -337,7 +337,7 @@ CLI 返回的是 `mode: dry_run_preview, writes_now: False`——**只描述事�
 
 另有 4 条条件步（bind_thread_identity、configure_fine_grained_turn_mode、qualify_selected_capability、scheduler_ack_when_needed）全是多宿主/安全边界。**真正主干只有 3+1 步：建状态 → 规划 → 写 todo → 问该不该跑。** task lease（1399 行，TTL 45min/24h）仅 `handoff_mode=hard_lease` 时生效，默认 legacy——单 agent 完全不需要。
 
-### 3.3 "难用"的 8 条结构性根因（有证据）
+### 3.3 "难用"的 9 条结构性根因（有证据）
 
 1. **命令面爆炸**：argparse 实测 **113 个顶层子命令、307 个叶命令、2,553 个 flag 定义、893 个唯一 flag 名**（`cli.py:224`）；其中 16 个 `codex-cli-*` 宿主专用命令。
 2. **"flag 并集"反模式**：`todo` 是单 parser + 9 个位置动作 + **75 个 flag**，帮助文本自述"下面的选项是所有 todo 命令的并集…不支持的组合在读状态前失败"（`cli_commands/todo.py:149-175`）；`configure-goal` 56、`quota` 52、`refresh-state` 44（其中 18 个 `--vision-*/--progress-*`）、`bootstrap` 37。
