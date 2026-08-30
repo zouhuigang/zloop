@@ -1091,7 +1091,12 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
             continue;
         }
 
-        let todo = d.todo.clone().expect("ready decision carries a todo");
+        // 走到这儿 `!d.should_run` 早就 return / continue 掉了，所以 else 分支今天到不了。
+        // 写成"停下来"而不是 `.expect()` 是 B-1 的收口：这条不变量将来要是被谁破了，
+        // runner 该做的是像上面 `!should_run` 那样停下报原因，不是把长跑摔在这一行。
+        let Some(todo) = d.ready_todo().cloned() else {
+            return stop(root, &d.reason);
+        };
         let round_no = tick::round_number(&st) + 1;
         // 持有者记录里写「run 第 N 轮」而不是光一个 run：被挡住的人一眼知道是哪一轮在写回。
         state::set_operation(format!("run 第 {round_no} 轮"));

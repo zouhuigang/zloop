@@ -202,8 +202,7 @@ pub fn compute(state: &State, root: &Path, now: DateTime<FixedOffset>) -> Phase 
         }
     }
     let d = tick::decide(state, now);
-    if d.should_run {
-        let t = d.todo.as_ref().unwrap();
+    if let Some(t) = d.ready_todo() {
         // The status headline says "就绪" and marks the todo with ▶; nothing left to add.
         return Phase {
             kind: "idle",

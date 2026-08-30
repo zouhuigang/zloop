@@ -76,6 +76,25 @@ pub fn feedback_count(state: &State) -> usize {
     state.ticks.iter().filter(|t| t.outcome == FEEDBACK).count()
 }
 
+/// 一轮的判决：现在跑不跑、跑哪条、跑不了的话多久后再来看。
+///
+/// **不变量：`should_run` ⇒ `todo.is_some()`**。四处调用点（`cli.rs` 两处、`phase.rs`、
+/// `runner.rs`）在 `should_run` 为真之后直接把 todo 取出来用，靠的就是它。
+///
+/// 守这条不变量的是**两样东西**，都在这个文件里（B-1）：
+/// 1. 私有字段 `_seal` —— 字段照旧全 `pub` 可读，但别的模块拼不出一个
+///    `Decision { should_run: true, todo: None, .. }`，连编译都过不去；
+/// 2. 下面三个构造器 —— `ready()` 把 todo 收成**参数**而不是可选字段，
+///    `stop()` / `wait()` 则根本给不出 `should_run: true`。
+///
+/// 也就是说，能造出违反不变量的 `Decision` 的地方只剩这个模块自己，而这个模块里
+/// 一处结构体字面量都不留。读的那一侧再补一层：`ready_todo()` 把
+/// "先看 `should_run` 再 `unwrap`" 收成一个不会 panic 的动作。
+// clippy 会建议把 `_seal` 换成 `#[non_exhaustive]`。**这里两者不等价，所以按下不表**：
+// `#[non_exhaustive]` 只拦**别的 crate**，而这条不变量真正暴露给的是 `cli` / `phase` /
+// `runner` —— 它们和这里在**同一个 crate** 里，加了属性照样能拼出字面量。私有字段拦的是
+// 模块，正好是需要的粒度。（`tests/` 是外部 crate，两种写法都拦得住，不是判据。）
+#[allow(clippy::manual_non_exhaustive)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decision {
     pub should_run: bool,
@@ -83,11 +102,34 @@ pub struct Decision {
     pub todo: Option<Todo>,
     /// `None` means "stop, wait for a human".
     pub interval_min: Option<u32>,
+    /// 见上：私有 = 只有 `tick` 模块造得出 `Decision`。没有语义。
+    _seal: (),
 }
 
 impl Decision {
+    /// 终态：这个目标现在不该跑，而且**没有下一次自动重试**（`interval_min: None` = 停下等人）。
     fn stop(reason: &str) -> Self {
-        Decision { should_run: false, reason: reason.into(), todo: None, interval_min: None }
+        Decision { should_run: false, reason: reason.into(), todo: None, interval_min: None, _seal: () }
+    }
+
+    /// 非终态：这一轮没活派出去，但过 `interval_min` 分钟还会再来看一眼。
+    /// `None` 同样是"停下等人"——攒够 noop 之后连重试都不该再排（A-10）。
+    fn wait(reason: &str, interval_min: Option<u32>) -> Self {
+        Decision { should_run: false, reason: reason.into(), todo: None, interval_min, _seal: () }
+    }
+
+    /// 唯一一个能造出 `should_run: true` 的入口。todo 是参数，不是 `Option` 字段——
+    /// "说要跑却没说跑哪条"在这里表达不出来。
+    fn ready(todo: Todo, interval_min: u32) -> Self {
+        Decision { should_run: true, reason: "ready".into(), todo: Some(todo), interval_min: Some(interval_min), _seal: () }
+    }
+
+    /// 这一轮派出去的那条活：`Some` **当且仅当** `should_run`。
+    ///
+    /// 调用点原本写的是 `if d.should_run { d.todo.as_ref().unwrap() }`，四处一模一样。
+    /// 换成它之后，就算哪天不变量真被破了，拿到的也是"没活可派"而不是四处一起 panic。
+    pub fn ready_todo(&self) -> Option<&Todo> {
+        self.todo.as_ref().filter(|_| self.should_run)
     }
 }
 
@@ -225,7 +267,7 @@ pub fn progress_streak(ticks: &[Tick], todo_id: &str, forgive_at: usize) -> usiz
 /// `next` 撞上别人的派活时给出的决定：不跑，但过一会儿可以再来问——
 /// 派活会因 `stale_after_min` 过期，所以自动续跑的循环能自己恢复，不必等人。
 pub fn hold_decision(state: &State) -> Decision {
-    Decision { should_run: false, reason: "held_by_other".into(), todo: None, interval_min: Some(interval(state, 1)) }
+    Decision::wait("held_by_other", Some(interval(state, 1)))
 }
 
 pub fn held_by_other(state: &State, who: &HostSession, at: DateTime<FixedOffset>) -> Option<crate::state::InProgress> {
@@ -393,12 +435,7 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
     if runnable.is_empty() {
         let waiting_on_user = open.iter().any(|&i| state.todos[i].blocked_by.iter().any(|d| d == todo::USER));
         let reason = if waiting_on_user { "user_gate" } else { "blocked" };
-        return Decision {
-            should_run: false,
-            reason: reason.into(),
-            todo: None,
-            interval_min: if exhausted { None } else { Some(interval(state, 1 + noops)) },
-        };
+        return Decision::wait(reason, if exhausted { None } else { Some(interval(state, 1 + noops)) });
     }
     // 同上（A-10），而这一支更狠：`max_fail_streak = 0` 时 `0 >= 0` 恒真，一次失败都
     // 没有的全新目标第一次 `next` 就返回 `fail_streak` + `interval=None`——想关掉这道闸
@@ -430,19 +467,9 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
         // 醒一次重新判断（未来时间戳本身由 doctor 的 `future_timestamp` 报出来）。
         let cap = policy.window_hours.clamp(1, WINDOW_HOURS_MAX) * 60;
         let minutes = (frees_in.num_seconds().div_euclid(60) + 1).clamp(1, cap) as u32;
-        return Decision {
-            should_run: false,
-            reason: "throttled".into(),
-            todo: None,
-            interval_min: if exhausted { None } else { Some(minutes) },
-        };
+        return Decision::wait("throttled", if exhausted { None } else { Some(minutes) });
     }
-    Decision {
-        should_run: true,
-        reason: "ready".into(),
-        todo: Some(state.todos[runnable[0]].clone()),
-        interval_min: Some(interval(state, 0)),
-    }
+    Decision::ready(state.todos[runnable[0]].clone(), interval(state, 0))
 }
 
 // --- writes ---------------------------------------------------------------

@@ -795,9 +795,10 @@ fn cmd_next(root: &Path, path: &Path, json: bool, peek: bool) -> Result<i32> {
         }
         let d = tick::decide(st, now);
         if !peek {
-            if d.should_run {
+            // `ready_todo()` = "should_run 且真有活"，一个动作（B-1）：原来这里是
+            // `if d.should_run { d.todo.as_ref().unwrap() }`，把不变量摊给了调用点。
+            if let Some(t) = d.ready_todo() {
                 // Hand the todo out: from now until `done`, phase reports "executing".
-                let t = d.todo.as_ref().unwrap();
                 st.in_progress = Some(state::InProgress {
                     todo: t.id.clone(),
                     started_at: state::format_iso(&now),
@@ -821,8 +822,7 @@ fn cmd_next(root: &Path, path: &Path, json: bool, peek: bool) -> Result<i32> {
     }
     if json {
         print_json(&payload);
-    } else if decision.should_run {
-        let t = decision.todo.as_ref().unwrap();
+    } else if let Some(t) = decision.ready_todo() {
         println!("RUN  {}", fmt_todo(t));
         if let Some(a) = &t.acceptance {
             println!("     acceptance: {a}");

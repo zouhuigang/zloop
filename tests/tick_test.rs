@@ -544,3 +544,114 @@ fn in_range_intervals_are_left_alone() {
     let st = fresh(&["[P0] a"]);
     assert_eq!(st.policy.intervals_min, vec![3, 10, 30], "默认阶梯变了的话上面那条测试的期望值也要跟着改");
 }
+
+/// B-1：`should_run ⇒ todo 非空` 这条不变量，把 `decide()` 的**每一个出口**都过一遍。
+///
+/// 四处调用点（`cli.rs` 两处、`phase.rs`、`runner.rs`）都是"看见 `should_run` 就把 todo
+/// 取出来用"。原来这个不变量只是"今天碰巧成立"：`Decision` 字段全 `pub`、没有构造器，
+/// 谁在 `decide()` 里新加一支 `should_run: true` 而忘了给 todo，四处一起 panic。
+///
+/// 现在守它的是构造器 + 私有字段（别的模块拼不出 `Decision` 字面量，编译就过不去），
+/// 这条测试守的是**本模块内部**那一半：新出口只要违反不变量，这里立刻红。
+/// 顺带钉住 `ready_todo()` 和 `should_run` 永远同进同退。
+#[test]
+fn every_decide_exit_keeps_should_run_implies_a_todo() {
+    let now = now_utc();
+    let mut seen: Vec<String> = Vec::new();
+    let mut check = |st: &zloop::state::State| {
+        let d = tick::decide(st, now);
+        assert_eq!(d.should_run, d.todo.is_some(), "reason={} 违反 should_run ⇒ todo 非空：{d:?}", d.reason);
+        assert_eq!(d.ready_todo().is_some(), d.should_run, "ready_todo() 必须和 should_run 同进同退");
+        if let Some(t) = d.ready_todo() {
+            assert_eq!(Some(t), d.todo.as_ref(), "ready_todo() 给的必须就是那一条");
+        }
+        seen.push(d.reason.clone());
+    };
+
+    // ready
+    check(&fresh(&["[P0] a"]));
+    // paused / done（goal.status 那一关）
+    let mut st = fresh(&["[P0] a"]);
+    st.goal.status = "paused".into();
+    check(&st);
+    let mut st = fresh(&["[P0] a"]);
+    done(&mut st, "t1");
+    check(&st);
+    // unplanned
+    check(&fresh(&[]));
+    // all_done
+    let mut st = fresh(&["[P0] a"]);
+    done(&mut st, "t1");
+    st.goal.status = "active".into();
+    check(&st);
+    // all_deferred
+    let mut st = fresh(&["[P0] a"]);
+    todo::set_status(&mut st, "t1", "deferred", None).unwrap();
+    check(&st);
+    // blocked
+    let mut st = fresh(&["[P0] a", "[P0] b"]);
+    st.todos[0].blocked_by = vec!["t2".into()];
+    st.todos[1].blocked_by = vec!["t1".into()];
+    check(&st);
+    // user_gate
+    let mut st = fresh(&["[P0] a"]);
+    st.todos[0].blocked_by = vec![todo::USER.into()];
+    check(&st);
+    // blocked + 攒够 noop（exhausted 那一支，interval_min=None）
+    let mut st = fresh(&["[P0] a"]);
+    st.todos[0].blocked_by = vec![todo::USER.into()];
+    for _ in 0..st.policy.max_noop_streak {
+        tick_at(&mut st, "noop", None, None);
+    }
+    check(&st);
+    // fail_streak
+    let mut st = fresh(&["[P0] a"]);
+    for _ in 0..st.policy.max_fail_streak {
+        outcome(&mut st, "t1", "fail", "boom");
+    }
+    check(&st);
+    // budget
+    let mut st = fresh(&["[P0] a"]);
+    st.policy.max_total_usd = 1.0;
+    tick_at(&mut st, "progress", Some("t1"), None);
+    st.ticks.last_mut().unwrap().cost_usd = Some(2.0);
+    check(&st);
+    // progress_streak
+    let mut st = fresh(&["[P0] a"]);
+    for _ in 0..st.policy.max_progress_streak {
+        outcome(&mut st, "t1", "progress", "still going");
+    }
+    check(&st);
+    // throttled
+    let mut st = fresh(&["[P0] a"]);
+    st.policy.max_runs = 1;
+    tick_at(&mut st, "done", Some("t1"), None);
+    st.todos[0].status = "open".into();
+    st.goal.status = "active".into();
+    check(&st);
+    // held_by_other 不走 decide()，但它也是一个交给那四处调用点的 Decision
+    let st = fresh(&["[P0] a"]);
+    let d = tick::hold_decision(&st);
+    assert_eq!((d.should_run, d.todo.is_some(), d.ready_todo().is_some()), (false, false, false));
+    seen.push(d.reason.clone());
+
+    // fixture 防空跑：上面每一支都得真的走到了自己那个出口，别哪天 helper 一改全塌成 ready
+    let want = [
+        "ready",
+        "paused",
+        "done",
+        "unplanned",
+        "all_done",
+        "all_deferred",
+        "blocked",
+        "user_gate",
+        "fail_streak",
+        "budget",
+        "progress_streak",
+        "throttled",
+        "held_by_other",
+    ];
+    for w in want {
+        assert!(seen.iter().any(|s| s == w), "出口 {w} 没被走到，fixture 失效了：{seen:?}");
+    }
+}
