@@ -347,13 +347,18 @@ fn leftover_temp_files_get_reported() {
 #[test]
 fn policy_numbers_written_out_of_range_are_reported() {
     // (改哪个字段, 写成什么, 是不是 error 级)
-    // error = 人写的取值被无声地换掉了；warn = 有个说得过去的兜底（intervals_min 退回 3 分钟）
+    // error = 人写的取值被无声地换掉了；warn = 有个说得过去的兜底（intervals_min 空掉退回 3 分钟）
     let cases = [
         ("window_hours", serde_json::json!(99_999_999_999i64), true),
         ("window_hours", serde_json::json!(-1), true),
         ("window_hours", serde_json::json!(i64::MAX), true),
         ("max_total_usd", serde_json::json!(-5.0), true),
         ("intervals_min", serde_json::json!([]), false),
+        // 空不空是这个字段最浅的写错法；写歪的**取值**才是让 runner 睡死 / 忙等的那种，
+        // 而它以前一条都不报（doctor --json 的 findings 是空的）
+        ("intervals_min", serde_json::json!([4_294_967_295u32]), true),
+        ("intervals_min", serde_json::json!([3, 10, 4_294_967_295u32]), true), // 只歪了最慢那一档
+        ("intervals_min", serde_json::json!([0]), true),                       // sleep 0 秒的忙等
     ];
     for (field, value, fatal) in cases {
         let tmp = tempfile::tempdir().unwrap();
@@ -379,6 +384,9 @@ fn policy_numbers_written_out_of_range_are_reported() {
         ("window_hours", serde_json::json!(24 * 365)),
         ("max_total_usd", serde_json::json!(0.0)),
         ("max_total_usd", serde_json::json!(12.5)),
+        ("intervals_min", serde_json::json!([3, 10, 30])),
+        ("intervals_min", serde_json::json!([1])),
+        ("intervals_min", serde_json::json!([zloop::tick::INTERVAL_MIN_MAX])),
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();

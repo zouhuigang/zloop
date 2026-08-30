@@ -65,11 +65,17 @@ fn last_journal_event(root: &Path) -> Option<Value> {
 
 /// Decision reasons read as jargon in a Chinese dashboard line; `zloop context` keeps the raw word.
 /// 90 分钟以上就别让人自己换算了。
+///
+/// 四舍五入用 `saturating_add`：这里收的是 `Decision::interval_min`，而它一路来自
+/// `policy.intervals_min`——一份**给人手改的**文件。`m` 接近 `u32::MAX` 时 `m + 720`
+/// 在 debug 构建里是 panic（`next` / `status` / `context` 一起退 101），在 release 里
+/// 是回绕：4294967295 分钟（8171 年）会印成"约 0 天"，把睡死显示成一切正常。
+/// 取值本身在 `tick::clamp_interval` 封顶，这里是第二道——显示层不该有能力把面板变成假的。
 pub fn human_minutes(m: u32) -> String {
     match m {
         0..=89 => format!("{m} 分钟"),
-        90..=1439 => format!("约 {} 小时", (m + 30) / 60),
-        _ => format!("约 {} 天", (m + 720) / 1440),
+        90..=1439 => format!("约 {} 小时", m.saturating_add(30) / 60),
+        _ => format!("约 {} 天", m.saturating_add(720) / 1440),
     }
 }
 

@@ -410,3 +410,82 @@ fn in_range_window_hours_is_left_alone() {
     tick_at(&mut st, "progress", Some("t1"), Some(now - Duration::minutes(1)));
     assert_eq!(tick::window_ticks(&st, now).len(), 0, "window_hours=0：窗口里一条都不该有");
 }
+
+/// A-7 / A-11 的第三次重演：`policy.intervals_min` 写歪一个数，循环再也醒不过来。
+///
+/// 前两次分别是 `window_hours` 越界 panic 和未来时间戳把 throttle 拖到下个世纪。这一次的
+/// 字段以前**只被查过空不空**，取值一路原样交给 runner。实测 `intervals_min = [4294967295]`
+/// 且有 todo 卡在人手里：debug 构建在 `phase::human_minutes` 的 `m + 720` 上 panic
+/// （`next` / `status` / `context` 一起退 101），release 构建不 panic，
+/// `interval_min` 原样吐 4294967295 分钟 = 8171 年，而面板上因为同一处加法回绕
+/// 印的是"约 0 天后重试"——**睡死的表现是一切正常**。
+///
+/// `throttled` 那一支有窗口封顶挡着（A-11），剩下四支一处封顶都没有，所以每一支都要
+/// 单独走一遍：只验 `ready` 的话，撤掉封顶这条测试照样是绿的。
+#[test]
+fn an_out_of_range_interval_cannot_put_the_loop_to_sleep_forever() {
+    let now = now_utc();
+    let cap = zloop::tick::INTERVAL_MIN_MAX;
+    // 0 是另一头：runner 每轮 sleep 0 秒、立刻再拉起一个 host 会话，是烧钱的忙等
+    for (bad, want) in [(u32::MAX, cap), (cap + 1, cap), (525_600, cap), (0, 1)] {
+        // 1. ready：每一轮正常派活都带着它
+        let mut st = fresh(&["[P0] a"]);
+        st.policy.intervals_min = vec![bad];
+        let d = tick::decide(&st, now);
+        assert_eq!((d.should_run, d.reason.as_str()), (true, "ready"), "intervals_min=[{bad}]");
+        assert_eq!(d.interval_min, Some(want), "ready：intervals_min=[{bad}]");
+
+        // 2. user_gate：todo 卡在人手里——原始复现走的就是这一支
+        let mut st = fresh(&["[P0] a"]);
+        st.policy.intervals_min = vec![bad];
+        tick::apply_done(&mut st, "t1", "done", "", Some("which db?"), None, &cli_who()).unwrap();
+        let d = tick::decide(&st, now);
+        assert_eq!(d.reason, "user_gate", "fixture 防空跑：这一支必须真的走到");
+        assert_eq!(d.interval_min, Some(want), "user_gate：intervals_min=[{bad}]");
+
+        // 3. blocked：等的是另一条 todo
+        let mut st = fresh(&["[P0] a", "[P0] b"]);
+        st.policy.intervals_min = vec![bad];
+        st.todos[1].blocked_by = vec!["t1".into()];
+        st.todos[0].status = "blocked".into();
+        let d = tick::decide(&st, now);
+        assert_eq!(d.reason, "blocked", "fixture 防空跑");
+        assert_eq!(d.interval_min, Some(want), "blocked：intervals_min=[{bad}]");
+
+        // 4. held_by_other：派活在别的会话手上，过一会儿再来问
+        let mut st = fresh(&["[P0] a"]);
+        st.policy.intervals_min = vec![bad];
+        assert_eq!(tick::hold_decision(&st).interval_min, Some(want), "held_by_other：intervals_min=[{bad}]");
+
+        // 5. runner 在 `decide` 不给间隔时退回"最慢的那一档"，那是这个字段的第二个读者，
+        //    绕过了 `interval()`。它换算成秒去 sleep，不封顶就是 8171 年。
+        let secs = zloop::tick::clamp_interval(bad) as u64 * 60;
+        assert!(secs <= cap as u64 * 60, "睡的秒数也得跟着封住：{secs}");
+    }
+
+    // 只歪最慢那一档：`decide` 给的 3 是对的，睡死藏在退避阶梯的末尾
+    let mut st = fresh(&["[P0] a"]);
+    st.policy.intervals_min = vec![3, 10, u32::MAX];
+    assert_eq!(tick::decide(&st, now).interval_min, Some(3), "第一档没歪，不该被动");
+    assert_eq!(zloop::tick::clamp_interval(*st.policy.intervals_min.last().unwrap()), cap);
+
+    // 显示层是第二道：`human_minutes` 收的是同一个数，回绕会把面板变成假的
+    assert_ne!(zloop::phase::human_minutes(u32::MAX), "约 0 天", "回绕后 8171 年印成 0 天");
+    assert_ne!(zloop::phase::human_minutes(u32::MAX - 100), "约 0 天");
+    assert_eq!(zloop::phase::human_minutes(1_439), "约 24 小时"); // 边界值不能被顺手改
+    assert_eq!(zloop::phase::human_minutes(1_440), "约 1 天");
+}
+
+/// 钳位只对越界的值动手：合法的阶梯必须一分不差地按原样生效。
+#[test]
+fn in_range_intervals_are_left_alone() {
+    let now = now_utc();
+    for m in [1u32, 3, 30, 1440, zloop::tick::INTERVAL_MIN_MAX] {
+        let mut st = fresh(&["[P0] a"]);
+        st.policy.intervals_min = vec![m];
+        assert_eq!(tick::decide(&st, now).interval_min, Some(m), "intervals_min=[{m}] 是合法的，不该被改");
+    }
+    // 默认的三档阶梯（3/10/30）逐级退避这件事由 blocked_by_dependency_and_backoff_ladder 钉着
+    let st = fresh(&["[P0] a"]);
+    assert_eq!(st.policy.intervals_min, vec![3, 10, 30], "默认阶梯变了的话上面那条测试的期望值也要跟着改");
+}

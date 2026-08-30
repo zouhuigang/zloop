@@ -375,6 +375,23 @@ fn check_policy(gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
             format!("把 {}/{} 的 policy.intervals_min 写成 [3, 10, 30] 这样的递增列表", STATE_DIR, state::STATE_FILE),
         ));
     }
+    // 空不空只是这个字段最浅的那种写错法。真正让循环停摆的是**取值**：写大了 runner 睡死
+    // （见 `tick::clamp_interval`），写成 0 是每轮 sleep 0 秒的忙等。两边都被钳住了，
+    // 所以循环照跑——正因为照跑，没人会来查，得由这条说出"你写的那个数没生效"。
+    let imax = crate::tick::INTERVAL_MIN_MAX;
+    let bad: Vec<u32> = p.intervals_min.iter().copied().filter(|&m| m == 0 || m > imax).collect();
+    if let Some(&first) = bad.first() {
+        let list = bad.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+        f.push(Finding::err(
+            "bad_policy",
+            format!(
+                "[{who}] policy.intervals_min 里有 {} 档不在 1..={imax} 里（{list}）——按 {} 分钟算，你写的那个数没生效",
+                bad.len(),
+                crate::tick::clamp_interval(first)
+            ),
+            format!("把 {}/{} 的 policy.intervals_min 改回 [3, 10, 30] 这样的递增列表", STATE_DIR, state::STATE_FILE),
+        ));
+    }
 }
 
 /// 账本里有落在**未来**的时间戳。

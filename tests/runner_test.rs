@@ -385,6 +385,61 @@ echo '{"session_id":"a16","is_error":false,"result":"ok"}'"#,
     assert!(!j.iter().any(|e| e["event"] == "stop" && e["reason"] == "throttled"), "配额满不是终态，不该 stop：{j:?}");
 }
 
+/// `policy.intervals_min` 的**第二个读者**：`decide` 不给间隔时 runner 退回"最慢的那一档"。
+///
+/// `slowest_interval` 直接读 `intervals_min.last()`，绕过了 `tick::interval` 的出口封顶。
+/// 所以 `[1, 1, 4294967295]` 这种「只歪最慢那一档」的写法最阴：`zloop next --peek` 看到的
+/// 间隔一切正常（第一档没歪），doctor 修之前也不吭声，只有 runner 走到"没给间隔"那一支时
+/// 才现形——`--fast` 下睡 4294967295 秒（136 年），正常模式下是 8171 年。
+/// 同一份数据的两个读者要过同一道闸。
+///
+/// 走到那一支的路和 A-16 那条测试一样：todo 卡在人手里 + 人在终端敲够 `max_noop_streak`
+/// 次 `zloop next`，`decide` 就把 `interval_min` 翻成 `None`。
+#[test]
+fn a_huge_slowest_interval_cannot_make_the_runner_sleep_for_a_century() {
+    let fake = fake_host("echo '{\"session_id\":\"t32\",\"is_error\":false,\"result\":\"ok\"}'");
+    let d = project(&["[P0] a"]);
+    let (code, out, err) = run(&d, &["done", "t1", "--note", "x", "--block", "which db?", "--no-doc"], &[]);
+    assert_eq!(code, 0, "{out}{err}");
+
+    let p = state::state_path(&d);
+    let mut st = state::load(&p).unwrap();
+    st.policy.intervals_min = vec![1, 1, 4_294_967_295];
+    state::save(&p, &mut st).unwrap();
+
+    // 人在终端里敲几下 `zloop next`（就想看一眼现在什么情况）→ user_gate 那一支的间隔变 null
+    for _ in 0..st.policy.max_noop_streak {
+        run(&d, &["next"], &[]);
+    }
+    // fixture 防空跑：这两条前提但凡有一条不成立，下面就是在测空气
+    let (_, out, _) = run(&d, &["next", "--peek", "--json"], &[]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!((v["reason"].as_str(), v["interval_min"].is_null()), (Some("user_gate"), true), "{out}");
+
+    let tools = fake_power_tools(true);
+    let path = format!("{}:{}", tools.display(), with_fake_path(&fake));
+    let e = awake_env();
+    let vars = awake_vars(&e, &path);
+    let (code, out, err) = run(&d, &["start", "--fast", "--timeout-min", "120"], &vars);
+    assert_eq!(code, 0, "等人不是终态，start 不该拒绝：{out}{err}");
+
+    let mut sleep_until = None;
+    for _ in 0..60 {
+        if let Some(ev) = journal(&d).into_iter().find(|e| e["event"] == "sleep") {
+            sleep_until = ev["until"].as_str().map(str::to_string);
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    run(&d, &["stop"], &vars);
+
+    let until = sleep_until.unwrap_or_else(|| panic!("起来之后该睡在 user_gate 上：{:?}", journal(&d)));
+    let until = zloop::state::parse_iso(&until).unwrap();
+    let hours = (until - zloop::state::now()).num_hours();
+    // 封顶后 `--fast` 下是 10080 秒（不到 3 小时）；撤掉封顶是 4294967295 秒 = 136 年
+    assert!(hours < 24, "runner 醒过来的时间不该在一天以外（撤掉封顶：睡到 {until}）");
+}
+
 /// A-17 回归：人在另一个终端敲一句 `zloop feedback`，不能让一轮**失败**的宿主
 /// 被记成「写回了」。
 ///

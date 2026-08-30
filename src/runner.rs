@@ -857,8 +857,14 @@ fn journal_sleep(root: &Path, units: u32, fast: bool, reason: &str) -> Result<()
     )
 }
 
+/// 最慢的那一档，用在 `decide` 没给间隔的两处（等人 / 被限流）。
+///
+/// 走 `clamp_interval` 而不是直接读 `last()`：这是 `policy.intervals_min` 的**第二个读者**，
+/// 绕过了 `tick::interval` 的封顶。`intervals_min = [3, 4294967295]` 时 `decide` 给的间隔
+/// 是正常的 3，而这里给出 4294967295 分钟 → `secs()` 换算成 8171 年的 sleep，
+/// 同一份数据的两个读者要过同一道闸。
 fn slowest_interval(state: &State) -> u32 {
-    state.policy.intervals_min.last().copied().unwrap_or(30)
+    tick::clamp_interval(state.policy.intervals_min.last().copied().unwrap_or(30))
 }
 
 /// Decide how long to sleep for a non-running decision, or `None` to stop the runner.

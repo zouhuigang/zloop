@@ -302,12 +302,37 @@ pub fn window_ticks<'a>(state: &'a State, at: DateTime<FixedOffset>) -> Vec<&'a 
         .collect()
 }
 
+/// 一档退避间隔的合法上限：7 天。
+///
+/// 间隔的语义是「多久回来再看一眼」，不是排期——真要停很久有 `defer` 和 `pause`。
+/// 一周还回不来一次的循环，已经和停了没区别。
+pub const INTERVAL_MIN_MAX: u32 = 7 * 24 * 60;
+
+/// 把一档间隔钳进 `1..=INTERVAL_MIN_MAX`。
+///
+/// 上限那边挡的是**睡死**：`window_hours`（A-7）和未来时间戳（A-11）之后，
+/// `intervals_min` 是第三处「一个数写歪就让循环永远醒不过来」的地方，而且是唯一
+/// 没有任何封顶的一处——`throttled` 那一支有窗口封顶挡着，`user_gate` / `blocked`
+/// 这一支直接把文件里的数交给了 runner。实测 `intervals_min = [4294967295]`：
+/// debug 构建在 `phase::human_minutes` 的 `m + 720` 上 panic（`next` / `status` /
+/// `context` 一起退 101），release 构建不 panic，但 `interval_min` 原样吐出
+/// 4294967295 分钟（8171 年）——而面板上因为同一处加法回绕，写的是**"约 0 天后重试"**。
+/// 也就是说不封顶时，睡死的表现是「一切正常」。
+///
+/// 下限是 1 不是 0：`intervals_min = [0]` 时 runner 每轮 sleep 0 秒、立刻再拉起一个
+/// host 会话，那是烧钱的忙等，不是快。
+///
+/// 钳过就等于文件里写的数没生效，这件事由 `doctor` 的 `bad_policy` 说出来。
+pub fn clamp_interval(m: u32) -> u32 {
+    m.clamp(1, INTERVAL_MIN_MAX)
+}
+
 fn interval(state: &State, level: usize) -> u32 {
     let iv = &state.policy.intervals_min;
     if iv.is_empty() {
         return 3;
     }
-    iv[level.min(iv.len() - 1)]
+    clamp_interval(iv[level.min(iv.len() - 1)])
 }
 
 // --- the decision ---------------------------------------------------------

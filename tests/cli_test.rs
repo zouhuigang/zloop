@@ -2554,3 +2554,59 @@ fn an_out_of_range_window_hours_does_not_take_the_whole_project_down() {
         }
     }
 }
+
+/// `policy.intervals_min` 越界的 CLI 面：A-7/A-11 的第三次重演，这一次 doctor 一声不吭。
+///
+/// 复现（修之前）：`intervals_min = [4294967295]` + 一条卡在人手里的 todo →
+/// debug 构建 `next --peek --json` / `status` / `context` 全在 `phase.rs` 的
+/// `human_minutes` 上 `attempt to add with overflow`，exit 101；release 构建不崩，
+/// 但 `interval_min` 是 4294967295 分钟（8171 年，runner 就此睡死），
+/// 而面板上因为同一处加法回绕印的是「约 0 天后重试」，`doctor --json` 的 findings 是空的。
+/// 三样东西同时说"没事"，这是最难查的那一类。
+///
+/// 单元测试（tick_test）钉的是钳位本身，这里钉的是"用户真敲的那几条命令还能用、
+/// 而且看得出配置写歪了"。
+#[test]
+fn an_out_of_range_interval_does_not_panic_or_sleep_the_loop_forever() {
+    let cap = zloop::tick::INTERVAL_MIN_MAX;
+    for intervals in [
+        serde_json::json!([4_294_967_295u32]),
+        serde_json::json!([0]),
+        serde_json::json!([3, 10, 4_294_967_295u32]), // 只歪最慢那一档
+    ] {
+        // user_gate=true 时那条 todo 卡在人手里（原始复现的分支）；false 时是正常派活
+        for user_gate in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let d = dir.path();
+            assert_eq!(zloop(d, &["init", "alpha"], None, &[]).code, 0);
+            zloop(d, &["plan"], Some("[P1] one\n"), &[]);
+            if user_gate {
+                let o = zloop(d, &["done", "t1", "--note", "x", "--block", "which db?", "--no-doc"], None, &[]);
+                assert_eq!(o.code, 0, "{}{}", o.out, o.err);
+            }
+            let p = state::state_path(d);
+            let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+            v["policy"]["intervals_min"] = intervals.clone();
+            fs::write(&p, serde_json::to_string(&v).unwrap()).unwrap();
+
+            let tag = format!("intervals_min={intervals} user_gate={user_gate}");
+            for args in [vec!["status"], vec!["context"], vec!["next", "--peek", "--json"]] {
+                let o = zloop(d, &args, None, &[]);
+                assert_eq!(o.code, 0, "{tag} 时 `zloop {}` 该照常能用：{}{}", args.join(" "), o.out, o.err);
+                assert!(!o.err.contains("panicked"), "{tag} `zloop {}`：{}", args.join(" "), o.err);
+            }
+            // fixture 防空跑：user_gate 那一支必须真的走到，否则等于只验了 ready
+            let o = zloop(d, &["next", "--peek", "--json"], None, &[]);
+            let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+            assert_eq!(v["reason"], if user_gate { "user_gate" } else { "ready" }, "{tag}：{}", o.out);
+            let m = v["interval_min"].as_u64().unwrap_or_else(|| panic!("{tag}：{}", o.out));
+            assert!(m >= 1 && m <= cap as u64, "{tag}：间隔要钳进 1..={cap}，实际 {m}");
+
+            // 而且不是闷头钳掉就算了：doctor 得把这个没生效的取值报出来（修之前 findings 是空的）
+            let o = zloop(d, &["doctor", "--json"], None, &[]);
+            let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+            let kinds: Vec<&str> = v["findings"].as_array().unwrap().iter().filter_map(|f| f["kind"].as_str()).collect();
+            assert!(kinds.contains(&"bad_policy"), "{tag} 该被 doctor 报出来：{}", o.out);
+        }
+    }
+}
