@@ -1297,6 +1297,98 @@ fn status_tells_a_dead_wait_apart_from_a_normal_queue() {
     assert!(!o.out.contains("zloop edit t1 --status open"), "别让人去改一条已经不存在的 todo: {}", o.out);
 }
 
+/// 「永远等不到」在**四张清单上**要说同一句话，`status` 的判据还得看全部依赖。
+///
+/// t36 只收了 `status` 一处，留下两个口子：
+/// ① `status` 拿"第一条没 done 的依赖"去判死活——`blocked_by [t1(open), t4(deferred)]`
+///    这种，doctor 退 1 喊 t2 永远轮不到，status 照旧印「⏳ 等 t1」；
+/// ② `context`（模型每轮读的交接包）/ `status --md` / `edit` 的回显还印紧凑版的 `⏳t4`，
+///    模型于是把一条永远轮不到的 todo 当成"迟早轮到"，接着往下等。
+#[test]
+fn a_dead_wait_reads_the_same_on_every_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "alpha"], None, &[]);
+    zloop(
+        d,
+        &["plan", "--add", "[P1] 做基础", "--add", "[P1] 等两条", "--add", "[P1] 等一条延后的", "--add", "[P1] 会被延后"],
+        None,
+        &[],
+    );
+    assert_eq!(zloop(d, &["edit", "t4", "--status", "deferred"], None, &[]).code, 0);
+
+    // 造出它的那一刻，回显就得说：`--blocked-by` 只挡自依赖和不存在的 id，
+    // 依赖一条已延后的 todo 一路放行
+    let o = zloop(d, &["edit", "t2", "--blocked-by", "t1,t4"], None, &[]);
+    assert_eq!(o.code, 0, "edit 本身是成功的，别把脚本里的 `edit && …` 打断");
+    assert!(o.out.contains("⛔等不到 t4"), "造出死依赖的那一刻就该说: {}", o.out);
+    assert!(o.out.contains("解开敲 zloop edit t4 --status open"), "还欠一个出口: {}", o.out);
+    assert!(!o.out.contains("⏳"), "别再印成排上了: {}", o.out);
+    zloop(d, &["edit", "t3", "--blocked-by", "t4"], None, &[]);
+    // 前提：doctor 认定这两条永远轮不到（少了这句，下面验的只是个没后果的字样）
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 1, "前提没了：doctor 得先认定这是死等");
+
+    // ① 死依赖排在活依赖后面：t2 blocked_by [t1(open), t4(deferred)]
+    let o = zloop(d, &["status", "--no-color"], None, &[]);
+    assert!(!o.out.contains("⏳ 等 t1"), "死依赖排在活的后面就漏判了: {}", o.out);
+    assert_eq!(o.out.matches("⛔ 等不到 t4").count(), 2, "t2 和 t3 都该是死等: {}", o.out);
+
+    // ② 模型每轮读的交接包：说坏了，还要说敲什么——只说坏了它得再查一轮
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(o.out.contains("⛔等不到 t4（zloop edit t4 --status open）"), "交接包要带出口: {}", o.out);
+    assert!(!o.out.contains("⏳t1,t4") && !o.out.contains("⏳t4"), "别再印成排队: {}", o.out);
+    let o = zloop(d, &["status", "--md"], None, &[]);
+    assert!(o.out.contains("⛔等不到 t4"), "state 的镜像也是同一句话: {}", o.out);
+    assert!(!o.out.contains("⏳t4"), "别再印成排队: {}", o.out);
+
+    // 把依赖捡回来：四处一起回到普通排队，doctor 也闭嘴
+    assert_eq!(zloop(d, &["edit", "t4", "--status", "open"], None, &[]).code, 0);
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 0);
+    let o = zloop(d, &["status", "--no-color"], None, &[]);
+    assert!(!o.out.contains('⛔') && o.out.contains("⏳ 等 t1"), "捡回来了还在喊死等: {}", o.out);
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(!o.out.contains('⛔') && o.out.contains("⏳t1,t4"), "捡回来了还在喊死等: {}", o.out);
+    let o = zloop(d, &["status", "--md"], None, &[]);
+    assert!(!o.out.contains('⛔') && o.out.contains("⏳t4"), "捡回来了还在喊死等: {}", o.out);
+
+    // 依赖被 `compact` 搬走：同样是死等，但出口只剩"断开"——t1 已经不在了，
+    // 指着人去 `edit t1` 是死路
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "beta"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 做基础", "--add", "[P1] 等基础"], None, &[]);
+    zloop(d, &["edit", "t2", "--blocked-by", "t1"], None, &[]);
+    zloop(d, &["next"], None, &[]);
+    zloop(d, &["done", "t1", "--note", "ok", "--approach", "做了 a"], None, &[]);
+    assert_eq!(zloop(d, &["compact", "--keep-days", "0"], None, &[]).code, 0);
+    let o = zloop(d, &["context"], None, &[]);
+    assert!(o.out.contains("⛔等不到 t1（zloop edit t2 --blocked-by ''）"), "指不到的 id 只能断开: {}", o.out);
+    let o = zloop(d, &["status", "--md"], None, &[]);
+    assert!(o.out.contains("⛔等不到 t1"), "md 同样: {}", o.out);
+    // 改别的字段也会走同一条回显：这条 todo 现在就是死等，说一次
+    let o = zloop(d, &["edit", "t2", "--priority", "2"], None, &[]);
+    assert!(o.out.contains("⛔等不到 t1") && o.out.contains("解开敲 zloop edit t2 --blocked-by ''"), "{}", o.out);
+}
+
+/// 做完 / 延后的那条不在等谁：给它印「等不到」是噪音，`⏳` 也该原样留着。
+#[test]
+fn a_finished_todo_is_not_waiting_on_anyone() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "alpha"], None, &[]);
+    zloop(d, &["plan", "--add", "[P1] 一", "--add", "[P1] 二", "--add", "[P1] 三"], None, &[]);
+    zloop(d, &["edit", "t2", "--blocked-by", "t3"], None, &[]);
+    // t2 依赖 t3，然后两条都进终态：t2 自己 deferred、t3 也 deferred
+    assert_eq!(zloop(d, &["edit", "t3", "--status", "deferred"], None, &[]).code, 0);
+    let o = zloop(d, &["edit", "t2", "--status", "deferred"], None, &[]);
+    assert!(!o.out.contains('⛔'), "自己已经了结了，不在等谁: {}", o.out);
+    assert!(o.out.contains("⏳t3"), "依赖照旧列出来: {}", o.out);
+    let o = zloop(d, &["status", "--md"], None, &[]);
+    assert!(!o.out.contains('⛔'), "md 同样: {}", o.out);
+    // 两条都了结了，卡不住谁——doctor 也不该报
+    assert_eq!(zloop(d, &["doctor"], None, &[]).code, 0);
+}
+
 // ---------- 多目标 ----------
 
 #[test]

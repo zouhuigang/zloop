@@ -1862,3 +1862,64 @@ zloop doctor   → ✗ t3 依赖 t4（已延后）…（exit 1）
 panicked at tests/cli_test.rs:1248: 等一条已延后的依赖要说出来:
   │    3 │ t3 │ 等一条延后的 │ ⏳ 等 t4 │
 ```
+
+### T37（中）「永远等不到」只在 `status` 一块屏上说了 — 已修（并补上 t36 漏判的那一半）
+
+t36 只收了 `status` 一处。评估另外三处紧凑清单（`context.rs` / `prompt.rs::render_md` /
+`cli.rs::cmd_edit` 的回显）时发现，**t36 自己的判据也漏了一种**，于是一起收口。
+
+#### ① `status` 拿「第一条没 done 的依赖」去判死活
+
+t36 的写法是先取 `pending_dep`（第一条没 done 的依赖），再问这一条死没死。
+死依赖排在活依赖**后面**就整条漏掉——`doctor` 那边是把 `blocked_by` 整条扫完的。
+
+```
+zloop plan --add "[P1] a" --add "[P1] b" --add "[P1] c" --add "[P1] d"
+zloop edit t4 --status deferred
+zloop edit t2 --blocked-by t1,t4        # t1 还开着，t4 已延后
+zloop doctor  → ✗ t2 依赖 t4（已延后）…（exit 1）
+zloop status  → │ 2 │ t2 │ b │ ⏳ 等 t1 │   ← 照旧是「正常排队」
+```
+
+同一份 state，一块屏退 1 大喊永远轮不到，另一块说在排队——正是 t36 要修的那个病，
+只是换了个依赖顺序就复发。**这类判据要问「整条 `blocked_by` 里有没有」，
+别问「第一条是不是」**：doctor 一开始就是这么写的，status 抄的时候抄窄了。
+
+#### ② 另外三处紧凑清单还在印 `⏳t4`
+
+| 读者 | 修复前 | 危害 |
+|---|---|---|
+| `zloop context` 的「待办」段 | `- [ ] t3 [P1] c ⏳t4` | **模型每轮读的就是这一段**：一条永远轮不到的 todo 看着像在排队，模型接着做别的、谁也不去解 |
+| `zloop status --md` | `- [ ] \`t3\` [P1] c ⏳t4` | state 的镜像，三份清单对同一条 todo 说不一样的话 |
+| `zloop edit` 的回显 | `t3 [P1] open c ⏳t4` | **造出这条死依赖的那一刻**唯一会被读到的一行，却说"排上了" |
+
+`edit` 那一处最要命：`--blocked-by` 只挡自依赖和不存在的 id（A-9），
+依赖一条**已延后**的 todo 一路放行、回显还给个 `⏳`，人就走了。
+
+**评估结论：三处一起收，判据只留一份。** 抽 `todo::dead_deps(state, todo) -> Vec<&str>`
+（整条 `blocked_by` 扫完、去重、`user` 不算、终态的 todo 返回空）和
+`todo::dead_dep_fix`（出口命令，方向不能反），四个读者共用：
+
+- `status`：`⛔ 等不到 t4` + `↳ 解开敲 …`（原样，只是判据换成扫全部依赖）
+- `context`：`⛔等不到 t4（zloop edit t4 --status open）`——**出口命令直接带在行里**。
+  读它的是模型，只说"坏了"它还得再查一轮状态才知道敲什么，多烧一轮。
+- `status --md`：`⛔等不到 t4`（镜像文档，不带命令）
+- `edit`：`⛔等不到 t4` + 次行 `↳ 解开敲 …`；**退出码仍是 0**——这条 `edit` 本身是
+  成功的，改成非 0 会把脚本里的 `edit && …` 打断。
+
+终态的 todo 返回空是特意的：`done` / `deferred` 的那条不在等谁，给它印「等不到」是噪音
+（`render_md` 会把做完的也列出来，不加这一条就会出现「已完成但等不到 t3」这种话）。
+
+回归测试两条：
+
+| 测试 | 钉住什么 | 撤掉后 |
+|---|---|---|
+| `cli_test::a_dead_wait_reads_the_same_on_every_list` | 先用 `doctor` exit 1 钉前提；再验死依赖排在活依赖后面时 `status` 不再印 `⏳ 等 t1`、四处一起说 `⛔`、`context` 带出口命令、`compact` 走法给的是「断开」、捡回来后四处一起回到 `⏳` | `panicked … 造出死依赖的那一刻就该说: t2 [P1] open 等两条 ⏳t1,t4` |
+| `cli_test::a_finished_todo_is_not_waiting_on_anyone` | 反向：自己已了结的那条不许印 `⛔` | 去掉 `dead_deps` 的 `is_terminal` 早退 → `panicked … 自己已经了结了，不在等谁: t2 [P1] deferred 二 ⛔等不到 t3` |
+
+第二条测试在修复前也是绿的（旧代码从不印 `⛔`）——它防的不是老 bug，是这次改动
+自己的过度报警，所以验红要靠**撤掉那句 `is_terminal` 早退**，不是撤掉整个修复。
+
+**留下的一条**（记进 `--next`）：`zloop edit t4 --status deferred` 会把「所有依赖 t4 的
+todo」一起判死刑，而回显只讲 t4 自己，一个字都不说被它连累的那几条。反向扫一遍
+`blocked_by` 就能说，但那是另一处改动，这一轮不顺手做。

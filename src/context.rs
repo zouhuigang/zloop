@@ -156,7 +156,16 @@ pub fn build(state: &State, root: &Path, budget: usize, for_host: Option<Host>, 
         .take(5)
         .map(|i| {
             let t = &state.todos[i];
-            let deps = if t.blocked_by.is_empty() { String::new() } else { format!(" ⏳{}", t.blocked_by.join(",")) };
+            // 死等和排队在这一段长得一样过。读这段的是模型，每轮读一次：一条永远轮不到的
+            // todo 印成 `⏳t4`，它就当成"迟早轮到"接着往下做别的，谁也不去解——`status` 那块
+            // 屏上明明是 `⛔`、doctor 还退着 1。出口命令跟在后面：只说坏了，模型还得再查
+            // 一遍状态才知道该敲什么，多花一轮。
+            let dead = todo::dead_deps(state, t);
+            let deps = match dead.first() {
+                Some(dep) => format!(" ⛔等不到 {}（{}）", dead.join(","), todo::dead_dep_fix(state, t, dep)),
+                None if t.blocked_by.is_empty() => String::new(),
+                None => format!(" ⏳{}", t.blocked_by.join(",")),
+            };
             let note = if t.status == "blocked" && !t.note.is_empty() { format!(" — {}", t.note) } else { String::new() };
             let acc = t
                 .acceptance

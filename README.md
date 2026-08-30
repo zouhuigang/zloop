@@ -412,7 +412,7 @@ zloop status
 | `▶ 下一个` | 下一轮就做它（表按步骤顺序排，`next` 按优先级挑，所以"下一个"不一定是下一行） |
 | `❗ 等你回话` | 被 `--block` 了；问题在 `↳`，**解锁命令就在它下面**（窄窗口下命令会整条印在表格下面，绝不裁一半） |
 | `⏳ 等 t3` | 在等前置 todo，等哪条直接写出来。t3 还活着（`open` / `blocked`），迟早轮得到 |
-| `⛔ 等不到 t3` | **永远轮不到**：t3 已延后、状态被手改成 zloop 不认的词、或压根不在清单里（`compact` 搬走了）。依赖要 `done` 才放行，而它已经派不出去——**解开的命令就在它下面**（`↳ 解开敲 …`），和 `doctor` 的 `dead_blocked_by` / `dangling_blocked_by` 是同一条判据 |
+| `⛔ 等不到 t3` | **永远轮不到**：t3 已延后、状态被手改成 zloop 不认的词、或压根不在清单里（`compact` 搬走了）。依赖要 `done` 才放行，而它已经派不出去——**解开的命令就在它下面**（`↳ 解开敲 …`），和 `doctor` 的 `dead_blocked_by` / `dangling_blocked_by` 是同一条判据。多条依赖只要有一条这样就算，不管它排第几 |
 | `○ 排队中` | 排在后面，没被挡 |
 | `⏭ 已延后` | `zloop edit t6 --status deferred` 挂起的。**不算进百分比的分母**——调度器把它当已了结，所以进度写成 `6/6 完成 · 2 条延后`，而不是 6/8 |
 
@@ -1094,6 +1094,19 @@ $ zloop edit t3 --status open              # 回答完问题，放它回队列
 $ zloop edit t3 --text "只做配置懒加载，压测拆成 t5"   # 太大，拆小
 $ zloop edit t5 --blocked-by t3            # t5 得等 t3 做完
 ```
+
+回显里的依赖是 `⏳t3`（在排队）还是 `⛔等不到 t3`（永远轮不到，判据同 `zloop status`
+进展列里的那两个字），后者下面跟着解开的命令：
+
+```bash
+$ zloop edit t5 --blocked-by t3            # t3 已经被 --status deferred 挂起了
+t5 [P1] open 压测 ⛔等不到 t3
+  ↳ 解开敲 zloop edit t3 --status open
+```
+
+`--blocked-by` 只挡自依赖和不存在的 id，依赖一条已延后的 todo 是放行的——所以这句话
+必须在**造出它的那一刻**说，不然下次知道是 `doctor` 退 1 的时候。同一句话也印在
+`zloop context`（模型每轮读的交接包）和 `zloop status --md` 里。
 
 ##### `zloop pause` / `zloop resume`
 

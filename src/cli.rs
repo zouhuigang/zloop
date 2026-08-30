@@ -1101,12 +1101,27 @@ fn cmd_edit(
         } else if finished {
             st.goal.status = "done".into();
         }
-        Ok(Ok(st.todos[idx].clone()))
+        // 死等在这里就能看出来，而回显是**造出它的那一刻**唯一会被读到的一行：
+        // `--blocked-by` 只挡自依赖和不存在的 id，依赖一条已延后的 todo 一路放行。
+        // 印成 `⏳t4` 等于说"排上了"，人就走了，下次发现是 doctor 退 1 的时候。
+        let dead: Vec<String> = todo::dead_deps(st, &st.todos[idx]).iter().map(|s| s.to_string()).collect();
+        let fix = dead.first().map(|d| todo::dead_dep_fix(st, &st.todos[idx], d));
+        Ok(Ok((st.todos[idx].clone(), dead, fix)))
     })?;
     match result {
-        Ok(t) => {
-            let deps = if t.blocked_by.is_empty() { String::new() } else { format!(" ⏳{}", t.blocked_by.join(",")) };
+        Ok((t, dead, fix)) => {
+            let deps = if !dead.is_empty() {
+                format!(" ⛔等不到 {}", dead.join(","))
+            } else if t.blocked_by.is_empty() {
+                String::new()
+            } else {
+                format!(" ⏳{}", t.blocked_by.join(","))
+            };
             println!("{} [P{}] {} {}{}", t.id, t.priority, t.status, t.text, deps);
+            // 退出码还是 0：这条 edit 本身是成功的，改成非 0 会把脚本里的 `edit && …` 打断
+            if let Some(fix) = fix {
+                println!("  ↳ 解开敲 {fix}");
+            }
             Ok(0)
         }
         Err(e) => {
@@ -1459,16 +1474,15 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
                 .blocked_by
                 .iter()
                 .find(|dep| dep.as_str() != todo::USER && !st.todos.iter().any(|x| &x.id == *dep && x.status == "done"));
-            // 等的那条还会不会有 done 的一天。三种走不到：依赖根本不在清单里
-            // （`compact` 把它搬走了，doctor 的 `dangling_blocked_by`）、依赖已延后、
-            // 依赖的状态被手改成 zloop 不认的词（后两种是 doctor 的 `dead_blocked_by`）。
-            // 以前这三种和「正常排队」在这一列长得一模一样，都是一行灰的 `⏳ 等 t1`——
-            // doctor 退 1 大喊永远轮不到，天天看的这块屏一个字都不说。
-            let dep_dead = pending_dep.and_then(|dep| match st.todos.iter().find(|x| &x.id == dep) {
-                None => Some(format!("zloop edit {} --blocked-by ''", t.id)), // 指不到的 id：只能断开
-                Some(x) if !todo::can_still_finish(&x.status) => Some(format!("zloop edit {dep} --status open")),
-                Some(_) => None,
-            });
+            // 等的那条还会不会有 done 的一天（三种死法见 `todo::dead_deps`）。以前这三种
+            // 和「正常排队」在这一列长得一模一样，都是一行灰的 `⏳ 等 t1`——doctor 退 1
+            // 大喊永远轮不到，天天看的这块屏一个字都不说。
+            //
+            // 判据整条问 `dead_deps`，**别只问 pending_dep 那一条**：t36 就是拿第一条没
+            // done 的依赖去判死活的，于是 `blocked_by [t1(open), t4(deferred)]` 印回
+            // 「⏳ 等 t1」——doctor 那边同时在喊这条永远轮不到。死依赖排在活的后面就漏。
+            let dead_dep = todo::dead_deps(&st, t).first().copied();
+            let dep_dead = dead_dep.map(|dep| todo::dead_dep_fix(&st, t, dep));
             let is_next = next_id.as_deref() == Some(t.id.as_str());
             let (icon, word, paint): (&str, String, u8) = if t.status == "done" {
                 ("✅", "完成".into(), 1)
@@ -1478,7 +1492,7 @@ fn cmd_status(root: &Path, path: &Path, json: bool, md: bool, st_style: style::S
                 ("🔄", "执行中".into(), 2)
             } else if waiting_on_you {
                 ("❗", "等你回话".into(), 3)
-            } else if let (Some(dep), true) = (pending_dep, dep_dead.is_some()) {
+            } else if let Some(dep) = dead_dep {
                 // 等一条永远不会 done 的：这不是排队，是死等，得和 `⏳` 分开看
                 ("⛔", format!("等不到 {dep}"), 3)
             } else if let Some(dep) = pending_dep {

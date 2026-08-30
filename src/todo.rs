@@ -25,6 +25,52 @@ pub fn can_still_finish(status: &str) -> bool {
     matches!(status, "open" | "blocked" | "done")
 }
 
+/// 这条 todo 等的依赖里，哪些已经永远变不成 `done`——**它就永远轮不到**。
+///
+/// 三种死法，判据和 `doctor` 的 `dangling_blocked_by` + `dead_blocked_by` 同源：
+/// 依赖压根不在清单里（`compact` 把它搬走了）、依赖已延后、依赖的状态被手改成
+/// zloop 不认的词。[`is_executable`] 要依赖 `done` 才放行，这三种都再也派不出去。
+///
+/// 终态的 todo 返回空：`done` / `deferred` 的那条不在等谁，给它印「等不到」是噪音。
+/// `user` 也不算——等人不是等 todo，人答一句 `edit --status open` 就放行。
+///
+/// **四个读者共用这一个判据**（`status` 的清单、`context` 的交接包、`status --md`、
+/// `edit` 的回显）：分开写就会走散。t36 只在 `status` 里判、判的还只是"第一条没 done
+/// 的依赖"，于是 `blocked_by [t1(open), t4(deferred)]` 这种 doctor 退 1 大喊永远轮不到、
+/// status 照旧印「⏳ 等 t1」。
+pub fn dead_deps<'a>(state: &'a State, t: &'a Todo) -> Vec<&'a str> {
+    if is_terminal(&t.status) {
+        return Vec::new();
+    }
+    let mut out: Vec<&str> = Vec::new();
+    for d in &t.blocked_by {
+        let d = d.as_str();
+        // 重复 id 只报一次：`blocked_by t4,t4` 印成「等不到 t4,t4」是噪音
+        if d == USER || out.contains(&d) {
+            continue;
+        }
+        // 重复 id 只认第一条，和 `index_of` / `is_executable` 保持一致
+        let dead = match state.todos.iter().find(|x| x.id == d) {
+            None => true,
+            Some(dep) => !can_still_finish(&dep.status),
+        };
+        if dead {
+            out.push(d);
+        }
+    }
+    out
+}
+
+/// 死等的出口命令。方向不能反：依赖还在清单里就把**依赖**捡回来，已经不在了
+/// 只能把**这条**的依赖断开——指着人去 `edit` 一条不存在的 todo 是死路。
+pub fn dead_dep_fix(state: &State, t: &Todo, dep: &str) -> String {
+    if state.todos.iter().any(|x| x.id == dep) {
+        format!("zloop edit {dep} --status open")
+    } else {
+        format!("zloop edit {} --blocked-by ''", t.id)
+    }
+}
+
 /// Parse one plan line: optional bullet, optional `[Pn]` prefix, then text.
 pub fn parse_line(line: &str, default_priority: u8) -> Option<(u8, String)> {
     let mut text = line.trim();

@@ -59,7 +59,16 @@ pub fn render_md(state: &State, root: &Path, max_ticks: usize) -> String {
     let mut order: Vec<&_> = state.todos.iter().collect();
     order.sort_by_key(|t| (todo::is_terminal(&t.status), t.priority));
     for t in &order {
-        let deps = if t.blocked_by.is_empty() { String::new() } else { format!(" ⏳{}", t.blocked_by.join(",")) };
+        // 和 `status` / `context` 同一个判据（`todo::dead_deps`）：这份 md 是 state 的镜像，
+        // 三份清单对同一条 todo 说的话不能不一样。终态那些 `dead_deps` 返回空，照旧印 `⏳`。
+        let dead = todo::dead_deps(state, t);
+        let deps = if !dead.is_empty() {
+            format!(" ⛔等不到 {}", dead.join(","))
+        } else if t.blocked_by.is_empty() {
+            String::new()
+        } else {
+            format!(" ⏳{}", t.blocked_by.join(","))
+        };
         let note = if t.note.is_empty() { String::new() } else { format!(" — {}", t.note) };
         out.push_str(&format!("- {} `{}` [P{}] {}{}{}\n", checkbox(&t.status), t.id, t.priority, t.text, deps, note));
     }
