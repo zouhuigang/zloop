@@ -203,7 +203,7 @@ E3 之后 `.zloop/` 里躺着一个 3926 字节的半截 `state.json.tmp`。它*
 | state.json · 非 UTF-8 | 追加一个 `\xff` | ✅ 报错 exit 2，拒绝继续 |
 | state.json · 数值越界 | `policy.window_hours` 手改大 | 💥 **A-7**：`next`/`status`/`context` 全 panic |
 | NOTES.md · 非 UTF-8 | 追加一个 `\xff`；粘一行 GBK | 💥 **A-4**（已修）：静默清零 + 下一次写入真删 |
-| 子进程 · 超时 | preflight / 宿主留下后台进程 | 💥 **A-6**：超时形同虚设，SIGTERM 也叫不动 |
+| 子进程 · 超时 | preflight / 宿主留下后台进程 | 💥 **A-6**（已修）：超时形同虚设，SIGTERM 也叫不动 |
 | 信号 · SIGPIPE | `zloop status \| head` | ✅ `main.rs` 恢复了默认处置，安静退出 |
 | 信号 · SIGTERM | `zloop stop` 打断正常轮次 | ✅ 干净退出并记 journal（已有测试） |
 
@@ -327,7 +327,7 @@ $ tail -1 /…/.tmpqSYkIf/.zloop/runner/journal.jsonl
 「等人」这件事该不该退出，由标志决定，不该由 noop 计数决定。
 顺带把那个测试的三次 `zloop next` 去掉，让它钉真实路径。
 
-### A-6（高）超时管不住留下后台进程的那一轮，而且这段时间里 SIGTERM 叫不动 runner
+### A-6（高）超时管不住留下后台进程的那一轮，而且这段时间里 SIGTERM 叫不动 runner — 已修
 
 `run_with_timeout`（`runner.rs:325`）的 deadline 只守着 `try_wait` 那个循环。
 跳出循环之后是：
@@ -385,11 +385,35 @@ echo '{"session_id":"fake","is_error":false,"result":"起了个后台服务",…
 `preflight_cmd` 的文档举例就是 `./init.sh && cargo test`；一个 `init.sh` 起个后台服务
 是最普通不过的写法。这不是构造出来的场景。
 
-修法两条：
-1. 给子进程单开一个 process group（`pre_exec` 里 `setpgid`），超时时 `killpg` 整组，
-   孙进程一起收掉，EOF 自然来；
-2. 排水也要有上限：`join()` 之前给读线程一个 deadline，超了就放弃这一轮的输出
-   （宁可少记一段 stdout，也不能让 runner 停在这里）。
+修法两条，**两条都已修**（`runner.rs::run_with_timeout`）：
+
+1. **单开一个 process group**（`Command::process_group(0)`），超时/被叫停时
+   `kill(-pid, SIGTERM)` → 0.5 秒宽限 → `kill(-pid, SIGKILL)` 收整组，孙进程一起走，EOF 自然来。
+   代价：终端 Ctrl-C 不再直送子进程——runner 自己装了 SIGINT 处置，≤200ms 内替它收。
+2. **排水有上限**（`DRAIN_GRACE = 2s`）。直接子进程一收掉，它自己的输出就**已经全在管道缓冲里**，
+   2 秒只是读出来的时间；等不到 EOF 就把线程扔下不 `join`（`join` 就是重新挂死），
+   已经读到的半截照常返回，并往 stderr 说一句"这一轮的输出是截断的"。
+   这一层是给**孙进程 `setsid` 逃出了进程组**准备的兜底——第 1 条这时候够不着它。
+
+两条各管一半：孙进程还在组里时靠 1，逃出去了靠 2。少任何一条，
+"永远不结束"都还在（`sh -c 'cmd &'` 这种 sh 秒退的写法根本走不到超时分支，只有 2 拦得住）。
+
+**复现**（`runner_test::timeout_collects_the_background_grandchildren_too` /
+`::sigterm_reaches_the_runner_while_a_grandchild_holds_the_pipe`）：
+`preflight_cmd = "sh -c 'sleep 4; : > MARK' & sleep 8"`，闸设 2 秒。撤掉修复：
+
+```
+超时那一轮走了 8.160998167s，`--timeout-min 2` 没兜住
+SIGTERM 之后 6 秒 runner 还活着：它卡在排水上，只能 SIGKILL（A-6）
+```
+
+实景（`--timeout-min 3 --fast`，孙进程活 25 秒、前台再挂 30 秒）：
+
+| 场景 | 修前 | 修后 |
+|---|---:|---:|
+| 3 秒的闸到点 | 96.3 s | 15.6 s（3 轮 fail_streak，每轮 ~3.5 s） |
+| 等超时期间发 SIGTERM（t=5s） | t=30.2 s 才退 | **t=5.4 s** |
+| 孙进程 | 等它自己咽气 | 当场收掉 |
 
 ### A-7（中）`policy.window_hours` 手滑一下，`next` / `status` / `context` 全 panic，而 `doctor` 说没问题
 

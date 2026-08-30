@@ -1183,3 +1183,95 @@ esac"#,
     let st2 = state::load(&state::state_path(&d2)).unwrap();
     assert!(st2.ticks.iter().all(|t| t.outcome != "replan"), "--no-replan 应该完全不跑");
 }
+
+// ---------- A-6: 超时那一轮要连孙进程一起收，超时窗口里 SIGTERM 要叫得动 runner ----------
+
+/// A-6 上半：`--timeout-min` 曾经管不住留下后台进程的那一轮。
+///
+/// `run_with_timeout` 到点只 `child.kill()` 直接子进程，可**孙进程继承了同一个管道写端**——
+/// 只要它还活着，排水线程的 `read` 就等不到 EOF，`join()` 一直挂着。实测那一轮的耗时跟着
+/// 孙进程的寿命走，跟 `--timeout-min` 没关系；换成真守护进程就是永远不结束。
+/// 现在子进程单开一个进程组，超时时 `killpg` 整组。
+#[test]
+fn timeout_collects_the_background_grandchildren_too() {
+    let fake = fake_host("echo '{\"session_id\":\"gc\",\"is_error\":false,\"result\":\"ok\"}'");
+    let d = project(&["[P0] a"]);
+    let mark = tempfile::tempdir().unwrap().keep();
+    let survived = mark.join("grandchild_survived");
+    let p = state::state_path(&d);
+    let mut st = state::load(&p).unwrap();
+    // 后台孙进程活 4 秒后按下手印，前台再挂 8 秒：2 秒的闸到点时两个都还在。
+    st.policy.preflight_cmd = Some(format!("sh -c 'sleep 4; : > {}' & sleep 8", survived.display()));
+    st.policy.max_fail_streak = 1; // 一轮就够，超时判定在第一轮就发生
+    state::save(&p, &mut st).unwrap();
+
+    let started = std::time::Instant::now();
+    let (_, out, _) = run(&d, &["run", "--host", "claude", "--fast", "--timeout-min", "2"], &[("PATH", &with_fake_path(&fake))]);
+    let elapsed = started.elapsed();
+
+    assert!(out.contains("preflight timed out"), "{out}");
+    // 闸是 2 秒（+ 整组 SIGTERM 的 0.5 秒宽限 + 排水）；旧代码要等前台那个 sleep 8 咽气。
+    assert!(elapsed < Duration::from_secs(6), "超时那一轮走了 {elapsed:?}，`--timeout-min 2` 没兜住");
+    // 孙进程死在按手印之前：等过它本来的寿命再看，手印始终不该出现。
+    assert!(!survived.exists(), "runner 刚退出时孙进程就已经按上手印了？");
+    thread::sleep(Duration::from_secs(5));
+    assert!(!survived.exists(), "超时那一轮的后台孙进程活过了 runner：{}", survived.display());
+}
+
+/// A-6 下半：卡在排水上的那段时间里，runner 谁也叫不动。
+///
+/// `stop_requested()` 只在 `try_wait` 循环里查，`join()` 上没人查——`zloop stop` 发的 SIGTERM
+/// 要等孙进程自己咽气才生效，只剩 SIGKILL 一条路，而 SIGKILL 会跳过 `AwakeGuard` 的 `Drop`，
+/// keep-awake 就此漏在系统里。现在排水有 deadline，超时那一轮宁可少记一段 stdout。
+#[test]
+fn sigterm_reaches_the_runner_while_a_grandchild_holds_the_pipe() {
+    let fake = fake_host("echo '{\"session_id\":\"gc2\",\"is_error\":false,\"result\":\"ok\"}'");
+    let d = project(&["[P0] a"]);
+    let mark = tempfile::tempdir().unwrap().keep();
+    let entered = mark.join("preflight_entered");
+    let p = state::state_path(&d);
+    let mut st = state::load(&p).unwrap();
+    // 起一个活 20 秒的后台孙进程，前台也挂住：runner 会老老实实在超时窗口里等。
+    st.policy.preflight_cmd = Some(format!("MARK={} ; : > $MARK ; sh -c 'sleep 20' & sleep 20", entered.display()));
+    state::save(&p, &mut st).unwrap();
+
+    let mut cmd = Command::new(zloop_bin());
+    cmd.current_dir(&d)
+        .args(["run", "--host", "claude", "--fast", "--timeout-min", "60"])
+        .env("PATH", with_fake_path(&fake))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    common::scrub_ambient_env(&mut cmd);
+    let mut child = cmd.spawn().unwrap();
+
+    // 等 preflight 真的进去了（孙进程已经起来），再叫停
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !entered.exists() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(entered.exists(), "preflight 一直没跑起来");
+    thread::sleep(Duration::from_millis(300));
+
+    let signalled = std::time::Instant::now();
+    assert!(Command::new("kill").args(["-TERM", &child.id().to_string()]).status().unwrap().success());
+    let mut exited = false;
+    while signalled.elapsed() < Duration::from_secs(6) {
+        if child.try_wait().unwrap().is_some() {
+            exited = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let took = signalled.elapsed();
+    if !exited {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    assert!(exited, "SIGTERM 之后 6 秒 runner 还活着：它卡在排水上，只能 SIGKILL（A-6）");
+    assert!(took < Duration::from_secs(6), "SIGTERM 到退出走了 {took:?}");
+    assert!(
+        journal(&d).iter().any(|e| e["event"] == "stop" && e["reason"] == "sigterm"),
+        "干净退出要记 journal：{:?}",
+        journal(&d)
+    );
+}

@@ -436,22 +436,95 @@ struct Captured {
     interrupted: bool,
 }
 
+/// 子进程走了之后还等多久管道 EOF。**杀掉直接子进程不等于管道关了**：它留下的孙进程
+/// 继承了同一个写端，只要孙进程还活着，`read` 就永远等不到 EOF（A-6）。所以排水必须有上限——
+/// 宁可少记一段 stdout，也不能把 runner 钉死在这里，`--timeout-min` 和 `zloop stop` 都指望它。
+/// 直接子进程一旦收掉，它自己的输出**已经全在管道缓冲里**，这 2 秒只是读出来的时间，够用。
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
+/// 给整组的收尾时间：先 SIGTERM 让它自己收拾，过了这个点就 SIGKILL。
+const GROUP_TERM_GRACE: Duration = Duration::from_millis(500);
+
+/// 往**整个进程组**发信号（负 pid）。子进程用 `process_group(0)` 单开了一组，
+/// 组里除了它还有它 fork 出来的孙进程——`Child::kill()` 只收得掉前者。
+#[cfg(unix)]
+fn signal_group(pid: u32, sig: i32) {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    unsafe {
+        kill(-(pid as i32), sig);
+    }
+}
+#[cfg(not(unix))]
+fn signal_group(_pid: u32, _sig: i32) {}
+
+/// 收掉这一轮起的所有进程：整组 SIGTERM → 等一会儿 → 整组 SIGKILL → 收尸。
+fn stop_group(child: &mut std::process::Child) {
+    let pid = child.id();
+    signal_group(pid, 15);
+    let grace = Instant::now() + GROUP_TERM_GRACE;
+    while Instant::now() < grace {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    // 孙进程可以不理 SIGTERM，组里没走干净的一律 SIGKILL；
+    // 组信号送不到时（非 unix）至少还有 `kill()` 收掉直接子进程。
+    signal_group(pid, 9);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// 一根管道的排水线程：边读边往共享缓冲里堆。放弃等 EOF 时，已经读到的那半截照样拿得走。
+struct Drain {
+    handle: thread::JoinHandle<()>,
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+fn drain_pipe<R: Read + Send + 'static>(mut r: R) -> Drain {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&buf);
+    let handle = thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => sink.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+    Drain { handle, buf }
+}
+
+impl Drain {
+    /// 等 EOF，最多等到 `deadline`。返回 (读到的内容, 是否读全)。
+    ///
+    /// 没读全就把线程扔在那儿不 join：它还堵在孙进程占着的管道上，join 就是重新挂死。
+    /// 代价是一个线程 + 一个 fd 留到进程退出——比 runner 永远不结束便宜。
+    fn collect(self, deadline: Instant) -> (String, bool) {
+        while !self.handle.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let complete = self.handle.is_finished();
+        let bytes = self.buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        (String::from_utf8_lossy(&bytes).into_owned(), complete)
+    }
+}
+
 /// Spawn, drain stdout/stderr on threads, and kill the child when the deadline passes.
 fn run_with_timeout(mut cmd: Command, timeout: Duration, what: &str) -> Result<Captured> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // 单开一个进程组，这样超时/被叫停时可以 `killpg` 整组，把子进程留下的后台孙进程一起收掉。
+    // 副作用是终端的 Ctrl-C 不再直接送到子进程——runner 自己装了 SIGINT 处置，会替它收（≤200ms）。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().with_context(|| format!("spawning `{what}` (is it on PATH?)"))?;
-    let mut out = child.stdout.take().expect("piped stdout");
-    let mut err = child.stderr.take().expect("piped stderr");
-    let h_out = thread::spawn(move || {
-        let mut s = String::new();
-        let _ = out.read_to_string(&mut s);
-        s
-    });
-    let h_err = thread::spawn(move || {
-        let mut s = String::new();
-        let _ = err.read_to_string(&mut s);
-        s
-    });
+    let d_out = drain_pipe(child.stdout.take().expect("piped stdout"));
+    let d_err = drain_pipe(child.stderr.take().expect("piped stderr"));
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
     let mut interrupted = false;
@@ -460,26 +533,25 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration, what: &str) -> Result<C
             break Some(st);
         }
         if stop_requested() {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_group(&mut child);
             interrupted = true;
             break None;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_group(&mut child);
             timed_out = true;
             break None;
         }
         thread::sleep(Duration::from_millis(200));
     };
-    Ok(Captured {
-        status,
-        stdout: h_out.join().unwrap_or_default(),
-        stderr: h_err.join().unwrap_or_default(),
-        timed_out,
-        interrupted,
-    })
+    let drain_deadline = Instant::now() + DRAIN_GRACE;
+    let (stdout, out_ok) = d_out.collect(drain_deadline);
+    let (stderr, err_ok) = d_err.collect(drain_deadline);
+    if !out_ok || !err_ok {
+        // 说出来：这一轮的输出是**截断**的，别让下游把半截 JSON 当成宿主的完整回话。
+        eprintln!("runner: `{what}` 退出后管道还被它留下的后台进程占着，这一轮的输出只记到 {DRAIN_GRACE:?} 为止");
+    }
+    Ok(Captured { status, stdout, stderr, timed_out, interrupted })
 }
 
 struct HostResult {
