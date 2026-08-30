@@ -112,6 +112,61 @@ fn fail_streak_stops_and_edit_resets() {
     assert!(tick::decide(&st, now_utc()).should_run);
 }
 
+/// A-10：`policy` 里五个阈值，「写 0 = 关掉这个检查」必须是同一个口径。
+///
+/// 修复前只有 `max_runs` / `max_total_usd` / `max_progress_streak` 三个有 `> 0` 守卫；
+/// 另外两个写 0 得到的是**相反**的效果——照着前三个的先例关闸的人，把目标关死了：
+/// - `max_fail_streak = 0`：`0 >= 0` 恒真，一次失败都没有的全新目标第一次 `next`
+///   就是 `fail_streak` + `interval=None`（永久停机，而且账本上一条 fail 都没有）；
+/// - `max_noop_streak = 0`：`exhausted` 恒真，`should_run` 不变所以看不出来，
+///   但 `blocked` / `user_gate` 两支的 `interval_min` 从「10 分钟后再看」变成
+///   `None`＝停下等人——无头 runner 就此不再自己醒来。
+#[test]
+fn zero_turns_a_threshold_off_the_same_way_for_all_five() {
+    // 1. max_fail_streak = 0：一次失败都没有的全新目标照常派活
+    let mut st = fresh(&["[P0] a"]);
+    st.policy.max_fail_streak = 0;
+    let d = tick::decide(&st, now_utc());
+    assert_eq!((d.should_run, d.reason.as_str()), (true, "ready"), "0 该是「关掉」而不是「永远触发」");
+    // 关掉就是真关掉：连着失败也不停（默认 3 早该停了）
+    for _ in 0..5 {
+        outcome(&mut st, "t1", "fail", "boom");
+    }
+    assert!(tick::decide(&st, now_utc()).should_run, "关掉了这道闸就不该再拦: {:?}", tick::decide(&st, now_utc()));
+    // 而写正数照旧管用（别把闸修没了）
+    st.policy.max_fail_streak = 3;
+    assert_eq!(tick::decide(&st, now_utc()).reason, "fail_streak");
+
+    // 2. max_noop_streak = 0：非终态出口照旧给间隔，不是「停下等人」
+    let mut st = fresh(&["[P0] a", "[P0] b"]);
+    st.todos[0].blocked_by = vec![todo::USER.into()];
+    st.todos[1].blocked_by = vec![todo::USER.into()];
+    let base = tick::decide(&st, now_utc());
+    assert_eq!((base.reason.as_str(), base.interval_min), ("user_gate", Some(10)), "默认值下的样子");
+    st.policy.max_noop_streak = 0;
+    let d = tick::decide(&st, now_utc());
+    assert_eq!((d.reason.as_str(), d.interval_min), ("user_gate", Some(10)), "0 = 关掉，间隔不该塌成 None");
+    // 写正数时那条退避语义照旧：攒够 noop 就真的停下等人
+    st.policy.max_noop_streak = 2;
+    for _ in 0..2 {
+        tick_at(&mut st, "noop", None, None);
+    }
+    assert_eq!(tick::decide(&st, now_utc()).interval_min, None, "攒够 noop 该停下等人");
+
+    // 3. 另外三个原本就是这个口径，一起钉住，免得哪天被改歪
+    let mut st = fresh(&["[P0] a"]);
+    st.policy.max_runs = 0;
+    st.policy.max_total_usd = 0.0;
+    st.policy.max_progress_streak = 0;
+    st.policy.max_fail_streak = 0;
+    st.policy.max_noop_streak = 0;
+    for _ in 0..20 {
+        outcome(&mut st, "t1", "progress", "又推了一点");
+    }
+    let d = tick::decide(&st, now_utc());
+    assert_eq!((d.should_run, d.reason.as_str()), (true, "ready"), "五个全关＝什么都不拦: {d:?}");
+}
+
 #[test]
 fn noop_ticks_do_not_break_fail_streak() {
     let mut st = fresh(&["[P0] a"]);

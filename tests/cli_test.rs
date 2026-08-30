@@ -1641,6 +1641,34 @@ fn feedback_records_what_the_human_said() {
     assert_eq!(zloop(d, &["feedback", "t1", "   "], None, &[]).code, 2);
 }
 
+/// A-9：`edit --blocked-by t1` 加在 t1 自己身上 = 这条活永远轮不到。
+///
+/// 修复前直接被接受，此后 `next` 一路 `blocked` + "隔一阵重试"，重试到天荒地老
+/// （依赖要 status == done，而要 done 得先被派出去），doctor 也不吭声。
+/// 这里只钉 `edit` 这道闸：拒了、说了为什么、而且**一个字都没写进去**。
+#[test]
+fn edit_refuses_to_make_a_todo_depend_on_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    zloop(d, &["init", "自锁"], None, &[]);
+    zloop(d, &["plan", "--add", "[P0] 唯一的活"], None, &[]);
+
+    let o = zloop(d, &["edit", "t1", "--blocked-by", "t1"], None, &[]);
+    assert_eq!(o.code, 2, "自依赖该被拒: {}{}", o.out, o.err);
+    assert!(o.err.contains("不能依赖自己"), "要说清为什么被拒: {}", o.err);
+
+    // 拒了就不该留下半截状态：blocked_by 空着，循环照旧派得出活
+    let st = state::load(&state::state_path(d)).unwrap();
+    assert!(st.todos[0].blocked_by.is_empty(), "被拒的 edit 不该写进去: {:?}", st.todos[0].blocked_by);
+    let o = zloop(d, &["next", "--peek", "--json"], None, &[]);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    assert_eq!((v["should_run"].as_bool(), v["reason"].as_str()), (Some(true), Some("ready")), "{}", o.out);
+
+    // 挡的是"依赖自己"，不是 --blocked-by 本身：指别人照旧收下
+    zloop(d, &["plan", "--add", "[P0] 另一条"], None, &[]);
+    assert_eq!(zloop(d, &["edit", "t1", "--blocked-by", "t2"], None, &[]).code, 0);
+}
+
 /// 连续失败之后循环停下等人——人开口说话，就是它该等到的东西。
 #[test]
 fn feedback_breaks_the_fail_streak() {

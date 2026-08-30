@@ -361,7 +361,11 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
         });
     }
     let noops = noop_streak(ticks);
-    let exhausted = noops >= policy.max_noop_streak;
+    // `> 0` 是「0 = 关掉这个检查」，五个阈值同一个口径（A-10）。少了这个守卫时
+    // `max_noop_streak = 0` 让 `exhausted` 恒真：`should_run` 不变，但下面两支
+    // 非终态出口的 `interval_min` 从「10 分钟后再看」变成 `None`＝停下等人，
+    // 一个**没跑过任何一轮**的目标当场不再自己醒来。
+    let exhausted = policy.max_noop_streak > 0 && noops >= policy.max_noop_streak;
 
     let runnable = todo::executable(state);
     if runnable.is_empty() {
@@ -374,7 +378,10 @@ pub fn decide(state: &State, at: DateTime<FixedOffset>) -> Decision {
             interval_min: if exhausted { None } else { Some(interval(state, 1 + noops)) },
         };
     }
-    if fail_streak(state) >= policy.max_fail_streak {
+    // 同上（A-10），而这一支更狠：`max_fail_streak = 0` 时 `0 >= 0` 恒真，一次失败都
+    // 没有的全新目标第一次 `next` 就返回 `fail_streak` + `interval=None`——想关掉这道闸
+    // 的人照另外三个阈值的先例写了 0，拿到的是「目标当场永久停机」。
+    if policy.max_fail_streak > 0 && fail_streak(state) >= policy.max_fail_streak {
         return Decision::stop("fail_streak");
     }
     if policy.max_total_usd > 0.0 && spent_total(state) >= policy.max_total_usd {

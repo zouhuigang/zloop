@@ -132,6 +132,7 @@ pub fn check(root: &Path) -> Report {
     for gf in &files {
         if let Some(st) = &gf.state {
             check_ledger(root, gf, st, &mut f);
+            check_dep_cycles(gf, st, &mut f);
             check_policy(gf, st, &mut f);
             check_future_timestamps(gf, st, now, &mut f);
         }
@@ -336,6 +337,94 @@ fn check_ledger(root: &Path, gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
                 format!("把 state.json 的 next_id 改成 {}", max + 1),
             ));
         }
+    }
+}
+
+/// 依赖成了环：`t1 ← t2 ← t1`。
+///
+/// `dangling_blocked_by`（依赖指向不存在的 todo）已经在报"这条永远轮不到"的一种；
+/// 环是同一后果的另一种，而且是**用产品命令就能走到**的那一种——
+/// `zloop edit t1 --blocked-by t2` + `zloop edit t2 --blocked-by t1`，两条都被接受。
+/// 此后 `next` 一直返回 `blocked` 并按退避档重试，谁都不会先 done（`is_executable`
+/// 要依赖 status == done），循环永远原地打转。修复前 doctor 对这两种环都一声不吭。
+///
+/// **边只在「依赖还没 done」时才算数**：依赖做完的那条线已经不挡任何人，
+/// 把它算进去只会报出一堆解释不清的假环（`t2 ← t1`、t1 已完成，是最常见的正常形状）。
+/// 于是环上每个点都必然没做完，剩下的只是它还活着（open/blocked）还是已经了结
+/// （deferred/cancelled）——前者是循环**现在**就卡着，报 Error；后者只是埋着，报 Warn。
+fn check_dep_cycles(gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
+    // 重复 id 只认第一条，和 `todo::index_of` 保持一致（重复本身由 duplicate_todo_id 报）
+    let mut idx: BTreeMap<&str, usize> = BTreeMap::new();
+    for (i, t) in st.todos.iter().enumerate() {
+        idx.entry(t.id.as_str()).or_insert(i);
+    }
+    // 三色 DFS，显式栈——todos 是从文件里读来的，链有多长不由我们说了算，不能递归
+    const WHITE: u8 = 0;
+    const GRAY: u8 = 1;
+    const BLACK: u8 = 2;
+    let mut color = vec![WHITE; st.todos.len()];
+    let mut seen: Vec<std::collections::BTreeSet<&str>> = Vec::new();
+    let mut cycles: Vec<Vec<&str>> = Vec::new();
+    for start in 0..st.todos.len() {
+        if color[start] != WHITE {
+            continue;
+        }
+        color[start] = GRAY;
+        // `path` 和 `stack` 同进同退：path[k] 依赖 path[k+1]
+        let mut path: Vec<usize> = vec![start];
+        let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some(top) = stack.last_mut() {
+            let (node, cursor) = (top.0, top.1);
+            let deps = &st.todos[node].blocked_by;
+            if cursor >= deps.len() {
+                color[node] = BLACK;
+                path.pop();
+                stack.pop();
+                continue;
+            }
+            top.1 += 1;
+            let dep = deps[cursor].as_str();
+            // `user` 不是 todo（它等的是人，不是环）；指不到的 id 归 dangling_blocked_by
+            let Some(&j) = idx.get(dep) else { continue };
+            if dep == crate::todo::USER || st.todos[j].status == "done" {
+                continue;
+            }
+            match color[j] {
+                WHITE => {
+                    color[j] = GRAY;
+                    path.push(j);
+                    stack.push((j, 0));
+                }
+                GRAY => {
+                    // 回边：当前路径上从 j 到栈顶正好是环上的一圈
+                    let at = path.iter().position(|&p| p == j).unwrap_or(0);
+                    let ring: Vec<&str> = path[at..].iter().map(|&i| st.todos[i].id.as_str()).collect();
+                    // 同一圈可以从不同的回边被撞见两次（多条边指回同一个点），按点集去重
+                    let key: std::collections::BTreeSet<&str> = ring.iter().copied().collect();
+                    if !seen.contains(&key) {
+                        seen.push(key);
+                        cycles.push(ring);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let who = gf.label();
+    for ring in cycles {
+        let live = ring.iter().any(|id| st.todos.iter().any(|t| &t.id == id && !crate::todo::is_terminal(&t.status)));
+        let chain = format!("{} → {}", ring.join(" → "), ring[0]);
+        let what = if ring.len() == 1 {
+            format!("[{who}] {} 依赖自己——它永远轮不到（依赖要 done，而 done 得先派出去）", ring[0])
+        } else {
+            format!("[{who}] 依赖成环：{chain}（→ 读作「依赖」）——环上每条都在等下一条先做完，谁都不会先动")
+        };
+        let fix = format!(
+            "断开环上任意一条：zloop edit {} --blocked-by ''   # 或改成环外真实存在的 id{}",
+            ring[0],
+            if live { "" } else { "（环上没有还活着的 todo，暂时卡不住谁，但捡回来就会）" }
+        );
+        f.push(if live { Finding::err("dep_cycle", what, fix) } else { Finding::warn("dep_cycle", what, fix) });
     }
 }
 

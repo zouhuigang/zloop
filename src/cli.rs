@@ -1064,6 +1064,17 @@ fn cmd_edit(
         }
         if let Some(raw) = &blocked_by {
             let deps: Vec<String> = raw.split(',').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect();
+            // 自依赖是**永久**卡死，不是"暂时轮不到"：`is_executable` 要依赖 done 才放行，
+            // 而这条要 done 得先被派出去。`next` 会一直报 blocked、按退避档隔一阵重试一次，
+            // 重试到天荒地老（A-9）。挡在入口比事后诊断便宜——这是唯一一个不用看全图
+            // 就能判定的环，多跳环交给 `doctor` 的 `dep_cycle`（那边还要看依赖做没做完）。
+            let me = st.todos[idx].id.clone();
+            if deps.contains(&me) {
+                return Ok(Err(anyhow::anyhow!(
+                    "{me} 不能依赖自己：这条依赖永远满足不了（要 done 得先派出去，要派出去得先 done），\
+                     `zloop next` 会一直报 blocked 并隔一阵重试。改成别的 id，或 --blocked-by '' 清空"
+                )));
+            }
             let unknown: Vec<&String> =
                 deps.iter().filter(|d| d.as_str() != todo::USER && !st.todos.iter().any(|t| &t.id == *d)).collect();
             if !unknown.is_empty() {

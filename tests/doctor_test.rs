@@ -103,6 +103,90 @@ fn compacted_dependency_leaves_a_todo_that_can_never_run() {
     assert!(o.out.contains("zloop edit t2 --blocked-by ''"), "建议动作要能直接抄：{}", o.out);
 }
 
+/// A-9：依赖成环 = 永久卡死，而修复前 doctor 一声不吭。
+///
+/// 二元环用**真命令**就能造出来（`edit` 只挡自依赖，多跳环不挡），这正是它值得体检的理由：
+/// 不需要有人手改文件。造出来之后 `next` 一直返回 `blocked` + "隔一阵重试"，
+/// 而重试到天荒地老也不会有人先 done。
+#[test]
+fn a_dependency_cycle_is_reported_instead_of_retried_forever() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    init(d, "alpha");
+    plan(d, "[P0] first\n[P0] second\n");
+    assert_eq!(zloop(d, &["edit", "t1", "--blocked-by", "t2"]).code, 0);
+    assert_eq!(zloop(d, &["edit", "t2", "--blocked-by", "t1"]).code, 0);
+
+    // 先钉住"卡死"这个前提：没有它，下面报的就只是个没后果的形状
+    let o = zloop(d, &["next", "--peek", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    assert_eq!((v["should_run"].as_bool(), v["reason"].as_str()), (Some(false), Some("blocked")), "{}", o.out);
+
+    let (ks, code) = kinds(d);
+    assert!(ks.contains(&"dep_cycle".to_string()), "{ks:?}");
+    assert_eq!(code, 1, "环上还有活着的 todo = 循环现在就卡着，是要修的问题");
+    let o = zloop(d, &["doctor"]);
+    assert!(o.out.contains("t1 → t2 → t1"), "要把环本身印出来，人才知道断哪条：{}", o.out);
+    assert!(o.out.contains("zloop edit t1 --blocked-by ''"), "建议动作要能直接抄：{}", o.out);
+
+    // 断开一条，doctor 立刻闭嘴（否则这条测试连"报的是不是这个环"都证不出来）
+    assert_eq!(zloop(d, &["edit", "t2", "--blocked-by", ""]).code, 0);
+    let (ks, code) = kinds(d);
+    assert!(!ks.contains(&"dep_cycle".to_string()), "环断了还在报：{ks:?}");
+    assert_eq!(code, 0);
+}
+
+/// 环的两个边界：自依赖（`edit` 已经挡住，只能从手改的文件进来）报，
+/// 而"依赖已经做完"的正常形状不报——后者是每个用了 `--blocked-by` 的项目的日常。
+#[test]
+fn a_self_dependency_from_a_hand_edited_file_is_reported_but_a_finished_dep_is_not() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    init(d, "alpha");
+    plan(d, "[P0] first\n[P0] second\n");
+    // t2 依赖 t1，t1 做完 → t2 可以跑。这不是环，一个字都不该报。
+    assert_eq!(zloop(d, &["edit", "t2", "--blocked-by", "t1"]).code, 0);
+    assert_eq!(zloop(d, &["next"]).code, 0);
+    assert_eq!(zloop(d, &["done", "t1", "--note", "ok", "--approach", "做了 a 因为 b"]).code, 0);
+    let (ks, code) = kinds(d);
+    assert!(!ks.contains(&"dep_cycle".to_string()), "依赖做完了就不挡人，不是环：{ks:?}");
+    assert_eq!(code, 0);
+
+    // 手改文件造自依赖（`edit` 那条路已经被挡住了）
+    let p = d.join(".zloop/state.json");
+    let mut st: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    st["todos"][1]["blocked_by"] = serde_json::json!(["t2"]);
+    fs::write(&p, serde_json::to_string_pretty(&st).unwrap()).unwrap();
+
+    let (ks, code) = kinds(d);
+    assert!(ks.contains(&"dep_cycle".to_string()), "{ks:?}");
+    assert_eq!(code, 1);
+    let o = zloop(d, &["doctor"]);
+    assert!(o.out.contains("t2 依赖自己"), "{}", o.out);
+}
+
+/// 环上全是了结掉的 todo：现在卡不住谁（没人在等它们），但捡回来就会——报 Warn 不报 Error。
+/// 少了这一档，`doctor` 会在一个跑得好好的项目上退 1，把"要修"这个词用滥。
+#[test]
+fn a_cycle_among_deferred_todos_is_only_a_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    init(d, "alpha");
+    plan(d, "[P0] first\n[P0] second\n[P0] third\n");
+    assert_eq!(zloop(d, &["edit", "t1", "--blocked-by", "t2"]).code, 0);
+    assert_eq!(zloop(d, &["edit", "t2", "--blocked-by", "t1"]).code, 0);
+    assert_eq!(zloop(d, &["edit", "t1", "--status", "deferred"]).code, 0);
+    assert_eq!(zloop(d, &["edit", "t2", "--status", "deferred"]).code, 0);
+
+    let o = zloop(d, &["doctor", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    let cycles: Vec<&serde_json::Value> =
+        v["findings"].as_array().unwrap().iter().filter(|f| f["kind"] == "dep_cycle").collect();
+    assert_eq!(cycles.len(), 1, "{}", o.out);
+    assert_eq!(cycles[0]["level"], "warn", "环上没有活着的 todo，这会儿卡不住谁：{}", o.out);
+    assert_eq!(o.code, 0, "只有 warn 时 doctor 该退 0");
+}
+
 /// 停放的目标文件被改名（或 park 时换过 id），id 和文件名就对不上——
 /// 下一次 park 会按 id 再造一个同名文件，两份目标抢一个 id。
 #[test]
