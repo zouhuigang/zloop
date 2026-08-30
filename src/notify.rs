@@ -11,12 +11,40 @@
 use crate::state::{self, State};
 use anyhow::Result;
 use serde_json::json;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::Duration;
 
 pub fn configured(state: &State) -> bool {
     state.policy.notify_url.is_some() || state.policy.notify_cmd.is_some()
+}
+
+/// 通知那一下的闸。发通知是**收尾**动作：`stop()` 里那一下卡住，runner 就不记 `stop`、
+/// 不清 pid 文件、退不出去——「干完就停」的承诺卡在最后一米（A-14）。所以这里也必须有闸。
+/// 30 秒对一条 webhook / 一句 `osascript` 都足够宽松了。
+fn timeout() -> Duration {
+    crate::runner::env_secs("ZLOOP_NOTIFY_TIMEOUT_SECS", 30)
+}
+
+/// 把一条带闸的子进程结果翻成「发出去了没有」，顺带把失败原因打到 stderr。
+/// 通道失败从来不是致命的：通知发不出去不该把 runner 拖下水。
+fn accepted(what: &str, cap: anyhow::Result<crate::runner::CapturedBytes>) -> bool {
+    match cap {
+        Ok(c) if c.timed_out || c.interrupted => {
+            let how = if c.timed_out { format!("超过 {:?} 没回来", timeout()) } else { "被叫停".to_string() };
+            eprintln!("notify: {what} {how}，已经整组收掉（通知发没发出去不知道）");
+            false
+        }
+        Ok(c) if c.status.map(|s| s.success()).unwrap_or(false) => true,
+        Ok(c) => {
+            eprintln!("notify: {what} failed: {}", String::from_utf8_lossy(&c.stderr).trim());
+            false
+        }
+        Err(e) => {
+            eprintln!("notify: cannot run {what}: {e}");
+            false
+        }
+    }
 }
 
 fn payload_for(url: &str, kind: &str, text: &str, state: &State, root: &Path) -> String {
@@ -34,52 +62,17 @@ pub fn send(state: &State, root: &Path, kind: &str, text: &str) -> Result<bool> 
     let mut sent = false;
     if let Some(url) = &state.policy.notify_url {
         let body = payload_for(url, kind, text, state, root);
-        match Command::new("curl")
-            .args(["-sS", "-m", "10", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", url])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(mut child) => {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(body.as_bytes());
-                }
-                match child.wait_with_output() {
-                    Ok(o) if o.status.success() => sent = true,
-                    Ok(o) => eprintln!("notify: webhook failed: {}", String::from_utf8_lossy(&o.stderr).trim()),
-                    Err(e) => eprintln!("notify: webhook error: {e}"),
-                }
-            }
-            Err(e) => eprintln!("notify: cannot run curl: {e}"),
-        }
+        let mut c = Command::new("curl");
+        c.args(["-sS", "-m", "10", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", url]);
+        // curl 自己的 `-m 10` 只管它自己：DNS 卡住、代理不回、curl 被 stop 掉的孙进程留着管道，
+        // 都还得靠外面这个闸。带闸的那份实现只有一处，就是 `runner::run_capture`。
+        sent |= accepted("webhook", crate::runner::run_capture(c, timeout(), Some(body.into_bytes())));
     }
     if let Some(cmd) = &state.policy.notify_cmd {
         let event = json!({"event": kind, "text": text, "goal": state.goal.id, "root": root.display().to_string(), "at": state::now_iso()}).to_string();
-        match Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .env("ZLOOP_EVENT", kind)
-            .env("ZLOOP_TEXT", text)
-            .env("ZLOOP_ROOT", root)
-            .current_dir(root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(mut child) => {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(event.as_bytes());
-                }
-                match child.wait_with_output() {
-                    Ok(o) if o.status.success() => sent = true,
-                    Ok(o) => eprintln!("notify: command failed: {}", String::from_utf8_lossy(&o.stderr).trim()),
-                    Err(e) => eprintln!("notify: command error: {e}"),
-                }
-            }
-            Err(e) => eprintln!("notify: cannot run sh: {e}"),
-        }
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(cmd).env("ZLOOP_EVENT", kind).env("ZLOOP_TEXT", text).env("ZLOOP_ROOT", root).current_dir(root);
+        sent |= accepted("command", crate::runner::run_capture(c, timeout(), Some(event.into_bytes())));
     }
     Ok(sent)
 }

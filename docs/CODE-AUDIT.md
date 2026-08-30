@@ -825,7 +825,7 @@ A-6 修的是宿主/preflight 那条路（`run_with_timeout`：进程组 + 排�
 一轮里有 **6 次没有闸的 git 调用**（只在 `--git-commit` 下；这次长跑正是这么跑的），
 外加通知那条路上一条用户自己配的 `sh -c`。
 
-### A-14（高）git 一挂住，runner 跟着挂住，而且 SIGTERM 叫不动它
+### A-14（高）git 一挂住，runner 跟着挂住，而且 SIGTERM 叫不动它 — 已修
 
 裸 `.output()` / `wait_with_output()` 是**无限期**的阻塞等待：既不看 `--timeout-min`，
 也不看 `stop_requested()`。和 A-6 一模一样的死法，只是从排水那根管子换到了 git 上。
@@ -928,3 +928,58 @@ RESULT: ❌ SIGTERM 之后 10s，runner (pid 18881) 还活着 —— 只剩 SIGK
    （别自动删：可能是别人正在用的锁，删了会毁掉对方的操作）。
 
 顺带把 `notify.rs` 那条 `sh -c <notify_cmd>` 也套上同一个闸（同类，同修法）。
+
+**修法已落地**（t19）。三条全做了，另加一条修的时候才发现的：
+
+| | 落点 |
+|---|---|
+| 1. 带闸的 `run_capture(cmd, timeout, stdin_bytes) -> CapturedBytes` | `runner.rs`。`process_group(0)` + `stop_group()`（TERM→0.5s→KILL）+ `DRAIN_GRACE` 三件套只此一份；`run_with_timeout`（宿主）退化成它的文本版包装。**stdout/stderr 是字节**，要文本的自己转 |
+| 2. 闸给 60 秒 | `ZLOOP_GIT_TIMEOUT_SECS` 可调（通知那条是 `ZLOOP_NOTIFY_TIMEOUT_SECS`，30 秒）。不复用 `--timeout-min`——那是给宿主的，动辄几十分钟 |
+| 3. `.git/index.lock` 只报不删 | `index_lock_left()`：收掉 git 之后看一眼，还在就打一行「后面所有 git 写操作都会失败，确认没有别的 git 在跑之后手动删」 |
+| 4.（新）`git_dirty` 的返回值改成 `Option` | 原来读不出工作树就退回**空快照**，而空快照 = 「树里所有脏东西都是我们的」。闸装上之后这条路会被真正走到（git 被收掉 = 读不出来），不改就成了新的丢工作方式：checkpoint 会把邻居的在制品一起提交 |
+
+`git_capture()` 把「起不来 / 超时 / 被叫停 / 非零退出」合成一种失败，因为调用方对它们的
+处置完全一样：**这一轮不提交**，`Checkpoint::settled` 保持 false，基线不重拍，产物躺在
+树里等下一轮认领。超时和被叫停会额外记一条 `git_stalled` 账本（`cmd` / `how` /
+`index_lock_left`），因为那两种事从外面看不出来。
+
+另外两处 `stop_requested()` 检查是新加的（开工前拍基线之后、checkpoint 之后）：
+SIGTERM 落在 git 子进程身上时，只有这两个位置看得见「有人叫停了」——不加的话
+runner 还会白起一轮宿主才发现。
+
+三种模式的复现脚本现在全退 0，SIGTERM 之后 1 秒内退出：
+
+```
+$ for m in commit status notify; do sh scripts/repro-a14-git-hang.sh $m; done
+[setup] pre-commit 挂 987s → 卡在 git_checkpoint 的 commit 上
+RESULT: ✅ SIGTERM 之后 1s 内退出
+  | runner: git commit 被叫停，已经整组收掉（60s 的闸）
+[setup] core.fsmonitor 挂 987s → 卡在开工前的 git_dirty 上
+RESULT: ✅ SIGTERM 之后 1s 内退出
+  | runner: git status 被叫停，已经整组收掉（60s 的闸）
+  | runner: 开工前读不出工作树，沿用上一张基线（checkpoint 会更保守）
+[setup] notify_cmd = sleep 987s → 卡在收尾那一下的通知上
+RESULT: ✅ SIGTERM 之后 1s 内退出
+  | notify: command 被叫停，已经整组收掉（通知发没发出去不知道）
+  | runner: stop (done)
+```
+
+回归测试四条（`tests/runner_test.rs`），撤掉修复三条变红、第四条靠一次定点变异验红：
+
+* `hung_git_commit_is_cut_off_and_the_work_is_reclaimed_next_round` —— 超时那一轮不提交、
+  记一条 `git_stalled{how:timeout}`，第一轮的产物跟着第二轮一起进历史（证明 `settled` 是 false）
+* `hung_git_status_does_not_wedge_the_round` —— 开工前读不出工作树时**沿用上一张基线**
+  （断言那句话在 stderr 上），这一轮照常写回
+* `hung_notify_cmd_does_not_wedge_the_stop` —— 收尾通知挂住不拖垮 `stop()`
+* `a_path_git_cannot_name_back_does_not_sink_the_whole_checkpoint` —— 守住「字节，不是 String」：
+  把 `git_dirty` 的 stdout 过一遍 `from_utf8_lossy`，这条就红成
+  `fatal: pathspec 'bad<?>.txt' did not match any files`——**整轮 checkpoint 陪葬**。
+  路径是用 `git update-index --cacheinfo` 塞进索引的：APFS 自己拒绝非 UTF-8 文件名（Errno 92），
+  但 git 存字节，索引里放得下。
+
+测试自己也带闸（`run_bounded`）：要证明的就是「不会挂住」，挂住时 `cargo test` 该当场
+变红说清楚，而不是安静地卡到有人来按 Ctrl-C。
+
+**同类但没修**：`log.rs::changed_files()` 里还有三次裸 git（`zloop done` 写回时跑的）。
+它跑在**宿主进程**里而不是 runner 里，挂住了会被 `--timeout-min` 那道闸兜住，
+所以不是同一个严重度——单开一条记着。

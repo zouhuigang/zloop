@@ -803,6 +803,18 @@ for d in ~/work/*/; do [ -d "$d/.zloop" ] && (cd "$d" && echo "== $(basename "$d
 | `require_doc` | `true` | 完成一条 todo 必须带 `--approach`（见 [6.1](#61-每条-todo-留一份技术文档)）；设为 `false` 关闭强制 |
 | `require_pitfall` | `true` | `--outcome fail` 必须带 `--pitfall`，失败的原因才有落点；设为 `false` 关闭强制 |
 
+runner 起的每一个子进程都有闸——挂住的那个会被整组收掉（SIGTERM → 0.5s → SIGKILL），
+runner 自己接着走，`zloop stop` 也照样叫得动。宿主那道闸是 `--timeout-min`；另外两道走环境变量：
+
+| 环境变量 | 默认 | 管谁 |
+|---|---|---|
+| `ZLOOP_GIT_TIMEOUT_SECS` | `60` | `--git-commit` 每轮跑的 git（`status` / `add` / `commit` / `rev-parse`）。超时按「这一轮不提交」处理：产物留在树里等下一轮认领，账本记一条 `git_stalled`。仓库特别大、`git status` 要跑几十秒时调大它 |
+| `ZLOOP_NOTIFY_TIMEOUT_SECS` | `30` | `notify_url`（curl）和 `notify_cmd`（`sh -c`）。通知发不出去从来不该把 runner 拖下水 |
+
+挂住的来源不是索引锁争用（那是秒失败），是 `pre-commit` 钩子（husky / lefthook）、
+`core.fsmonitor` 钩子、网络文件系统 stall。收掉 git 之后 `.git/index.lock` 万一还在，
+zloop 会打一行说出来，但**不替你删**——那把锁也可能是别人正在跑的 git 拿着的。
+
 **通知怎么配**（飞书群里加一个"自定义机器人"，拿到 webhook 地址）：
 
 ```bash

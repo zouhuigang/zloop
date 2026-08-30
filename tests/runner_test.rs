@@ -570,6 +570,196 @@ echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
     assert!(!out.contains("没提交"), "{out}");
 }
 
+// ---------- A-14：git / notify 子进程的闸 ----------
+
+/// 跑一条 zloop 命令，但**给它一个墙钟上限**。
+///
+/// 下面这几条要证明的正是「不会挂住」——挂住的时候 `cargo test` 应该当场变红说清楚，
+/// 而不是安安静静地卡在那里等到有人来按 Ctrl-C（撤掉修复重跑时就是这个区别）。
+fn run_bounded(d: &Path, args: &[&str], env: &[(&str, &str)], limit: Duration) -> (i32, String, String) {
+    let mut cmd = Command::new(zloop_bin());
+    cmd.current_dir(d)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    common::scrub_ambient_env(&mut cmd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let child = cmd.spawn().unwrap();
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(limit) {
+        Ok(Ok(o)) => (
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        ),
+        Ok(Err(e)) => panic!("zloop {args:?} 起不来：{e}"),
+        Err(_) => {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+            panic!("zloop {args:?} 过了 {limit:?} 还没退出 —— 子进程没有闸（A-14 的死法）");
+        }
+    }
+}
+
+/// 一个能提交的空仓库。
+fn git_repo(d: &Path) -> impl Fn(&[&str]) -> std::process::Output + '_ {
+    let git = move |args: &[&str]| Command::new("git").args(args).current_dir(d).output().unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    fs::write(d.join(".gitignore"), ".zloop/\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "init"]);
+    git
+}
+
+/// 只挂住第一次调用的钩子：后面几次秒过。这样一条测试里既踩得到闸，又验得到闸之后仍能干活。
+fn hook_that_hangs_once(path: &Path, tail: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mark = path.with_extension("fired");
+    fs::write(path, format!("#!/bin/sh\n[ -e '{}' ] || {{ : > '{}'; sleep 30; }}\n{tail}\n", mark.display(), mark.display())).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A-14 回归：`git commit` 卡在 pre-commit 钩子上（husky / lefthook 的默认落点）。
+/// 以前 runner 跟着无限期挂住，`--timeout-min` 和 SIGTERM 都叫不动它。
+/// 现在超过闸就整组收掉，这一轮按「checkpoint 失败」处理——产物留在树里，下一轮认领回来。
+#[test]
+fn hung_git_commit_is_cut_off_and_the_work_is_reclaimed_next_round() {
+    let fake = fake_host(
+        r#"id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+echo "work for $id" > "$id.txt"
+zloop done "$id" --note "wrote $id.txt" --approach "fake host round" >/dev/null 2>&1
+echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
+    );
+    let d = project(&["[P0] a", "[P0] b"]);
+    let git = git_repo(&d);
+    hook_that_hangs_once(&d.join(".git/hooks/pre-commit"), "exit 0");
+
+    let (code, out, err) = run_bounded(
+        &d,
+        &["run", "--host", "claude", "--fast", "--git-commit", "--max-rounds", "2"],
+        &[("PATH", &with_fake_path(&fake)), ("ZLOOP_GIT_TIMEOUT_SECS", "2")],
+        Duration::from_secs(90),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    // 第一轮的 commit 被闸掐掉，只有第二轮提交成功
+    assert_eq!(out.matches("runner: git checkpoint").count(), 1, "out={out} err={err}");
+    assert!(err.contains("runner: git commit 超过闸没回来"), "{err}");
+    let stalled: Vec<_> = journal(&d).into_iter().filter(|e| e["event"] == "git_stalled").collect();
+    assert_eq!(stalled.len(), 1, "超时那一轮账本要记一条：{stalled:?}");
+    assert_eq!((stalled[0]["cmd"].as_str(), stalled[0]["how"].as_str()), (Some("commit"), Some("timeout")));
+    assert!(stalled[0]["index_lock_left"].is_boolean(), "锁还在不在要说出来：{stalled:?}");
+    // `settled` 保持 false ⇒ 基线没重拍 ⇒ 第一轮的产物没被划给别人，跟着第二轮一起进历史
+    let head = String::from_utf8_lossy(&git(&["show", "--name-only", "--format=", "HEAD"]).stdout).to_string();
+    assert!(head.contains("t1.txt") && head.contains("t2.txt"), "两轮的产物一个都不能丢：{head}");
+    assert_eq!(String::from_utf8_lossy(&git(&["log", "--oneline"]).stdout).lines().count(), 2, "只该有 init + 一次 checkpoint");
+}
+
+/// A-14 回归：开工前那次 `git status` 卡在 `core.fsmonitor` 上（网络文件系统 stall 同一格）。
+/// 以前它卡在宿主起跑**之前**，账本上一个字都没有；现在闸收掉它，这一轮照常干活，
+/// 而且**沿用上一张基线**——绝不能退化成空快照，那会把树里所有脏东西都认成自己的。
+#[test]
+fn hung_git_status_does_not_wedge_the_round() {
+    let fake = fake_host(
+        r#"id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+echo "work for $id" > "$id.txt"
+zloop done "$id" --note "wrote $id.txt" --approach "fake host round" >/dev/null 2>&1
+echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
+    );
+    let d = project(&["[P0] a"]);
+    let git = git_repo(&d);
+    hook_that_hangs_once(&d.join(".git/hooks/fsmonitor-slow"), r"printf '/\0'");
+    git(&["config", "core.fsmonitor", ".git/hooks/fsmonitor-slow"]);
+
+    let (code, out, err) = run_bounded(
+        &d,
+        &["run", "--host", "claude", "--fast", "--git-commit", "--max-rounds", "1"],
+        &[("PATH", &with_fake_path(&fake)), ("ZLOOP_GIT_TIMEOUT_SECS", "2")],
+        Duration::from_secs(90),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(err.contains("runner: git status 超过闸没回来"), "{err}");
+    assert!(err.contains("沿用上一张基线"), "读不出工作树时不许退回空快照：{err}");
+    assert!(out.contains("runner: round 1 written back"), "闸收掉 git 之后这一轮照样要干完：{out}");
+    let stalled: Vec<_> = journal(&d).into_iter().filter(|e| e["event"] == "git_stalled").collect();
+    assert_eq!(stalled.len(), 1, "{stalled:?}");
+    assert_eq!((stalled[0]["cmd"].as_str(), stalled[0]["how"].as_str()), (Some("status"), Some("timeout")));
+    let head = String::from_utf8_lossy(&git(&["show", "--name-only", "--format=", "HEAD"]).stdout).to_string();
+    assert!(head.contains("t1.txt"), "{head}");
+}
+
+/// A-14 的修法把 git 的 stdout 从 `String` 换成了**字节**；这一条守住换回去就会破的东西。
+///
+/// `git status -z` 里的路径可能不是 UTF-8。过一遍 `from_utf8_lossy`，一个叫不出名字的路径
+/// 会变成「叫得出但是错的」（`bad\xff.txt` → `bad\u{FFFD}.txt`），拿它去 `git add` 就是
+/// `fatal: pathspec … did not match any files`——**整一轮的 checkpoint 一起陪葬**，
+/// 只因为树里有一个谁都没在动的文件。按字节读的话它被整条跳过，这一轮照常提交。
+///
+/// 那个路径是用 git 底层命令塞进索引的：APFS 自己就拒绝非 UTF-8 文件名（Errno 92），
+/// 但 git 存的是字节，所以索引里放得下，`status` 也照样把它原样打出来。
+#[test]
+fn a_path_git_cannot_name_back_does_not_sink_the_whole_checkpoint() {
+    let fake = fake_host(
+        r#"id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+echo "work for $id" > "$id.txt"
+# 这一轮里冒出来一个文件系统根本落不了地的路径（基线里没有它 → 会被当成「我们的」）
+blob=$(printf 'x\n' | git hash-object -w --stdin)
+git update-index --add --cacheinfo "100644,$blob,$(printf 'bad\377.txt')"
+zloop done "$id" --note "wrote $id.txt" --approach "fake host round" >/dev/null 2>&1
+echo '{"session_id":"g","is_error":false,"result":"ok"}'"#,
+    );
+    let d = project(&["[P0] a"]);
+    let git = git_repo(&d);
+    let (code, out, err) = run_bounded(
+        &d,
+        &["run", "--host", "claude", "--fast", "--git-commit", "--max-rounds", "1"],
+        &[("PATH", &with_fake_path(&fake))],
+        Duration::from_secs(60),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(out.matches("runner: git checkpoint").count(), 1, "叫不出名字的路径不该拖垮整轮：out={out} err={err}");
+    let head = String::from_utf8_lossy(&git(&["show", "--name-only", "--format=", "HEAD"]).stdout).to_string();
+    assert_eq!(head.split_whitespace().collect::<Vec<_>>(), ["t1.txt"], "{head}");
+    // 它留在索引里没被动过（更没被用一个错名字提交进去）
+    // -z 才拿得到原始字节：`ls-files` 默认会把非 ASCII 路径转义成 "bad\377.txt" 打出来
+    assert!(git(&["ls-files", "-z"]).stdout.contains(&0xFF), "那条路径该原样留在索引里");
+    assert!(!String::from_utf8_lossy(&git(&["log", "--format=", "--name-only"]).stdout).contains("bad"), "不该进历史");
+}
+
+/// A-14 回归：`notify_cmd` 挂住在**收尾**那一下。活全干完了，`stop()` 卡在发通知上，
+/// 于是退不出去——「干完就停」这句承诺卡在最后一米。通知发不出去从来不该拖垮 runner。
+#[test]
+fn hung_notify_cmd_does_not_wedge_the_stop() {
+    let fake = fake_host(
+        r#"id=$(printf "%s" "$2" | sed -n "s/.*当前 todo：\(t[0-9]*\) .*/\1/p" | head -1)
+zloop done "$id" --note ok --approach "fake host round" >/dev/null 2>&1
+echo '{"session_id":"n","is_error":false,"result":"ok"}'"#,
+    );
+    let d = project(&["[P0] a"]);
+    let p = state::state_path(&d);
+    let mut st = state::load(&p).unwrap();
+    st.policy.notify_cmd = Some("sleep 30".into());
+    state::save(&p, &mut st).unwrap();
+
+    let (code, out, err) = run_bounded(
+        &d,
+        &["run", "--host", "claude", "--fast"],
+        &[("PATH", &with_fake_path(&fake)), ("ZLOOP_NOTIFY_TIMEOUT_SECS", "2")],
+        Duration::from_secs(60),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("runner: stop (done)"), "{out}");
+    assert!(err.contains("notify: command 超过"), "{err}");
+    assert_eq!(journal(&d).last().unwrap()["event"], "stop");
+}
+
 #[test]
 fn preflight_failure_records_fail_and_success_reaches_the_host() {
     let fake = fake_host(

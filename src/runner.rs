@@ -216,17 +216,15 @@ fn preflight(root: &Path, cmd: &str, timeout: Duration) -> std::result::Result<S
 /// what the host just did from work-in-progress that was already sitting in the tree.
 type DirtySnapshot = std::collections::BTreeMap<String, String>;
 
-fn git_dirty(root: &Path) -> DirtySnapshot {
+/// `None` = 这一刻读不出工作树（git 起不来 / 报错 / 挂住被闸收掉）。**不要**把它当成
+/// 「树是干净的」：空快照会让 checkpoint 把树里所有脏东西都认成自己的，那才是真会
+/// 把邻居的活提交进去。每个调用方都要为 `None` 挑一条保守的路。
+fn git_dirty(root: &Path) -> Option<DirtySnapshot> {
     let mut snap = DirtySnapshot::new();
     // -uall lists untracked files one by one (plain porcelain collapses them to "?? dir/");
     // -z leaves paths unquoted and NUL-separated, so spaces and unicode survive intact.
-    let Some(out) = Command::new("git").args(["status", "--porcelain", "-z", "-uall"]).current_dir(root).output().ok() else {
-        return snap;
-    };
-    if !out.status.success() {
-        return snap;
-    }
-    let mut fields = out.stdout.split(|b| *b == 0);
+    let stdout = git_capture(root, &["status", "--porcelain", "-z", "-uall"], None)?;
+    let mut fields = stdout.split(|b| *b == 0);
     while let Some(entry) = fields.next() {
         if entry.len() < 4 {
             continue;
@@ -245,7 +243,7 @@ fn git_dirty(root: &Path) -> DirtySnapshot {
         }
         snap.insert(path.to_string(), file_id(&root.join(path), &code));
     }
-    snap
+    Some(snap)
 }
 
 /// Size + mtime. Anything the host wrote during the round differs; anything nobody touched matches.
@@ -289,11 +287,14 @@ struct Checkpoint {
 /// the committed paths get printed and journalled, so it can at least be spotted afterwards.
 fn git_checkpoint(root: &Path, todo_id: &str, note: &str, baseline: &mut DirtySnapshot) -> Checkpoint {
     let mut cp = Checkpoint::default();
-    let git = |args: &[&str]| Command::new("git").args(args).current_dir(root).output().ok();
-    if !git(&["rev-parse", "--is-inside-work-tree"]).is_some_and(|o| o.status.success()) {
+    if git_capture(root, &["rev-parse", "--is-inside-work-tree"], None).is_none() {
         return cp;
     }
-    let now = git_dirty(root);
+    // 读不出工作树就一步都别往下走：`settled` 留在 false，产物躺在树里等下一轮认领。
+    let Some(now) = git_dirty(root) else {
+        eprintln!("runner: 读不出工作树，这一轮不提交（产物留给下一轮认领）");
+        return cp;
+    };
     let mut ours: Vec<&str> = Vec::new();
     for (path, id) in &now {
         match baseline.get(path) {
@@ -308,50 +309,98 @@ fn git_checkpoint(root: &Path, todo_id: &str, note: &str, baseline: &mut DirtySn
     }
     let pathspec: Vec<u8> = ours.iter().flat_map(|p| p.as_bytes().iter().copied().chain([0])).collect();
     // --pathspec-from-file has no argv limit and needs no quoting; .zloop never reaches it
-    // (git exits 1 when an ignored path is named explicitly).
-    if !git_pathspec(root, &["add", "--pathspec-from-file=-", "--pathspec-file-nul"], &pathspec) {
+    // (git exits 1 when an ignored path is named explicitly). 路径按**字节**喂进 stdin：
+    // 叫不出名字的路径在 `git_dirty` 里就被剔掉了，这里剩下的都是 UTF-8。
+    if git_capture(root, &["add", "--pathspec-from-file=-", "--pathspec-file-nul"], Some(pathspec.clone())).is_none() {
         return cp;
     }
     let msg = format!("zloop {todo_id}: {}", if note.is_empty() { "round" } else { note });
-    if !git_pathspec(root, &["commit", "-q", "-m", &msg, "--pathspec-from-file=-", "--pathspec-file-nul"], &pathspec) {
+    let commit = &["commit", "-q", "-m", &msg, "--pathspec-from-file=-", "--pathspec-file-nul"];
+    if git_capture(root, commit, Some(pathspec)).is_none() {
         return cp;
     }
     cp.files = ours.iter().map(|p| p.to_string()).collect();
-    cp.sha = git(&["rev-parse", "--short", "HEAD"])
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    *baseline = git_dirty(root);
+    cp.sha = git_capture(root, &["rev-parse", "--short", "HEAD"], None).map(|o| String::from_utf8_lossy(&o).trim().to_string());
+    // 提交成功之后基线才有资格重拍。重拍不成（git 这会儿挂了）就留着旧的：我们的东西
+    // 已经进了 commit，树里不再有我们欠着的，`settled` 照样为真，下一轮开工前会再试一次。
+    if let Some(fresh) = git_dirty(root) {
+        *baseline = fresh;
+    }
     cp.settled = true;
     cp
 }
 
-/// Runs git with a NUL-separated pathspec on stdin. The list is small enough that the write
-/// never fills the pipe, so writing before reading cannot deadlock.
-fn git_pathspec(root: &Path, args: &[&str], paths: &[u8]) -> bool {
-    let child = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn();
-    let Ok(mut child) = child else { return false };
-    if let Some(mut w) = child.stdin.take() {
-        if w.write_all(paths).is_err() {
-            return false;
+/// 给 git 子进程的闸。正常仓库里 status/add/commit 都是亚秒级，超大仓库的 `status`
+/// 也就十几秒——60 秒足够宽松。**不复用 `--timeout-min`**：那是给宿主的，动辄几十分钟，
+/// 装了等于没装。挂住的来源不是索引锁争用（那是秒失败），是 `pre-commit` 钩子、
+/// `core.fsmonitor` 钩子、网络文件系统 stall（见 `docs/CODE-AUDIT.md` A-14）。
+fn git_timeout() -> Duration {
+    env_secs("ZLOOP_GIT_TIMEOUT_SECS", 60)
+}
+
+/// 环境变量里的秒数，非法或 0 一律退回默认值。
+pub(crate) fn env_secs(key: &str, default: u64) -> Duration {
+    let n = std::env::var(key).ok().and_then(|s| s.trim().parse::<u64>().ok()).filter(|n| *n > 0).unwrap_or(default);
+    Duration::from_secs(n)
+}
+
+/// 跑一条 git，**带闸**：超时或 `zloop stop` 时整组 TERM→KILL 收掉（`run_capture`），
+/// 而不是像以前那样裸 `.output()` 无限期等下去。
+///
+/// 返回 `None` = 这一次 git 没跑成（起不来 / 超时 / 被叫停 / 非零退出）。四种失败故意合成
+/// 一种：调用方对它们的处置都一样——**这一轮不提交**，产物留在树里等下一轮认领。
+/// 挂住和被叫停会额外记一条账本（`git_stalled`），因为那两种事外面看不出来。
+fn git_capture(root: &Path, args: &[&str], stdin_bytes: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    let mut c = Command::new("git");
+    c.args(args).current_dir(root);
+    let cap = match run_capture(c, git_timeout(), stdin_bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("runner: git {} 起不来：{e}", args[0]);
+            return None;
         }
+    };
+    if cap.timed_out || cap.interrupted {
+        let how = if cap.timed_out { "timeout" } else { "interrupted" };
+        eprintln!(
+            "runner: git {} {}，已经整组收掉（{:?} 的闸）",
+            args[0],
+            if cap.timed_out { "超过闸没回来" } else { "被叫停" },
+            git_timeout()
+        );
+        let lock = index_lock_left(root);
+        let _ = journal_append(
+            root,
+            &json!({"event": "git_stalled", "cmd": args[0], "how": how,
+                    "timeout_secs": git_timeout().as_secs(), "index_lock_left": lock, "at": state::now_iso()}),
+        );
+        return None;
     }
-    match child.wait_with_output() {
-        Ok(o) if o.status.success() => true,
-        Ok(o) => {
-            let why = String::from_utf8_lossy(&o.stderr);
-            if let Some(line) = why.lines().find(|l| !l.trim().is_empty()) {
-                eprintln!("runner: git {} 失败：{line}", args[0]);
-            }
-            false
+    if !cap.status.map(|s| s.success()).unwrap_or(false) {
+        let why = String::from_utf8_lossy(&cap.stderr);
+        if let Some(line) = why.lines().find(|l| !l.trim().is_empty()) {
+            eprintln!("runner: git {} 失败：{line}", args[0]);
         }
-        Err(_) => false,
+        return None;
     }
+    Some(cap.stdout)
+}
+
+/// 收掉一个挂住的 git 之后看一眼索引锁还在不在。
+///
+/// SIGTERM 的话 git 一般自己清掉了（A-14 实测），SIGKILL 的话会留在原地——留着的时候
+/// **这个仓库后续所有 git 写操作都会失败**，包括人自己敲的。所以必须说出来。
+/// 但**不自动删**：这把锁也可能是别人正在跑的 git 拿着的，删掉会毁掉对方的操作。
+fn index_lock_left(root: &Path) -> bool {
+    let lock = root.join(".git").join("index.lock");
+    if !lock.exists() {
+        return false;
+    }
+    eprintln!(
+        "runner: {} 还在 —— 这个仓库后面所有 git 写操作都会失败。确认没有别的 git 在跑之后手动删掉它（zloop 不替你删）",
+        lock.display()
+    );
+    true
 }
 
 /// Releases the keep-awake hold on *every* way out of `run()` — clean return, `?` error, or panic.
@@ -502,19 +551,45 @@ impl Drain {
     ///
     /// 没读全就把线程扔在那儿不 join：它还堵在孙进程占着的管道上，join 就是重新挂死。
     /// 代价是一个线程 + 一个 fd 留到进程退出——比 runner 永远不结束便宜。
-    fn collect(self, deadline: Instant) -> (String, bool) {
+    fn collect(self, deadline: Instant) -> (Vec<u8>, bool) {
         while !self.handle.is_finished() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
         let complete = self.handle.is_finished();
         let bytes = self.buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        (String::from_utf8_lossy(&bytes).into_owned(), complete)
+        (bytes, complete)
     }
 }
 
-/// Spawn, drain stdout/stderr on threads, and kill the child when the deadline passes.
-fn run_with_timeout(mut cmd: Command, timeout: Duration, what: &str) -> Result<Captured> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+/// 一次带闸的子进程调用的原始结果。
+pub(crate) struct CapturedBytes {
+    pub status: Option<ExitStatus>,
+    /// **字节**，不是 `String`。`git status -z` 的路径可能不是 UTF-8，过一遍 `from_utf8_lossy`
+    /// 会把「叫不出名字的路径」变成「叫得出但是错的」，拿它去 `git add` 会让整个 checkpoint
+    /// 失败（见 `git_dirty` 里那段注释）。要文本的调用方自己转。
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub timed_out: bool,
+    pub interrupted: bool,
+    /// 管道读到 EOF 了没有。false = 输出是**截断**的（孙进程还占着写端）。
+    pub drained: bool,
+}
+
+/// 起一个子进程并**把闸装上**：进程组 + 超时 + `zloop stop` + 排水上限，一处实现。
+///
+/// 每一个 zloop 起的子进程都必须走这里。裸 `.output()` / `wait_with_output()` 是无限期的
+/// 阻塞等待，既不看超时也不看 `stop_requested()`——git 钩子一挂住，runner 就跟着挂住，
+/// 而且 SIGTERM 叫不动（A-6 / A-14 是同一种死法的两条路）。
+///
+/// `stdin_bytes` 为 `Some` 时把这些字节喂给子进程的 stdin 再关掉（EOF）。
+pub(crate) fn run_capture(mut cmd: Command, timeout: Duration, stdin_bytes: Option<Vec<u8>>) -> Result<CapturedBytes> {
+    let what = cmd.get_program().to_string_lossy().into_owned();
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if stdin_bytes.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
     // 单开一个进程组，这样超时/被叫停时可以 `killpg` 整组，把子进程留下的后台孙进程一起收掉。
     // 副作用是终端的 Ctrl-C 不再直接送到子进程——runner 自己装了 SIGINT 处置，会替它收（≤200ms）。
     #[cfg(unix)]
@@ -523,6 +598,15 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration, what: &str) -> Result<C
         cmd.process_group(0);
     }
     let mut child = cmd.spawn().with_context(|| format!("spawning `{what}` (is it on PATH?)"))?;
+    // stdin 在**另一个线程**上写，不在这儿等：子进程完全可以一个字节都不读（钩子先挂住了），
+    // 那样一个阻塞的 `write_all` 会绕过下面这个闸，装了白装。写完线程结束、管道关闭 = EOF。
+    if let Some(bytes) = stdin_bytes {
+        if let Some(mut w) = child.stdin.take() {
+            thread::spawn(move || {
+                let _ = w.write_all(&bytes);
+            });
+        }
+    }
     let d_out = drain_pipe(child.stdout.take().expect("piped stdout"));
     let d_err = drain_pipe(child.stderr.take().expect("piped stderr"));
     let deadline = Instant::now() + timeout;
@@ -547,11 +631,23 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration, what: &str) -> Result<C
     let drain_deadline = Instant::now() + DRAIN_GRACE;
     let (stdout, out_ok) = d_out.collect(drain_deadline);
     let (stderr, err_ok) = d_err.collect(drain_deadline);
-    if !out_ok || !err_ok {
+    Ok(CapturedBytes { status, stdout, stderr, timed_out, interrupted, drained: out_ok && err_ok })
+}
+
+/// `run_capture` 的文本版，给宿主用：stdout/stderr 转成 `String`（宿主输出本来就是 JSON/文本）。
+fn run_with_timeout(cmd: Command, timeout: Duration, what: &str) -> Result<Captured> {
+    let cap = run_capture(cmd, timeout, None)?;
+    if !cap.drained {
         // 说出来：这一轮的输出是**截断**的，别让下游把半截 JSON 当成宿主的完整回话。
         eprintln!("runner: `{what}` 退出后管道还被它留下的后台进程占着，这一轮的输出只记到 {DRAIN_GRACE:?} 为止");
     }
-    Ok(Captured { status, stdout, stderr, timed_out, interrupted })
+    Ok(Captured {
+        status: cap.status,
+        stdout: String::from_utf8_lossy(&cap.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&cap.stderr).into_owned(),
+        timed_out: cap.timed_out,
+        interrupted: cap.interrupted,
+    })
 }
 
 struct HostResult {
@@ -799,8 +895,19 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
         // 失败，那一轮的产物还躺在树里等下一轮认领，基线一重拍它们就被永远划给别人、
         // 再也提交不了。宁可多认（提错了还能从 git 里挑出来），不可漏认（活直接丢）。
         if git_baseline_settled {
-            git_baseline = git_dirty(root);
-            git_baseline_settled = false; // 马上就要放宿主进来写了
+            match git_dirty(root) {
+                Some(snap) => {
+                    git_baseline = snap;
+                    git_baseline_settled = false; // 马上就要放宿主进来写了
+                }
+                // 读不出来（git 挂住被闸收掉，或者报错）：**留着上一张基线**，下一轮再试。
+                // 换成空快照会把树里所有脏东西都认成我们的——那才是真会把邻居的活提交进去。
+                None => eprintln!("runner: 开工前读不出工作树，沿用上一张基线（checkpoint 会更保守）"),
+            }
+        }
+        // git 挂住时的 SIGTERM 是在上面那几个 git 子进程里被看见的，别接着往下起宿主。
+        if stop_requested() {
+            return stop(root, "sigterm");
         }
 
         // 攒够 N 轮就回看一次。只在两轮 todo 之间插入，所以它不占 todo 轮次，
@@ -1015,6 +1122,11 @@ pub fn run(root: &Path, opts: Options) -> Result<i32> {
                 journal_append(root, &json!({"event": "commit", "round": round_no, "todo": todo.id, "sha": sha,
                                              "files": cp.files.len(), "paths": cp.files, "at": state::now_iso()}))?;
             }
+        }
+        // 同上：checkpoint 里的 git 被 SIGTERM 收掉时，叫停这件事只有这儿看得见——
+        // 宿主那一轮早跑完了，再往下走会白起一轮重估。
+        if stop_requested() {
+            return stop(root, "sigterm");
         }
         // 写回之后按信号插一轮重估：只在账本读得出偏离时跑，一轮活最多跟一次，
         // 而且**只产出建议**——改 todo 要人点头，无头模式里没有人。
