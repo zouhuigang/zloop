@@ -799,3 +799,132 @@ runner: git checkpoint 35eea29 · 2 个文件
 工具调用流里读它到底写了哪些文件（`--output-format stream-json`），那是另一件事。
 所以 checkpoint 现在**把提交了哪几个文件打出来**（不只是几个），账本 `commit` 事件也带
 `paths`：判不出来的那一格，至少让人事后能认出来。
+
+---
+
+## 8. 第六轮：A-6 的同一类死法，另外三条路
+
+A-6 修的是宿主/preflight 那条路（`run_with_timeout`：进程组 + 排水上限）。
+这一轮沿着同一个问题问下去：**runner 每轮还起了哪些子进程，它们有闸吗？**
+
+### 8.1 全部子进程调用点
+
+| 位置 | 命令 | 什么时候跑 | 有闸吗 |
+|---|---|---|---|
+| `runner.rs:198` | `sh -c <preflight_cmd>` | 每轮 | ✅ `run_with_timeout`（A-6） |
+| `runner.rs:600/643` | `claude` / `codex` | 每轮 | ✅ `run_with_timeout`（A-6） |
+| `runner.rs:223` | `git status --porcelain -z -uall` | **每轮开工前**（`--git-commit`） | ❌ 裸 `.output()` |
+| `runner.rs:292` | `git rev-parse` ×2 | 写回后 | ❌ 裸 `.output()` |
+| `runner.rs:296/323` | 同上 `git status` 再两次 | 写回后 | ❌ 裸 `.output()` |
+| `runner.rs:344` | `git add` / `git commit` | 写回后 | ❌ 裸 `wait_with_output()` |
+| `notify.rs:37` | `curl` | 通知时 | ✅ `-m 10` |
+| `notify.rs:75` | `sh -c <notify_cmd>` | 通知时（wait/stop/限流/超预算） | ❌ 裸 `wait_with_output()` |
+| `log.rs:56` | `git diff` / `git ls-files` | `zloop done` 里 | ⛔ 在宿主进程树里，被宿主那道闸兜住 |
+| `awake.rs:44/55` | `sudo -n pmset` | 起跑/收尾各一次 | `-n` 不会等输入，不会挂 |
+
+一轮里有 **6 次没有闸的 git 调用**（只在 `--git-commit` 下；这次长跑正是这么跑的），
+外加通知那条路上一条用户自己配的 `sh -c`。
+
+### A-14（高）git 一挂住，runner 跟着挂住，而且 SIGTERM 叫不动它
+
+裸 `.output()` / `wait_with_output()` 是**无限期**的阻塞等待：既不看 `--timeout-min`，
+也不看 `stop_requested()`。和 A-6 一模一样的死法，只是从排水那根管子换到了 git 上。
+
+**「索引锁争用会挂住」这条不成立**，先排掉（git 2.50.1 实测）：
+
+| 场景 | `git status` | `git add` | `git commit` |
+|---|---|---|---|
+| `.git/index.lock` 被别人占着 | 0.0s rc=0 | **0.0s rc=128** | **0.0s rc=128** |
+
+锁争用是**秒失败**，不是挂住——而失败这条路 zloop 是处理对的：`git_pathspec` 把 git 的
+stderr 打出来，`Checkpoint::settled` 保持 false，基线不重拍，这一轮的产物留给下一轮认领。
+
+**真正挂得住的是钩子和文件系统**（同一套实测）：
+
+| 场景 | 命令 | 耗时 |
+|---|---|---|
+| `pre-commit` 钩子 `sleep 5` | `git commit … --pathspec-from-file=-` | **5.9s** |
+| `core.fsmonitor` 钩子 `sleep 5` | `git status --porcelain -z -uall` | **5.4s** |
+
+两条都不是构造出来的：`pre-commit` 是 husky / lefthook / pre-commit 框架的默认落点，
+里面跑测试、跑 lint、等一把网络锁都很常见；`core.fsmonitor` 和网络文件系统（NFS、
+sshfs、被挂起的容器卷）stall 是同一格——git 卡在读工作树上。
+
+**runner 层面的复现**（`scripts/repro-a14-git-hang.sh`，三种模式都退 1）：
+
+```
+$ sh scripts/repro-a14-git-hang.sh commit
+[setup] pre-commit 挂 987s → 卡在 git_checkpoint 的 commit 上
+[t=12s] runner 还在跑（这一轮的闸是 5 秒），发 SIGTERM —— 等价于 zloop stop / 关机
+RESULT: ❌ SIGTERM 之后 10s，runner (pid 17572) 还活着 —— 只剩 SIGKILL
+
+$ sh scripts/repro-a14-git-hang.sh status
+[setup] core.fsmonitor 挂 987s → 卡在开工前的 git_dirty 上
+RESULT: ❌ SIGTERM 之后 10s，runner (pid 18030) 还活着 —— 只剩 SIGKILL
+
+$ sh scripts/repro-a14-git-hang.sh notify
+[setup] notify_cmd = sleep 987s → 卡在收尾那一下的通知上（活全干完了却退不出去）
+RESULT: ❌ SIGTERM 之后 10s，runner (pid 18881) 还活着 —— 只剩 SIGKILL
+```
+
+耗时跟着 git 走，跟 `--timeout-min` 没关系（`--timeout-min 5 --fast` = 5 秒的闸）：
+
+| `pre-commit` 挂多久 | runner 整轮耗时 |
+|---|---:|
+| 0s | 2s |
+| 5s | 8s |
+| 15s | 17s |
+| 987s | 一直挂着，SIGTERM 无效，只能 SIGKILL |
+
+**三条路各有各的难看法：**
+
+1. **`commit`（写回后）**：活干完了、账本记了 `end`，就差最后那一下提交。人从外面看是
+   「这一轮做完了」，实际上 runner 再也不动了。
+2. **`status`（开工前）**：卡在宿主起跑之前。`run.log` 只有一行 keep-awake，
+   `journal.jsonl` 只有 `awake_on`——**账本上一个字都没有**，看不出它在哪儿卡着。
+3. **`notify`（收尾）**：全部 todo 都完成了，`stop()` 在发通知时挂住——
+   于是不记 `stop`、不清 pid 文件、退不出去。「干完就停」这句承诺卡在最后一米。
+
+**余波：SIGKILL 之后仓库是坏的。** 人被迫 `kill -9`（`zloop stop` 5 秒后就是这么干的），
+但 runner 没给 git 单开进程组、也不收尸，那个 `git commit` 变成孤儿活着，
+`.git/index.lock` 一直攥在它手里：
+
+```
+余波: .git/index.lock 还在 —— 这个仓库后面所有 git 写操作都会失败：
+  fatal: Unable to create '/tmp/zloop-a14-commit.QVqjjt/.git/index.lock': File exists.
+```
+
+这时候**人自己的 `git add` / `git commit` 也一起废了**，直到有人手动删锁。
+
+信号选择上有个关键差别（用 runner 那条 `--pathspec-from-file` 的命令形实测）：
+
+| 给挂住的 `git commit` 发 | `.git/index.lock` |
+|---|---|
+| SIGTERM | **git 自己清掉了** ✅ |
+| SIGKILL | 留在原地 ❌ |
+
+（注意命令形要对：不带 pathspec 的 `git commit` 在跑 `pre-commit` 时**还没**拿锁，
+拿 pathspec 的那种是先建索引再跑钩子，所以才踩得到。测错命令形会得出"没有锁"的假结论。）
+
+所以修法必须是 **SIGTERM 优先**——正好是 `stop_group()` 已经在做的事。
+
+**观测面**：卡住的那 14 秒里 `zloop status` 只报 pid 活着（「后台 runner 在跑（pid …）」），
+`zloop doctor` 说「没发现问题」。谁都没法把"卡死的 runner"和"正在干活的 runner"分开。
+
+**修法（留给单独一条 todo）**，三步：
+
+1. 把 git 调用换成一个带闸的 `run_capture(cmd, timeout, stdin) -> Captured`，
+   复用 `run_with_timeout` 已有的三件套：`process_group(0)` + `stop_group()`（TERM→0.5s→KILL）
+   + 排水上限。**不能直接复用 `run_with_timeout` 本身**，两处不兼容：
+   - 它把 stdout 转成 `String`（`from_utf8_lossy`）。`git_dirty` 要的是**字节**：`-z` 的
+     NUL 分隔 + 路径可能不是 UTF-8。lossy 会把一个叫不出名字的路径变成"叫得出但是错的"，
+     然后 `git add <错路径>` 会让**整个 checkpoint 失败**（现在的代码专门注释了这一点）。
+   - `git_pathspec` 要往 stdin 喂 pathspec，而 `run_with_timeout` 写死了 `stdin(null)`。
+2. 闸给多少：git status/add/commit 在正常仓库是亚秒级，大仓库 `status` 可能十几秒。
+   建议固定一个宽松值（60s 量级）而不是复用 `--timeout-min`（那是给宿主的，动辄几十分钟，
+   等于没闸）。超时按"这一轮 checkpoint 失败"处理：`settled` 保持 false、打印一行、
+   记一条账本事件，产物留给下一轮认领——这条路现有代码已经通了。
+3. 超时收掉 git 之后**检查 `.git/index.lock` 还在不在**，还在就明确说出来
+   （别自动删：可能是别人正在用的锁，删了会毁掉对方的操作）。
+
+顺带把 `notify.rs` 那条 `sh -c <notify_cmd>` 也套上同一个闸（同类，同修法）。
