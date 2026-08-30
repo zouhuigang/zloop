@@ -1659,6 +1659,8 @@ claude 11111111-2222-3333-4444-555555555555  ticks 7   2026-08-28T20:15:11+08:00
 | `duplicate_goal_id` | 要修 | 两个文件抢同一个 id，这个 id 从此 `switch` / `rm` 都点不动 |
 | `dangling_in_progress` | 要修 | 在飞的派活指着一条已经不存在的 todo，`done` 认不出它 |
 | `dangling_blocked_by` | 要修 | 依赖指向不存在的 todo（`compact` 把被依赖的那条搬走就会这样）——这条 todo 永远轮不到 |
+| `dead_blocked_by` | 要修 | 依赖的那条 todo 还在清单里，但它已经派不出去了（已延后，或状态被手改成 zloop 不认的词）——依赖要 done 才放行，等它的那条同样永远轮不到 |
+| `dep_cycle` | 要修 / 留意 | 依赖成了环（`t1 ← t2 ← t1`，自依赖也算）：环上每条都在等下一条先做完，谁都不会先动。环上还有活着的 todo 是「要修」，全了结掉了是「留意」（现在卡不住谁，捡回来就会） |
 | `duplicate_todo_id` | 要修 | 同一个 todo id 有多条，`done` / `edit` 只改得到第一条 |
 | `next_id_reuse` | 要修 | `next_id` 已经被用过，下一条 `plan` 会造出重复 id |
 | `bad_policy` | 要修 / 留意 | `policy` 里的数值写出了范围：`window_hours` 不在 `0..=8760`、`max_total_usd` 为负（都是「要修」，取值被无声换掉），或 `intervals_min` 为空（「留意」，退回 3 分钟） |

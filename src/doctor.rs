@@ -312,6 +312,48 @@ fn check_ledger(root: &Path, gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
         }
     }
 
+    // 3b. 依赖的 todo 在，但它永远变不成 done：延后的那条不进 `open_ordered`（`is_terminal`
+    //     把 deferred 和 done 一视同仁），从此再也派不出去；状态被手改成 zloop 不认的词
+    //     （`cancelled`）也一样——`is_executable` 只放行 `status == "open"`。
+    //     两种都和 `dangling_blocked_by` 是同一后果，只是依赖那条还在清单里，所以以前没人报。
+    for t in &st.todos {
+        if crate::todo::is_terminal(&t.status) {
+            continue;
+        }
+        let dead: Vec<String> = t
+            .blocked_by
+            .iter()
+            .filter(|d| d.as_str() != crate::todo::USER)
+            // 重复 id 只认第一条，和 `todo::index_of` / `is_executable` 保持一致
+            .filter_map(|d| st.todos.iter().find(|x| &x.id == d))
+            .filter(|dep| !can_still_finish(&dep.status))
+            .map(|dep| {
+                if dep.status == "deferred" {
+                    format!("{}（已延后）", dep.id)
+                } else {
+                    format!("{}（状态 {:?}，不是 zloop 认的四种）", dep.id, dep.status)
+                }
+            })
+            .collect();
+        if let Some(first) = dead.first() {
+            // `t1（已延后）` → `t1`：建议动作里要能直接抄的那个 id
+            let dep_id = first.split('（').next().unwrap_or(first).to_string();
+            f.push(Finding::err(
+                "dead_blocked_by",
+                format!(
+                    "[{who}] {} 依赖 {}——依赖要 done 才放行，而它已经派不出去了，{} 就永远轮不到",
+                    t.id,
+                    dead.join(" / "),
+                    t.id
+                ),
+                format!(
+                    "把依赖捡回来：zloop edit {dep_id} --status open   # 或断开：zloop edit {} --blocked-by ''{scope}",
+                    t.id
+                ),
+            ));
+        }
+    }
+
     // 4. todo id 重复：`done` / `edit` 只会改到第一条
     let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
     for id in &ids {
@@ -338,6 +380,15 @@ fn check_ledger(root: &Path, gf: &GoalFile, st: &State, f: &mut Vec<Finding>) {
             ));
         }
     }
+}
+
+/// 这条 todo 还有没有机会走到 `done`——`dead_blocked_by` 判「依赖是不是死的」就看这个。
+///
+/// `open` 会被派出去；`blocked` 等的是人，人一答 `edit --status open` 就回到队列里；
+/// `done` 本来就满足依赖。剩下的两种走不到：`deferred` 被 `open_ordered` 过滤掉，
+/// 手改进来的野状态（`cancelled`）过不了 `is_executable` 的 `status == "open"`。
+fn can_still_finish(status: &str) -> bool {
+    matches!(status, "open" | "blocked" | "done")
 }
 
 /// 依赖成了环：`t1 ← t2 ← t1`。

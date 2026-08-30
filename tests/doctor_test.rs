@@ -136,6 +136,97 @@ fn a_dependency_cycle_is_reported_instead_of_retried_forever() {
     assert_eq!(code, 0);
 }
 
+/// t35：依赖一条**延后**的 todo，和依赖一条不存在的 todo 是同一个后果——
+/// deferred 不进 `open_ordered`，永远派不出去，依赖它的那条也就永远等不到 done。
+/// 两条真命令（`edit --blocked-by` + `edit --status deferred`）就能走到，而修复前
+/// `next` 只说 `blocked` + "10 分钟后重试"，doctor 一声不吭退 0。
+#[test]
+fn depending_on_a_deferred_todo_is_reported_like_a_dangling_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    init(d, "alpha");
+    plan(d, "[P0] first\n[P0] second\n");
+    assert_eq!(zloop(d, &["edit", "t2", "--blocked-by", "t1"]).code, 0);
+    assert_eq!(zloop(d, &["edit", "t1", "--status", "deferred"]).code, 0);
+
+    // 先钉住"卡死"这个前提：没有它，下面报的就只是个没后果的形状
+    let o = zloop(d, &["next", "--peek", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    assert_eq!((v["should_run"].as_bool(), v["reason"].as_str()), (Some(false), Some("blocked")), "{}", o.out);
+
+    let (ks, code) = kinds(d);
+    assert!(ks.contains(&"dead_blocked_by".to_string()), "{ks:?}");
+    assert_eq!(code, 1, "还活着的 t2 在等一条派不出去的依赖 = 要修的问题");
+    let o = zloop(d, &["doctor"]);
+    assert!(o.out.contains("t2 依赖 t1（已延后）"), "要说清依赖死在哪一步：{}", o.out);
+    assert!(o.out.contains("zloop edit t1 --status open"), "建议动作要能直接抄：{}", o.out);
+
+    // 把 t1 捡回来，doctor 立刻闭嘴，next 也重新有活干
+    assert_eq!(zloop(d, &["edit", "t1", "--status", "open"]).code, 0);
+    let (ks, code) = kinds(d);
+    assert!(!ks.contains(&"dead_blocked_by".to_string()), "依赖捡回来了还在报：{ks:?}");
+    assert_eq!(code, 0);
+    let o = zloop(d, &["next", "--peek", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    assert_eq!(v["should_run"].as_bool(), Some(true), "{}", o.out);
+}
+
+/// 同一条检查的另一半：状态被手改成 zloop 不认的词（`cancelled` 不在 `STATUSES` 里）。
+/// 这种 todo 既不是 terminal（还占着 `remaining`）、又过不了 `is_executable` 的
+/// `status == "open"`，自己跑不了、还把依赖它的那条一起钉死。
+#[test]
+fn depending_on_a_todo_with_an_unknown_status_is_reported_too() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    init(d, "alpha");
+    plan(d, "[P0] first\n[P0] second\n");
+    assert_eq!(zloop(d, &["edit", "t2", "--blocked-by", "t1"]).code, 0);
+    let p = d.join(".zloop/state.json");
+    let mut st: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    st["todos"][0]["status"] = serde_json::json!("cancelled");
+    fs::write(&p, serde_json::to_string_pretty(&st).unwrap()).unwrap();
+
+    let o = zloop(d, &["next", "--peek", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&o.out).unwrap();
+    assert_eq!(v["reason"].as_str(), Some("blocked"), "{}", o.out);
+
+    let (ks, code) = kinds(d);
+    assert!(ks.contains(&"dead_blocked_by".to_string()), "{ks:?}");
+    assert_eq!(code, 1);
+    let o = zloop(d, &["doctor"]);
+    assert!(o.out.contains("\"cancelled\""), "要把那个野状态原样印出来：{}", o.out);
+}
+
+/// 正常形状一个字都不该报：依赖还开着（迟早会被派出去）、依赖在等人（人一答就回队列）、
+/// 依赖已经做完。少了这一条，`dead_blocked_by` 会在跑得好好的项目上退 1。
+#[test]
+fn a_live_dependency_is_not_a_dead_end() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    init(d, "alpha");
+    plan(d, "[P0] first\n[P0] second\n");
+    // t2 依赖 t1，t1 还开着
+    assert_eq!(zloop(d, &["edit", "t2", "--blocked-by", "t1"]).code, 0);
+    let (ks, code) = kinds(d);
+    assert!(!ks.contains(&"dead_blocked_by".to_string()), "{ks:?}");
+    assert_eq!(code, 0);
+
+    // t1 被派出去后卡在"等人回答"上：依赖没死，人一答就继续
+    assert_eq!(zloop(d, &["next"]).code, 0);
+    let o = zloop(d, &["done", "t1", "--note", "得问", "--approach", "问了 a", "--block", "选哪个方案？"]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    let (ks, code) = kinds(d);
+    assert!(!ks.contains(&"dead_blocked_by".to_string()), "等人不等于死路：{ks:?}");
+    assert_eq!(code, 0);
+
+    // 依赖被延后的那条 todo 自己也是 terminal 时同样不报（谁都没在等它）
+    assert_eq!(zloop(d, &["edit", "t1", "--status", "deferred"]).code, 0);
+    assert_eq!(zloop(d, &["edit", "t2", "--status", "deferred"]).code, 0);
+    let (ks, code) = kinds(d);
+    assert!(!ks.contains(&"dead_blocked_by".to_string()), "两条都了结了，卡不住谁：{ks:?}");
+    assert_eq!(code, 0);
+}
+
 /// 环的两个边界：自依赖（`edit` 已经挡住，只能从手改的文件进来）报，
 /// 而"依赖已经做完"的正常形状不报——后者是每个用了 `--blocked-by` 的项目的日常。
 #[test]

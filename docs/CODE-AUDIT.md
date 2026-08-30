@@ -1741,3 +1741,61 @@ A-19（`pick_session` 认错会话）跟 streak 无关，但归到同一句话�
 A-18（`compact` 抹掉花费）是这一类的另一头——**从账本里删东西**同样串了调度，
 它的修法也就成了另一句话：**归档只该让账本变小，不该让账变少**（累计花费单独存一份），
 而且**动账本的命令要和 `goal switch` 走同一道闸**（`ensure_idle`）。这一类到此全部修完。
+
+## 12. 第十轮：「永远等不到」的第三种形状
+
+A-9 修完时留了一句话没往下问：`dangling_blocked_by`（依赖不存在）和 `dep_cycle`（依赖成环）
+都在报同一个后果——**这条 todo 永远轮不到**。那这个后果还有没有第三种走法？有，而且不用手改文件。
+
+### A-22（中高）依赖一条已延后的 todo：卡死的形状一模一样，doctor 却退 0 — 已修
+
+两条真命令就能走到：
+
+```
+zloop edit t2 --blocked-by t1
+zloop edit t1 --status deferred
+```
+
+此后：
+
+```
+zloop next --peek --json → should_run=false  reason=blocked  interval_min=10
+zloop status             → 清单 0/1 完成 · 1 条延后 ｜ t2 的进展写着「⏳ 等 t1」
+zloop doctor             → 没发现问题（exit 0）
+```
+
+`is_terminal` 把 `deferred` 和 `done` 一视同仁，所以 t1 不再进 `open_ordered`，
+**永远派不出去**；而 `is_executable` 要求依赖 `status == "done"`，t1 停在 `deferred` 上
+就永远满足不了。两头一夹，t2 就是 A-9 那个「等到天荒地老」的状态——只是这一次
+依赖那条还好端端地躺在清单里，`dangling_blocked_by`（判的是「id 找不到」）够不着它，
+`check_dep_cycles`（判的是「回边」）也够不着。面板上更误导：`status` 写的是「等 t1」，
+像在正常排队，其实前面那位已经走了。
+
+同一条检查的另一半是**手改进来的野状态**：`STATUSES` 只有四个词，
+把 `state.json` 里某条 todo 改成 `"cancelled"`（loopx 有这个状态，从别处抄配置很容易带进来）
+之后它既**不是** terminal（还占着 `remaining`，`status` 面板照常列它）、
+又过不了 `is_executable` 的 `status == "open"`——它自己跑不了，还把依赖它的那条一起钉死。
+实测 `remaining: 2`、`reason: blocked`、doctor 沉默退 0。
+
+**要不要并进 `dangling_blocked_by`？不并**，理由是出口动作不一样：
+`dangling` 的依赖已经没了，只能改成别的 id 或断开；这里依赖还在，
+最常见的正确出口是**把它捡回来**（`zloop edit t1 --status open`）。一句 fix 说不清两件事，
+`kind` 也是脚本要拿来分流的稳定标识，混在一起等于把两种处置合成一个词。
+于是新增 `dead_blocked_by`（`doctor.rs::check_ledger` 第 3b 块），
+和 `dangling_blocked_by` 并列、判据是同一个问题的另一半：
+**依赖在，但它还有没有机会走到 `done`**——`can_still_finish` 只放行 `open`（会被派出去）、
+`blocked`（等的是人，人一答就回队列）、`done`（本来就满足）。
+
+严重度取 **Error**，和两个同型的邻居一致：`dangling_blocked_by` 不分情况都是 Error，
+`dep_cycle` 在「环上还有活着的 todo」时是 Error。这里等着的那条按定义就是活的
+（terminal 的 todo 一开始就跳过了），所以不再分档。
+`dep_cycle` 那条 warn（全 deferred 的环）也不会被这条抢走：环上每个点都是 terminal，
+第一步就被跳过，两条检查不重叠。
+
+回归测试三条，撤掉 `can_still_finish` 的判据（改成恒 `true`）前两条立刻变红：
+
+| 测试 | 盯住的是 | 撤掉之后 |
+|---|---|---|
+| `doctor_test::depending_on_a_deferred_todo_is_reported_like_a_dangling_one` | 先钉住 `reason=blocked` 这个前提，再要求 doctor 报 `dead_blocked_by` + exit 1；`edit t1 --status open` 之后立刻闭嘴、`next` 重新有活干 | `[]`（findings 空） |
+| `doctor_test::depending_on_a_todo_with_an_unknown_status_is_reported_too` | 手改成 `"cancelled"` 的那一半，且要把野状态原样印进 `what` | `[]` |
+| `doctor_test::a_live_dependency_is_not_a_dead_end` | 反向：依赖还开着 / 依赖在等人（`done --block`）/ 两条都 deferred，一个字都不该报，doctor 退 0 | 照常绿（它防的是误报） |
