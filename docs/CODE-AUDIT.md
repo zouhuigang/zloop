@@ -1988,3 +1988,101 @@ compacted 1 todos and 1 ticks → .zloop/archive/compact-….json
 「依赖指着不存在的 id」这个状态，现在造不出来了，改成直接从 `state.json` 里抹掉那条
 （`drop_todo_from_state`）。检查本身一个字没动：**坏文件不会因为新版本不再生产就消失**，
 手改过的 state 和老版本留下的 `state.json` 仍然要被 `doctor` 认出来。
+
+## 15. 第十三轮：`compact` 的另外两个受害者（T39 只清了三分之一）
+
+T39 修的是 `blocked_by`。但 `dangling_in_progress` 这条 doctor 检查本身就说明：
+**指着 todo id 的字段不止 `blocked_by` 一处**。这一轮把 `state.json` 里
+「存了一个 todo id」的字段列全，逐个问一句「compact 搬走它指的那条会怎样」。
+
+### 15.1 指针全集（`src/state.rs` 的 struct 逐字段过）
+
+| 存 todo id 的地方 | compact 怎么对它 | 结论 |
+|---|---|---|
+| `Todo.blocked_by: Vec<String>` | 反向扫一遍，还有人等就不搬（`dead_if_removed`） | T39 已修 |
+| `Tick.todo: Option<String>` | 跟着 todo 一起搬进归档 | **T40-① 有洞**：判老的是 *todo* 的年龄，不是 tick 自己的 |
+| `InProgress.todo: String` | **没人看** | **T40-② 有洞** |
+| `Tick.log: Option<String>` | 路径进归档，`.zloop/log/*.md` 文件留在原地 | 孤儿文件，读得到、不报错，不算缺陷（见 15.4） |
+| NOTES.md 的经验 / 约定 | — | **不是受害者**：`notes::Lesson = (时间戳, 正文)`，压根没有 id 字段 |
+
+`Goal.id` 是目标 id、`Policy` 全是阈值，都不指 todo。所以指针一共三处，
+T39 之后还剩两处没人管——正好对应下面两条。
+
+### 15.2 T40-①（中高）例行 `compact` 吃掉人今天刚留下的、还没人读过的反馈 — 未修
+
+`compact` 挑 tick 的判据是 `old_ids.contains(tick.todo)`（`cli.rs:2209`）——
+**只看它挂在哪条 todo 上，不看这条 tick 自己多老**。于是一条五秒钟前写下的
+`feedback`，只要挂在一条 40 天前完成的 todo 上，就跟着一起进归档。
+
+```sh
+zloop next ; zloop done t1 --note n --approach a       # t1 完成于 40 天前
+zloop feedback t1 "方向错了，下一轮先停下来问我"        # 今天，人留的话
+zloop context | grep 方向错了       → ## 用户对上一轮的反馈（先处理这些）… 1 条
+zloop compact --keep-days 30        → compacted 1 todos and 2 ticks → …/compact-….json
+zloop context | grep 方向错了       → 0 条
+```
+
+三点让它比 T39 更难发现：
+
+- **不需要 `--force`**，`ensure_idle` 一道闸都不响：这是最普通的例行整理，甚至能进 cron。
+- **静默**：回显只说「2 ticks」，不说其中一条是人写给下一轮的指令。
+  `doctor` 整理前后都退 0——归档里的东西不算「坏状态」，没有任何检查会去数它。
+- **丢的正是协议里排第一的那个输入**：`zloop context` 把反馈放在「下一条」之前，
+  skill 的原话是「交接包里有『用户对上一轮的反馈』就先按它调整这一轮的做法」。
+  人说完话就走开了，下一轮的 agent 一个字都看不到，而且没人会知道少了一条。
+
+`--keep-days 30` 这个组合是**正常用法**：反馈本来就常常是隔了几天回看时才留的
+（`cmd_feedback` 自己都印「（t1 已经是 done；要让它重做：`zloop edit t1 --status open`）」，
+说明"对终态 todo 留反馈"是设计内的路径）。
+
+方向：搬 tick 的判据要多一条——**这条 tick 自己也得够老**，或者至少
+`pending_feedback` 里的那些不许搬；一条都不该在人还没读到之前消失。
+
+### 15.3 T40-②（中）`compact --force` 把在飞的那条搬走，`ensure_idle` 给的两条出口从此都退 2 — 未修
+
+`cmd_compact` 先过 `goals::ensure_idle`，有 `in_progress` 就拦下。**但 `--force` 直接
+`return Ok(())`**（`goals.rs:217`），而 `old_ids` 的挑选完全不看 `st.in_progress`。
+
+前提两步都在正常用法里：`zloop edit` 从头到尾不碰 `in_progress`（`cli.rs:1037-1111`），
+所以把在飞的那条改成终态，`in_progress` 就留在一条 `done` / `deferred` 的 todo 上；
+这时 `compact` 会被 `ensure_idle` 拦住，而它给的出口人不想走（`done t1` 会记一条假的
+完成、`edit t1 --status open` 会把刚做的延后撤销），于是加 `--force`。
+
+```sh
+zloop next                          # 派出 t1，in_progress = t1
+zloop edit t1 --status deferred     # 人判它不做了；edit 不动 in_progress
+zloop compact --keep-days 0 --force → compacted 1 todos and 1 ticks
+
+zloop compact --keep-days 0
+  → zloop: 有会话正拿着 t1 第 1 轮还没写回：先 `zloop done t1` 收尾
+     （或 `zloop edit t1 --status open` 放回去），或加 --force
+zloop done t1 --note x --approach y     → exit 2  done: unknown todo id "t1"
+zloop edit t1 --status open             → exit 2  edit: unknown todo id "t1"
+zloop doctor → ✗ 第 1 轮派出去的 t1 已经不在待办里了            （exit 1）
+```
+
+**闸和出口一起失效**：`ensure_idle` 是 `compact` / `goal switch` / `goal new` 共用的那一道，
+从此这三条命令全要 `--force` 才动得了，而它印的两条自救命令都是「unknown todo id」。
+`zloop status` 还照旧印着 `阶段 claude 正在做 t1 · 第 1 轮` 和
+`写回 zloop done t1 …`——一条保证失败的命令。
+
+不判高的两个理由：要 `--force`（人明确越过了闸），而且 `zloop next` 再派一次活会顺手
+把 `in_progress` 覆盖掉，算半条自愈路。但 `doctor` 报的是 err、给的修法是
+「手工把 state.json 里的 in_progress 删掉」——**zloop 自己造出了一个只能手改文件才能
+收拾的状态**，而 T39 刚刚为同一个理由（归档捡不回来）选择了「拦下来」。
+
+方向：和 T39 同一个形状——`in_progress.todo` 不许进 `old_ids`，`--force` 也不许。
+`--force` 的语义是「我知道有人在跑，账我认」，不是「把在飞的那一轮删掉」。
+
+### 15.4 检查过、确认不是问题的
+
+- **孤儿日志文件**：tick 进了归档，`.zloop/log/20260830-*-t1-done.md` 留在原地。
+  `doctor` 的 `missing_log` 查的是反方向（tick 指着不存在的文件），这边不报。
+  但文件还读得到、`zloop doc` 少的那几轮本来就随 tick 走了，没有任何路径会崩——记一笔，不算缺陷。
+- **NOTES.md 的经验/约定**：`notes.rs` 存的是 `- <RFC3339> 正文`，没有 todo id 这个概念，
+  compact 也从不碰这个文件。t40 问的第三个受害者**不存在**。
+- **`ensure_idle` 的 TOCTOU**：它在锁外 `state::load`，`state::transaction` 才拿锁，
+  中间插一次 `zloop next` 确实能让 `in_progress` 在检查之后才出现。但赢了这个竞态也没用：
+  `next` 派出去的那条状态是 `open`，而 `old_ids` 只收 `is_terminal` 的。
+  直接把竞态的结果摆出来试（`zloop next` 之后 `compact --keep-days 0 --force`）：
+  `nothing to compact`、`t1` 还在清单里、`doctor` 没发现问题。**没复现。**
