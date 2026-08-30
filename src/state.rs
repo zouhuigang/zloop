@@ -188,7 +188,7 @@ pub struct Tick {
     ///
     /// 为什么必须由写回的人主动说：zloop 读不出"策略走不通"。那一轮可能**完全成功**——
     /// 没失败、没停滞、没返工、没被挡，五个偏离信号一个都不响，可它的结论已经把剩下几条
-    /// 的前提推翻了（见 `docs/ADAPTIVE-REPLAN.md` §6 缺口二的实测）。知道这件事的只有
+    /// 的前提推翻了（见 `docs/design/ADAPTIVE-REPLAN.md` §6 缺口二的实测）。知道这件事的只有
     /// 刚干完活的那个 agent，所以给它一个说出口的地方。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rethink: Option<String>,

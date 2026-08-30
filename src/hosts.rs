@@ -3,7 +3,7 @@
 //! 我们写出去的文件都带 MANAGED_PREFIX 标记，没有这个标记的文件一律不碰。
 //!
 //! **为什么标记里还带一个指纹**：skill 是给人改的——Warp 那边 skill 就是改进的载体，
-//! 走 PR 审核合进去，下一轮 agent 就继承（见 `docs/SELF-IMPROVEMENT.md`）。zloop 以前
+//! 走 PR 审核合进去，下一轮 agent 就继承（见 `docs/design/SELF-IMPROVEMENT.md`）。zloop 以前
 //! 只认"有没有标记"，于是自己装的每一份在下次 `install` 时都被无条件重写，用户的改动
 //! 静默消失、输出只有一行 `wrote`。现在分两层：
 //!

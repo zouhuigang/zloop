@@ -1,6 +1,6 @@
 //! 自适应重规划：做完一条之后，看看剩下的任务还对不对。
 //!
-//! 设计依据在 `docs/ADAPTIVE-REPLAN.md`。最关键的一条是**别每轮都重规划**：
+//! 设计依据在 `docs/design/ADAPTIVE-REPLAN.md`。最关键的一条是**别每轮都重规划**：
 //! 文献（Bayesian partner modelling）明确说选择性触发能用远少于启发式/LLM 触发的重规划次数
 //! 拿到相当收益；每轮调模型重估不但贵，还会制造计划抖动。
 //!
@@ -102,7 +102,7 @@ pub fn signals(state: &State) -> Vec<Signal> {
     //
     // 这是唯一一路**不问"有没有出岔子"、而问"还到得了目标吗"**的信号。其余五个全是偏离
     // 信号，而最该重规划的那种场景恰恰不偏离：那一轮**顺利完成**，可它的结论把剩下几条的
-    // 前提推翻了（`docs/ADAPTIVE-REPLAN.md` §6 缺口二有实测——两轮全绿，零信号）。
+    // 前提推翻了（`docs/design/ADAPTIVE-REPLAN.md` §6 缺口二有实测——两轮全绿，零信号）。
     //
     // zloop 判断不了「策略走不通」，所以不猜：只认刚干完活的那个 agent 主动说出口的那一句。
     //
@@ -237,7 +237,7 @@ pub fn packet(state: &State) -> String {
 // 这是这个项目里**第一个让 agent 改自己待办**的能力。护栏必须在代码里强制，不能只写进
 // 提示词——提示词管不住模型（`a_headless_replan_round_suggests_but_never_edits_the_plan`
 // 那条回归测试就专门演一个"不守规矩的模型"）。每条护栏为什么存在，见
-// `docs/ADAPTIVE-REPLAN.md` §8「不加会怎样」。
+// `docs/design/ADAPTIVE-REPLAN.md` §8「不加会怎样」。
 
 /// 重排之后未完成条数的绝对上限。防"一次重规划炸出两百条 todo，跑到天荒地老"。
 pub const MAX_OPEN: usize = 30;

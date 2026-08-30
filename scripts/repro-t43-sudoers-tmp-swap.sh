@@ -12,7 +12,7 @@
 # 前提（两条都要成立，缺一不可，所以定级 P2 而不是 P0）：
 #   1. `TMPDIR` 指向一个别的 uid 也写得进的目录。macOS **默认不是**这样：TMPDIR 没设时
 #      Rust 的 env::temp_dir() 走 confstr(_CS_DARWIN_USER_TEMP_DIR)，拿到的是每用户
-#      0700 的 /var/folders/…/T/（实测见 docs/CODE-AUDIT.md §19）。要中招得自己
+#      0700 的 /var/folders/…/T/（实测见 docs/audit/CODE-AUDIT.md §19）。要中招得自己
 #      `export TMPDIR=/tmp`（/tmp 是 1777，为绕开 /var/folders 长路径的常见手工设置）。
 #   2. 机器上有第二个非 root uid 在跑代码（另一个登录用户，或被拿下的 _www / nobody 之类服务账号）。
 #

@@ -2,7 +2,7 @@
 //!
 //! The scheduler (`tick::decide`) owns every stop condition; the runner only
 //! executes with a timeout, checks that the host wrote back, and sleeps.
-//! Long-run rules (see docs/LONG-RUN-AUDIT.md):
+//! Long-run rules (see docs/audit/LONG-RUN-AUDIT.md):
 //!   * a hung host is killed after `timeout_min` and recorded as `fail`;
 //!   * waiting on a human (user_gate / blocked) polls at the backoff ladder's last
 //!     rung (`tick::ladder_tail`) forever instead of exiting — nothing is spent while polling;
@@ -98,14 +98,14 @@ pub struct Options {
     /// 关掉「写回之后按信号插一轮重估」（默认开）。
     ///
     /// 和 `reflect_every` 的固定节奏不同，重估是**信号触发**的：账本里读不出偏离信号就完全不跑
-    /// （见 `docs/ADAPTIVE-REPLAN.md` §2——每轮都重规划会制造计划抖动）。
+    /// （见 `docs/design/ADAPTIVE-REPLAN.md` §2——每轮都重规划会制造计划抖动）。
     /// 无头模式下没人点头，所以它**只把建议记进账本，绝不自己改 todo**。
     pub no_replan: bool,
     /// 让重估轮次**真的改计划**（默认关）。
     ///
     /// 关着的时候（默认）重估只把建议记进账本，等人回来看——这是 zloop 一直以来的红线。
     /// 打开之后，重估那一轮被允许把新清单交给 `zloop replan --apply`，护栏由
-    /// `replan::apply` 在代码里强制（见 `docs/ADAPTIVE-REPLAN.md` §8）。
+    /// `replan::apply` 在代码里强制（见 `docs/design/ADAPTIVE-REPLAN.md` §8）。
     ///
     /// 这是唯一一处 agent 无人看管地改自己的待办，所以额外压两条闸：
     /// 单次运行最多改 `MAX_AUTO_REPLANS` 次；连着两次都把清单改长就算发散。
@@ -114,7 +114,7 @@ pub struct Options {
     /// 每 N 个 todo 轮次插一轮「回看」；0 = 关。
     ///
     /// 形状照 Warp 的 scheduled agent：**按计划跑一段不同的 prompt**，不是新子系统
-    /// （见 `docs/SELF-IMPROVEMENT.md` 1.1）。回看那一轮不做 todo、不推进轮次、
+    /// （见 `docs/design/SELF-IMPROVEMENT.md` 1.1）。回看那一轮不做 todo、不推进轮次、
     /// 对三条 streak 透明，也不动 `.zloop/NOTES.md`——无头模式下没人点头，
     /// 所以它只把建议记进账本，等人回来看。
     pub reflect_every: u32,
@@ -346,7 +346,7 @@ fn git_checkpoint(root: &Path, todo_id: &str, note: &str, baseline: &mut DirtySn
 /// 给 git 子进程的闸。正常仓库里 status/add/commit 都是亚秒级，超大仓库的 `status`
 /// 也就十几秒——60 秒足够宽松。**不复用 `--timeout-min`**：那是给宿主的，动辄几十分钟，
 /// 装了等于没装。挂住的来源不是索引锁争用（那是秒失败），是 `pre-commit` 钩子、
-/// `core.fsmonitor` 钩子、网络文件系统 stall（见 `docs/CODE-AUDIT.md` A-14）。
+/// `core.fsmonitor` 钩子、网络文件系统 stall（见 `docs/audit/CODE-AUDIT.md` A-14）。
 ///
 /// `log::changed_files`（`zloop done` 写回时读工作树）也用这一份：同一类挂法、同一个仓库，
 /// 没有理由让人记两个旋钮。
@@ -654,7 +654,7 @@ pub(crate) struct CapturedBytes {
 /// `stop_requested()`——git 钩子一挂住，runner 就跟着挂住，而且 SIGTERM 叫不动
 /// （A-6 / A-14 是同一种死法的两条路）。
 ///
-/// 只有两类子进程有资格留在外面，而且必须在原地写明理由（见 `awake.rs`，docs/CODE-AUDIT.md §18）：
+/// 只有两类子进程有资格留在外面，而且必须在原地写明理由（见 `awake.rs`，docs/audit/CODE-AUDIT.md §18）：
 /// **detach 出去、故意比我们活得久的**（`caffeinate`、看门狗——这里等它退出就是等到天亮），
 /// 和**要人手在终端上打字的**（`sudo install` 那一下要输密码：这里 stdin 是 `/dev/null`，
 /// stdout/stderr 是管道，密码提示根本到不了人眼前，超时也无从定）。

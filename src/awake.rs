@@ -1,4 +1,4 @@
-//! Keep the Mac awake while a runner is alive; restore the default when none is (docs/KEEP-AWAKE.md).
+//! Keep the Mac awake while a runner is alive; restore the default when none is (docs/design/KEEP-AWAKE.md).
 //!
 //! Two layers, both tied to the runner's pid:
 //!   * `caffeinate -i -s -w <pid>` — no privileges; holds off idle / on-AC sleep, dies with the runner;

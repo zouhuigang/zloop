@@ -63,7 +63,7 @@ fn doc_link_gate(args: &[&str]) -> std::process::Output {
 }
 
 /// 文档闸自己得是绿的——一道开局就红的闸等于没有闸（t30 在 `cargo fmt` 上踩过一次）。
-/// 这里顺带把它当成回归测试用：`docs/CODE-AUDIT.md` 的节号重复过一次（第三轮和第四轮
+/// 这里顺带把它当成回归测试用：`docs/audit/CODE-AUDIT.md` 的节号重复过一次（第三轮和第四轮
 /// 都编成 6），害得十一处「正文 §N」有一半指错地方，而当时没有任何东西会报错。
 #[test]
 fn the_doc_link_gate_is_green() {

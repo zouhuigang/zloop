@@ -5,8 +5,8 @@
     python3 scripts/check-doc-links.py --list     # 顺带把每个文件的锚点列出来（写文档时查名字用）
     python3 scripts/check-doc-links.py --self-test  # 拿合成文档验这几条规则自己还灵不灵
 
-为什么要有这道闸：`docs/CODE-AUDIT.md` 三千多行、二十来节，索引（现在的
-`docs/FINDINGS.md`）是靠「正文 §N」把人送回正文的。这种引用**没有编译器**——
+为什么要有这道闸：`docs/audit/CODE-AUDIT.md` 三千多行、二十来节，索引（现在的
+`docs/audit/FINDINGS.md`）是靠「正文 §N」把人送回正文的。这种引用**没有编译器**——
 写歪了、正文改了号，链接照样是一段普通文字，谁也不会报错。t45 立这道闸时
 现场就抓到两类腐烂：
 
@@ -14,7 +14,7 @@
   2. 开头两处「见 §2 的 A-1 / B-1」，A-1 和 B-1 其实在 §4。
 
 t46 把 R2 / R3 从「只管 CODE-AUDIT 和 FINDINGS」推广到 **docs/ 下全部 15 份 + README**，
-当场又抓到一类躲过前两类的腐烂：`docs/DESIGN.md` 写「notes §4.3」指的是
+当场又抓到一类躲过前两类的腐烂：`docs/design/DESIGN.md` 写「notes §4.3」指的是
 `loopx-scheduling-notes.md` 的 §4.3，可 DESIGN 自己也有一个 §4.3（`tick.outcome`）——
 号**指得到**，只是指到了另一份文档的同号节上。所以 R3 现在要先判「这个 §N 说的是**哪份**
 文档」，再判「那份文档里有没有这一号」。
@@ -43,7 +43,7 @@ R3a 验号和落点是同一节），所以 R5 直接把裸的跨文档引用判
      已知取舍：b 只看**同一行**、且认的是写全了的 `xxx.md`。不跨行是故意的，跨行猜归属的
      假阳性比它挡住的腐烂还多。b 归属到**本仓库另一份文档**的那一种现在归 R5 管（判红），
      所以 b 剩下的活只有两件：认出仓库外的目标（跳过），和认出「提到的就是自己」（当自指查）。
-  R4 索引里的 § 必须待在链接里：`docs/FINDINGS.md` 那份是索引，光写个号等于没指路。
+  R4 索引里的 § 必须待在链接里：`docs/audit/FINDINGS.md` 那份是索引，光写个号等于没指路。
   R5 跨文档的 § 必须待在链接里（写作约定，全仓生效）：`§N` 指的是本仓库**另一份**文档时，
      不许裸着写。裸写的两处代价——归属靠「同一行最近提到的 `xxx.md`」猜（猜错了不会有人报错），
      落点根本没验（号对得上就算过，落在哪一小节无从谈起）。写成
@@ -68,14 +68,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-INDEX_DOC = "docs/FINDINGS.md"  # 这一份里的 § 必须是链接
+INDEX_DOC = "docs/audit/FINDINGS.md"  # 这一份里的 § 必须是链接
 
 LINK_RE = re.compile(r"\[(?P<text>(?:[^\[\]]|\[[^\]]*\])*)\]\((?P<href>[^()\s]*(?:\([^()]*\)[^()\s]*)*)\)")
 HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<text>.*?)\s*$")
 SECTION_RE = re.compile(r"^(?P<num>\d+)\.\s")
 SECTION_REF_RE = re.compile(r"§(?P<num>\d+(?:\.\d+)*)")
 HEADING_NUM_RE = re.compile(r"^(?P<num>\d+(?:\.\d+)*)[.\s]")
-# 行内提到的文档名（可带路径）：`loopx-scheduling-notes.md`、docs/DESIGN.md、concepts/field-derived-patterns.md
+# 行内提到的文档名（可带路径）：`loopx-scheduling-notes.md`、docs/design/DESIGN.md、concepts/field-derived-patterns.md
 DOC_MENTION_RE = re.compile(r"(?P<name>[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.md)")
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 # 行内代码：`` `§7.1` `` 是在**引用这个写法本身**，不是在指路。讨论规则的文字和遵守规则的
@@ -85,8 +85,14 @@ SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 
 def collect_docs(root: Path):
-    """只查仓库自己写的 Markdown（根目录 + docs/），不下 target/ 之类的坑。"""
-    return sorted(root.glob("*.md")) + sorted((root / "docs").glob("*.md"))
+    """只查仓库自己写的 Markdown（根目录 + docs/ 全部层级），不下 target/ 之类的坑。
+
+    用 rglob 而不是 glob：docs/ 分成了 guide/ design/ audit/ 三层之后，只扫一层
+    会让这道闸静默缩水成「只查 README」——踩过：分完文件夹当场从 16 个文件掉到 1 个，
+    而它照样打印「全过」。**闸的覆盖面缩小是不会报错的**，所以下面还要断言文件数。
+    """
+    docs = sorted(root.glob("*.md")) + sorted((root / "docs").rglob("*.md"))
+    return [d for d in docs if "target" not in d.parts]
 
 
 def strip_inline(text: str) -> str:
@@ -217,7 +223,7 @@ def in_repo(path: Path, root: Path) -> bool:
 def resolve_doc(name: str, base: Path, root: Path):
     """把行内提到的文档名解析成仓库里的路径；解析不到（仓库外的文档）返回 None。
 
-    先按「相对写它的那份文档」找——README 里的 `docs/DESIGN.md` 和 docs/ 里的
+    先按「相对写它的那份文档」找——README 里的 `docs/design/DESIGN.md` 和 docs/ 里的
     `DESIGN.md` 指的是同一份；再兜底试 `docs/` 和仓库根。
     """
     for cand in (base.parent / name, root / "docs" / name, root / name):
@@ -384,6 +390,11 @@ def run_checks(root: Path):
 # --------------------------------------------------------------------------- self-test
 
 # 每份合成文档配一句「该报什么」：真实文档全绿的时候，只有它能回答「规则还灵不灵」。
+#
+# 这些路径是**自包含的假仓库**，故意保持扁平，不跟着 docs/ 的真实分层走：
+# 它测的是规则本身，跟真仓库怎么摆目录无关。踩过——docs/ 分成 guide/design/audit
+# 三层时批量改路径把这里也改了，合成的 BROKEN.md 与 CODE-AUDIT.md 就跨了目录，
+# 自检当场失灵。
 FIXTURES = {
     "docs/CODE-AUDIT.md": """# 正文
 
@@ -437,7 +448,7 @@ FIXTURES = {
 
 ## 3. 丙
 """,
-    "docs/FINDINGS.md": """# 索引
+    "docs/audit/FINDINGS.md": """# 索引
 
 ## 1. 一览
 裸号：正文 §1。
@@ -455,7 +466,7 @@ EXPECTED = [
     ("R3 自指指不到", "docs/DESIGN.md:6: `§8.8` 在本文件里没有对应的标题"),
     ("R3 同号异档", "docs/DESIGN.md:7: `§1.3` 在 docs/loopx-scheduling-notes.md 里没有对应的标题"),
     ("R3a 号与落点不符", "docs/BROKEN.md:9: 链接文字写 `§2`，锚点 `#1-第一节` 却落在 docs/CODE-AUDIT.md 的 §1"),
-    ("R4 索引裸号", "docs/FINDINGS.md:4: `§1` 是裸的——索引里的节号要写成锚点链接"),
+    ("R4 索引裸号", "docs/audit/FINDINGS.md:4: `§1` 是裸的——索引里的节号要写成锚点链接"),
     (
         "R5 裸的跨文档引用",
         "docs/BROKEN.md:10: `§1` 指的是 docs/CODE-AUDIT.md 的节，却是裸的"

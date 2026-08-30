@@ -1,7 +1,7 @@
 //! `zloop stats`：这个目标跑得怎么样——不是"还剩几条"，而是"跑得顺不顺"。
 //!
 //! 为什么需要它：Warp 的自改进回路是 **跑 → 打分 → 自改进**，`RunScorer` 就在自改进的前一环
-//! （见 `docs/SELF-IMPROVEMENT.md` 1.5）。zloop 此前只有 `tick.documented` 这一个布尔值，
+//! （见 `docs/design/SELF-IMPROVEMENT.md` 1.5）。zloop 此前只有 `tick.documented` 这一个布尔值，
 //! 是最原始的打分器。reflect（W2/W6）要读的"这个目标哪里不顺"，得先有人把它算出来。
 //!
 //! 全部数字都从 `state.ticks` 现推——账本本来就记着每一轮。**唯一的例外**是

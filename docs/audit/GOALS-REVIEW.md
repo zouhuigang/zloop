@@ -401,7 +401,7 @@ zloop 明确不要全局 registry（`docs/DESIGN.md` 的 G1），代价是：**`
 state——不同步任何目标内容，也就没有 loopx 那套 merge / collision / retirement 的负担。
 
 **处置（2026-08-29，[#8](https://github.com/zouhuigang/zloop/issues/8)）**：按"写进文档而不是修"办了——README 的
-[6.2 一个项目多个目标](../README.md#62-一个项目多个目标) 末尾新增两节：边界（含父目录里 `zloop goals` 的实测输出、
+[6.2 一个项目多个目标](../guide/MULTI-GOAL.md) 末尾新增两节：边界（含父目录里 `zloop goals` 的实测输出、
 不做全局 registry 的三条理由、今天可用的那行 shell）＋最小形态（6 行决策表 + 约 100 行改动量估计 + 什么时候才做）。
 代码一行没动。
 

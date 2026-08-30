@@ -2935,7 +2935,7 @@ fn prose_arguments_accept_text_that_starts_with_a_dash() {
 }
 
 /// 做完一条就重估：**沉默是默认**，只有账本里读得出偏离信号才提一句。
-/// 依据见 docs/ADAPTIVE-REPLAN.md §2——每轮都催重规划会制造计划抖动。
+/// 依据见 docs/design/ADAPTIVE-REPLAN.md §2——每轮都催重规划会制造计划抖动。
 #[test]
 fn done_only_nudges_a_replan_when_the_ledger_says_something_is_off() {
     let dir = tempfile::tempdir().unwrap();

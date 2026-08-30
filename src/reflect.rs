@@ -1,6 +1,6 @@
 //! `zloop reflect`：攒够信号之后回看一次——不做 todo，只读账本、经验、反馈，给出整理建议。
 //!
-//! 形状照抄 Warp（见 `docs/SELF-IMPROVEMENT.md`）：他们的 improver 是**按计划跑的**观察者，
+//! 形状照抄 Warp（见 `docs/design/SELF-IMPROVEMENT.md`）：他们的 improver 是**按计划跑的**观察者，
 //! 数据模型只有 cron + prompt + enabled + last_spawn_error 六个字段——所以反思不需要新子系统，
 //! 它就是"隔一阵子换一段 prompt 跑一轮"。这里对应的是 `zloop reflect`（手动）和
 //! `zloop run --reflect-every N`（自动）。

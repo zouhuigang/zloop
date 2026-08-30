@@ -197,7 +197,7 @@ def decide(state, now) -> Decision:
 [P2] README + 迁移说明
 ```
 
-`done` 是**唯一**写回命令。它在一次加锁事务里：追加 tick → 更新 todo 状态 → 可选插入后继 → 原子写回。不存在 loopx 那种"先 complete 后 spend 就丢账"的顺序坑（[loopx-scheduling-notes.md §3.3](loopx-scheduling-notes.md#33-难用的-9-条结构性根因有证据) 第 9 条）。
+`done` 是**唯一**写回命令。它在一次加锁事务里：追加 tick → 更新 todo 状态 → 可选插入后继 → 原子写回。不存在 loopx 那种"先 complete 后 spend 就丢账"的顺序坑（[loopx-scheduling-notes.md §3.3](../../docs/design/loopx-scheduling-notes.md#33-难用的-9-条结构性根因有证据) 第 9 条）。
 
 ## 7. 宿主接入
 
@@ -213,7 +213,7 @@ def decide(state, now) -> Decision:
 5. 每轮结束用两三句话告诉用户：做了什么、验证了什么、下一条是什么。
 ```
 
-对比 loopx 的 7 条协议（[loopx-scheduling-notes.md §4.3](loopx-scheduling-notes.md#43---thin-task_body-的每轮协议7-条)）：删掉 LOOPX_TURN、逐字执行 next_cli_actions[0]、NOTIFY/DONT_NOTIFY 双通道、RRULE/ack、successor 先建后完成、P0 阻塞可做 P1/P2 等规则——它们要么是多宿主/多 agent 税，要么已被 `done` 一条命令吸收。
+对比 loopx 的 7 条协议（[loopx-scheduling-notes.md §4.3](../../docs/design/loopx-scheduling-notes.md#43---thin-task_body-的每轮协议7-条)）：删掉 LOOPX_TURN、逐字执行 next_cli_actions[0]、NOTIFY/DONT_NOTIFY 双通道、RRULE/ack、successor 先建后完成、P0 阻塞可做 P1/P2 等规则——它们要么是多宿主/多 agent 税，要么已被 `done` 一条命令吸收。
 
 ### 7.2 Claude Code
 

@@ -992,7 +992,7 @@ fn cmd_done(
         println!("log: .zloop/{l}");
     }
     // 便宜的体检：账本里读得出偏离信号才提一句。**没命中就一声不吭**——
-    // 每轮都催着重规划会制造计划抖动，代价比漏提一次大（见 docs/ADAPTIVE-REPLAN.md §2）。
+    // 每轮都催着重规划会制造计划抖动，代价比漏提一次大（见 docs/design/ADAPTIVE-REPLAN.md §2）。
     if remaining > 0 {
         if let Some(why) = crate::replan::hint(&state::load(path)?) {
             println!("\n⚠ 计划可能要调整：{why}\n  想清楚剩下的任务还对不对：{}", c.bold("zloop replan"));

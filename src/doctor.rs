@@ -1,7 +1,7 @@
 //! `zloop doctor`：只读体检——回答「这个项目的 `.zloop` 有没有问题」。
 //!
 //! 为什么值得单开一条命令：`goal list` 只显示得出"损坏"这一种毛病（见
-//! `docs/GOALS-REVIEW.md` 的 F4 / L4），而真正会把人卡住的是**不报错的不一致**——
+//! `docs/audit/GOALS-REVIEW.md` 的 F4 / L4），而真正会把人卡住的是**不报错的不一致**——
 //! `goals/` 里 id 和文件名对不上、两个文件抢同一个 id、tick 指着的日志文件被删了。
 //! 它们平时一声不吭，只是让某条命令有一天突然不听话（`goal switch` 说"对上了 2 个目标"、
 //! `zloop doc` 少了一节）。loopx 在这一层写了 `collect_global_registry_health`，
