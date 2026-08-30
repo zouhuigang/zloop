@@ -1163,3 +1163,186 @@ README 里 `max_noop_streak` 那一行原来写的是「（runner 不受此影�
   否则 `max_noop_streak` 默认值一改，这条测试就悄悄变成在测空气。
 
 151 测试全过（原 150）。
+
+## 10. 第八轮：把「交互式命令写进账本的东西」系统扫一遍
+
+A-16 只是一个样本。这一轮把问题反过来问：**runner 的判断一共读账本里的哪些量，
+这些量分别有谁在写？** 只要写的人里有一个是交互式命令，那就是一条 A-16 同型的路。
+
+### 10.1 runner 读什么（判断输入的全集）
+
+`tick::decide` + `runner::wait_plan` + `runner::run` 里，所有影响「跑不跑、跑哪条、
+停不停、resume 谁」的量，一个不落：
+
+| # | 输入 | 从哪算出来 | 影响什么 |
+|---|---|---|---|
+| 1 | `goal.status` | 直接读 | `paused` / `done` → 停 |
+| 2 | `todos[].status` | `open_ordered` / `all_deferred` | `unplanned` / `all_done` / `all_deferred` → 停 |
+| 3 | `todos[].blocked_by` | `todo::executable` | `user_gate` / `blocked` → 睡 |
+| 4 | `ticks[].outcome`（尾部连续） | `fail_streak` | `fail_streak` → **停** |
+| 5 | 同上 | `progress_streak` | `progress_streak` → **停** |
+| 6 | 同上 | `noop_streak` | A-16 修完后 runner **不再读**，只剩 `zloop next` 的退避提示 |
+| 7 | `ticks[].cost_usd` 求和 | `spent_usd` | `budget` → **停** |
+| 8 | `ticks[].at` + `COUNTED` | `window_ticks` | `throttled` → 睡 |
+| 9 | **`ticks.len()` 的轮内增量** | `runner.rs:1069` 的 `wrote_back` | 记不记 `fail`（→ 4）、要不要 checkpoint 提交 |
+| 10 | `ticks[].host` / `.session` | `pick_session` | 这一轮 `--resume` 谁 |
+| 11 | `in_progress` | `held_by_other` | 只挡交互式 `next`，**对 runner 无效**（有意，见 `tick.rs:108`） |
+| 12 | `policy.*` | 直接读 | 上面所有阈值 |
+
+### 10.2 谁在写（写命令的全集）
+
+`state.json` 的全部写入点（`state::transaction` / `state::save` 的调用者）逐个对照：
+
+| 命令 | 往账本里写什么 | 碰到上面哪几项 | 结论 |
+|---|---|---|---|
+| `init` / `plan` | todos、`goal.status` | 1 2 | 有意 |
+| `next`（非 peek） | `noop` tick、`in_progress` | 6 9 11 | 6 已在 A-16 修掉；9 靠 `outcome != "noop"` 躲过（**只躲过了 noop 一种**） |
+| `done` | done/progress/fail/block tick | 2 4 5 7 8 9 | 有意——它本来就是写回 |
+| `edit` | **`edit` tick**、todo 状态/依赖、`goal.status` | 1 2 3 4 5 **9 10** | 打断 streak 是有意的；**9 / 10 不是** → A-17 / A-19 |
+| `feedback` | **`feedback` tick** | 4 5 **9 10** | 同上 → A-17 / A-19 |
+| `replan --apply` | `replan` tick、换 todo | 2 **9** | 对 streak 透明是有意的；9 不是 → A-17 |
+| `pause` / `resume` | `goal.status` | 1 | 有意 |
+| `compact` | **删 todo + 删 tick** | 4 5 **7** 8 | → A-18 |
+| `goal new/switch/rm` | 换掉整个 `state.json` | 全部 | 已被 `goals::ensure_idle` 挡住（runner 在跑就拒绝，除非 `--force`） |
+| `reflect --apply` / `remember` | 只写 `NOTES.md` | — | 不碰账本 |
+| `status` `stats` `context` `log` `doc` `doctor` `sessions` `next --peek` `replan`（不带 `--apply`）`hook-stop` | 只读 | — | 不碰账本 |
+
+三条新的，全部复现成立。
+
+### A-17（高）人插一句 `zloop feedback`，一轮**失败**的宿主就被记成「写回了」——连续失败停机整个失效
+
+结算那一步（`runner.rs:1069-1091`）的注释写的是 "did the host write back?"，
+代码问的却是「这段时间里账本长了没长」：
+
+```rust
+for i in ticks_before..st.ticks.len() {
+    if t.outcome != "noop" { wrote = true; }        // ← 有人加了条 tick
+}
+if !wrote && !rate_limited && !result.interrupted {
+    tick::record(st, "fail", Some(&todo.id), &note, &who)?;   // ← 只有这里才记 fail
+}
+```
+
+`noop` 被排除掉了（A-16 顺手补的），但同一个窗口里还能落进 `feedback` / `edit` /
+`replan` 三种 tick，**每一种都是交互式命令记的、每一种都不是宿主的写回**。
+而 `zloop feedback` 恰恰是文档教人「跟正在跑的循环说话」的那条路——
+交接包里那句「用户对上一轮的反馈」就是这么来的，撞上的概率不低。
+
+一串下去：不记 `fail` → `fail_streak` 恒为 0 → 第 4 项那道停机闸永远不触发。
+
+A/B 实测（`scripts/repro-a17-interactive-write-masks-a-failed-round.sh`），
+同一个每轮必败的假宿主、同一份 `max_fail_streak=2`，唯一差别是有没有人插话：
+
+```
+=== 场景 A：宿主每轮都失败，没人插话 ===
+  起了 2 轮 ｜ 账本里 fail：2 条 ｜ journal 每轮的 wrote_back：false false
+  runner: runner: stop (fail_streak)
+
+=== 场景 B：一模一样，只是人每隔 1 秒敲一句 zloop feedback ===
+  起了 7 轮 ｜ 账本里 fail：0 条 ｜ journal 每轮的 wrote_back：true true true true true true true
+  runner: 还在跑（20 秒都没停）
+  runB.log: runner: round 1 written back        ← 宿主 stderr 明明是 "host blew up"
+```
+
+**还带两个后果**，都实测到了：
+
+1. `--git-commit` 会跟着动。`wrote_back` 为真就走 checkpoint，于是失败那一轮留在树里的
+   半成品被提交，commit message 取的是「最后一条 tick 的 note」= **人写的那句反馈**：
+
+   ```
+   $ git log --oneline -1
+   924e226 zloop t1: 先别动 work.txt
+   $ git show --stat HEAD
+    half-written.rs | 1 +      ← 宿主没写完就 exit 1 的那个文件
+   ```
+
+2. 这一轮的花费/轮数/日志被挂到人那条 `feedback` tick 上（`runner.rs:1093-1113`
+   取的是 `ticks.last_mut()`），账本从此对不上号。
+
+修的方向（下一轮做，不在本轮）：`wrote_back` 不能靠「账本长没长」推，得认人——
+只把**宿主这一轮的会话**记的 tick 算数，或者反过来只认 `done/progress/fail/block`
+这四种真写回的 outcome。后者更稳：`zloop done` 从人的会话里敲同样算写回，本来就该算。
+
+### A-18（中）`zloop compact` 把花费一起归档走，`max_total_usd` 静默复位
+
+A-16 / A-17 是交互式命令**写进**账本串了调度，这条是**从账本里删掉**东西串了调度。
+runner 读的所有累计量（第 4 / 5 / 7 / 8 项）都是从 `ticks` 现算的，
+谁动了 `ticks` 谁就动了这些闸。
+
+`cmd_compact`（默认 `--keep-days 7`）把「终态且够老」的 todo 连同**它名下的所有 tick**
+搬进 `archive/`。花费就记在 tick 的 `cost_usd` 上，于是：
+
+```
+=== 整理之前 ===
+  should_run=False reason=budget
+   ⛔ 已停   跑了 1 轮 · 花了 $9.50（上限 $5.00）
+  $ zloop start → start: 没启动——runner 起来第一轮就会退出（budget）。
+
+=== 人做了一次例行整理：zloop compact ===
+  compacted 1 todos and 1 ticks → .zloop/archive/compact-….json
+
+=== 整理之后 ===
+  should_run=True reason=ready        ← 预算闸没了
+```
+
+（`scripts/repro-a18-compact-resets-budget-cap.sh`）
+
+`max_total_usd` 的语义是「这个目标一共只准花这么多」，compact 把它悄悄改成了
+「最近 7 天只准花这么多」。而且**没有任何痕迹**：整理之后 `zloop status` 连花过钱
+这件事都不再显示，人不会知道自己刚刚给循环提了额。
+
+而且它**不受 `ensure_idle` 保护**：runner 正在跑的时候敲 `zloop compact` 照跑不误
+（同一时刻 `zloop goal new` 会被拒——`zloop: runner 正在跑（pid …）：换目标会让它中途换活`）。
+两条命令动的都是 runner 下一轮要读的账，闸只装了一条。
+
+修的方向：把已归档的花费/轮次留一个汇总在 `state.json` 里（例如
+`policy.spent_before_compact`），`spent_usd` 加上它；或者 compact 时显式提示
+「这次整理让已记录花费从 $X 降到 $Y，预算闸会跟着放开」，让人自己决定。
+
+### A-19（中高）人留一句反馈，下一轮无头 runner 就 `--resume` 进人的对话里
+
+`pick_session`（`runner.rs:440`）挑「上一轮的会话」时只看两件事：host 对不对、
+（`--resume todo` 模式下）todo 对不对。**它不看这条 tick 是谁记的。**
+
+而 `zloop feedback` / `zloop edit` 会把调用者的 `CLAUDE_CODE_SESSION_ID` 原样记进 tick
+（`session::detect()`）。于是「人在自己的 Claude Code 会话里给这条 todo 留句话」
+= 「把自己的会话 id 挂到这条 todo 名下」，而 runner 的默认 `--resume todo` 正好去捡它：
+
+```
+=== 人在自己的 Claude Code 会话（HUMAN-SESSION-9999）里给 t1 留了一句反馈 ===
+  $ zloop feedback → feedback → t1：顺便说一句：先别动 x.rs
+=== runner 无头跑两轮 ===
+  runner: round 1 → t1 [claude] resume HUMAN-SESSION-9999      ← 人的会话
+  runner: round 2 → t2 [claude]                                 ← t2 没人留过话，干净
+=== 假宿主实际收到的 --resume ===
+  第 1 轮：--resume [HUMAN-SESSION-9999]
+  第 2 轮：--resume []
+```
+
+（`scripts/repro-a19-runner-resumes-a-humans-session.sh`）
+
+后果不是「记错一个 id」这么轻：`claude -p --resume` 上去之后，这一轮的提示词接在
+人那段对话**后面**跑——上下文全是不相干的、token 按整段转录计费、产出还写进人的转录里。
+人正开着那个会话的话，两边同时往一条对话里写。
+
+顺带一提，这一条在写 A-17 的复现脚本时是**自己跳出来的**：脚本里的 `zloop feedback`
+继承了当时那个 Claude Code 会话的 id，runner 的日志直接打出
+`resume 870f6118-…`——那正是当时跑审查的那个会话。
+
+修的方向：`pick_session` 加一道「这条 tick 是不是宿主写回的」过滤
+（`COUNTED` 里的 outcome，或者干脆只认 `in_progress.via == "runner"` 期间记的），
+别让「人说过话」等于「人跑过这一轮」。
+
+### 10.3 检查过、确认不是问题的
+
+- **`edit` / `feedback` 打断 fail / noop / progress 三条 streak**：有意设计，`tick.rs:14`
+  写明了理由——「人开口说话正是『停下来等人』该等到的东西」。第 4 / 5 项就该被它打断。
+- **`reflect` / `replan` tick 对 streak 透明**：有意，`tick.rs:22` 写明「插一轮反思不代表
+  失败被解决了」。
+- **`goal new` / `switch` / `rm` 换掉整个 `state.json`**：`goals::ensure_idle` 已经挡住了
+  （runner 在跑、或有轮次没写回，都拒绝，除非 `--force`）。试着在 runner 跑的时候切目标，
+  被拒得干干净净。
+- **`next` 记的 `noop` 混进 `wrote_back`**：`outcome != "noop"` 那一行已经排除。
+  它是对的，但**只对了 noop 一种**——A-17 说的就是剩下三种。
+- **`held_by_other` 挡不住 runner**：有意且必须（`tick.rs:108` 有整段说明和四种在场组合的表），
+  runner 自家的 `claude -p` 子进程要靠这条放行才进得来。
