@@ -19,7 +19,12 @@ t46 把 R2 / R3 从「只管 CODE-AUDIT 和 FINDINGS」推广到 **docs/ 下全�
 号**指得到**，只是指到了另一份文档的同号节上。所以 R3 现在要先判「这个 §N 说的是**哪份**
 文档」，再判「那份文档里有没有这一号」。
 
-四条规则（任一不过就退 1，并把每条不过的都印出来）：
+t47 把「归属靠猜」这件事本身判成了缺陷：三级归属能告诉你这个号**大概**说的是哪份文档，
+但归属对不对没人验、落点更无从谈起。跨文档引用写成锚点链接就两样都被验（R1 验落点、
+R3a 验号和落点是同一节），所以 R5 直接把裸的跨文档引用判红——三级归属从此只是兜底，
+留给写不成链接的那一种（目标文档不在这个仓库里）。
+
+五条规则（任一不过就退 1，并把每条不过的都印出来）：
 
   R1 链接落得到：`[x](path#anchor)` / `[x](#anchor)` 里的文件要存在、锚点要对得上
      真实标题。锚点按 GitHub 的算法（github-slugger）现算——见 `slug()`。
@@ -35,11 +40,16 @@ t46 把 R2 / R3 从「只管 CODE-AUDIT 和 FINDINGS」推广到 **docs/ 下全�
      豁免：`§N` 待在**行内代码**里（`` `§7.1` ``）＝在引用这个写法本身，不查——讨论规则的
      文字和遵守规则的文字长得一模一样，反引号是唯一分得开的地方。同理，行内代码里的
      `[链接](x.md#y)` 也不当真链接查（R1 一样豁免）。
-     已知取舍：b 只看**同一行**、且认的是写全了的 `xxx.md`。所以「先提 A.md、同一行后面又拿
-     §N 指本文件」会被判给 A.md（写文档时把这种句子拆成两行，或干脆写成链接）；反过来，
-     「上一行提 A.md、这一行写 §N」会被当成自指——不跨行是故意的，跨行猜归属的假阳性
-     比它挡住的腐烂还多。
+     已知取舍：b 只看**同一行**、且认的是写全了的 `xxx.md`。不跨行是故意的，跨行猜归属的
+     假阳性比它挡住的腐烂还多。b 归属到**本仓库另一份文档**的那一种现在归 R5 管（判红），
+     所以 b 剩下的活只有两件：认出仓库外的目标（跳过），和认出「提到的就是自己」（当自指查）。
   R4 索引里的 § 必须待在链接里：`docs/FINDINGS.md` 那份是索引，光写个号等于没指路。
+  R5 跨文档的 § 必须待在链接里（写作约定，全仓生效）：`§N` 指的是本仓库**另一份**文档时，
+     不许裸着写。裸写的两处代价——归属靠「同一行最近提到的 `xxx.md`」猜（猜错了不会有人报错），
+     落点根本没验（号对得上就算过，落在哪一小节无从谈起）。写成
+     `[xxx.md §N](xxx.md#锚点)` 之后 R1 验落点存在、R3a 验号和落点是同一节。
+     豁免两种：目标文档不在这个仓库里（写不成链接，只能裸着引，跳过并计数），
+     以及同一行提到的就是本文件（那是自指，不是跨文档）。
 
 锚点算法和 GitHub 对不对得上，是 `gh api /markdown/raw` 逐条比对过的（t45），
 但那要联网，所以这里只留纯本地实现；改 `slug()` 之前请重新比对一次。
@@ -296,14 +306,20 @@ def check_section_refs(path: Path, root: Path, numbers_of, owners_of, anchors_of
                         continue
             else:  # b. 同一行、§ 之前最近提到的 xxx.md；c. 都没有 → 本文件
                 name = next((n for start, n in reversed(mentions) if start < m.start()), None)
-                if name is None:
-                    dest, where = path, "在本文件里"
-                else:
-                    dest = resolve_doc(name, path, root)
-                    if dest is None:
+                dest, where = path, "在本文件里"
+                if name is not None:
+                    target_doc = resolve_doc(name, path, root)
+                    if target_doc is None:
                         stats["outside"] += 1
-                        continue  # 仓库外的文档（loopx 上游那几份），查不了
-                    where = "在本文件里" if dest.resolve() == path.resolve() else f"在 {rel(dest, root)} 里"
+                        continue  # 仓库外的文档（loopx 上游那几份）：写不成链接，也查不了
+                    if target_doc.resolve() != path.resolve():
+                        # R5：裸的跨文档引用。归属是猜的、落点没验——写成链接两样都被验。
+                        problems.append(
+                            f"{rel(path, root)}:{lineno}: `§{num}` 指的是 {rel(target_doc, root)} 的节，却是裸的"
+                            f"——跨文档引用要写成锚点链接 `[{name} §{num}]({name}#锚点)`"
+                        )
+                        continue
+                    # 提到的就是本文件：那是自指，不是跨文档，按 c 查。
 
             if num not in numbers_of(dest):
                 problems.append(f"{rel(path, root)}:{lineno}: `§{num}` {where}没有对应的标题")
@@ -381,8 +397,8 @@ FIXTURES = {
 指得到的自指：§1.1。
 
 ## 2. 第二节
-好的跨文档引用：`loopx-scheduling-notes.md` §1.9。
-仓库外的文档查不了，应当跳过：`field-derived-patterns.md` §7。
+好的跨文档引用（写成链接）：[`loopx-scheduling-notes.md` §1.9](loopx-scheduling-notes.md#19-子节)。
+仓库外的文档写不成链接，应当跳过：`field-derived-patterns.md` §7。
 引用写法本身，不查：`§99`，以及 `[样例](NOPE.md#不存在)`。
 """,
     "docs/loopx-scheduling-notes.md": """# 笔记
@@ -400,7 +416,8 @@ FIXTURES = {
 
 ### 1.3 子节
 自指指不到：§8.8。
-同号异档：`loopx-scheduling-notes.md` §1.3——本文件**有**同号的一节，那边没有，得按提到的那份查。
+同号异档：[`loopx-scheduling-notes.md` §1.3](loopx-scheduling-notes.md)——链接没带锚点时号照样要按**链接指向的那份**查，本文件有同号的一节，那边没有。
+提到的是自己，不算跨文档：`DESIGN.md` §1.3 就在本文件里，R5 不该报。
 """,
     "docs/BROKEN.md": """# 坏样例
 
@@ -411,6 +428,7 @@ FIXTURES = {
 坏路径：[没有这个文件](NOPE.md)。
 坏锚点：[没有这个标题](CODE-AUDIT.md#不存在的标题)。
 号与落点不符：[正文 §2](CODE-AUDIT.md#1-第一节)。
+裸的跨文档引用：`CODE-AUDIT.md` §1——号明明存在，可归属是猜的、落点一点没验。
 """,
     "docs/GAP.md": """# 起点被删了
 
@@ -438,12 +456,18 @@ EXPECTED = [
     ("R3 同号异档", "docs/DESIGN.md:7: `§1.3` 在 docs/loopx-scheduling-notes.md 里没有对应的标题"),
     ("R3a 号与落点不符", "docs/BROKEN.md:9: 链接文字写 `§2`，锚点 `#1-第一节` 却落在 docs/CODE-AUDIT.md 的 §1"),
     ("R4 索引裸号", "docs/FINDINGS.md:4: `§1` 是裸的——索引里的节号要写成锚点链接"),
+    (
+        "R5 裸的跨文档引用",
+        "docs/BROKEN.md:10: `§1` 指的是 docs/CODE-AUDIT.md 的节，却是裸的"
+        "——跨文档引用要写成锚点链接 `[CODE-AUDIT.md §1](CODE-AUDIT.md#锚点)`",
+    ),
 ]
 
 # 合成文档里还埋了这几处**该沉默**的，靠「一条不多」兜住：`§0` 开头的编号（CODE-AUDIT / notes）、
-# 指得到的自指（`§1.1`）、链接里的自指（`[§2 的说明](#2-第二节)`）、指得到的跨文档引用（`§1.9`）、
-# 仓库外文档的 §（`field-derived-patterns.md §7`）、以及行内代码里的 `§99` 和那条指向
-# 不存在文件的样例链接（引用写法本身，不查）。
+# 指得到的自指（`§1.1`）、链接里的自指（`[§2 的说明](#2-第二节)`）、写成链接的跨文档引用（`§1.9`）、
+# 仓库外文档的 §（`field-derived-patterns.md §7`，写不成链接所以 R5 豁免）、同一行提到的就是
+# 本文件的那种（DESIGN 里的 `` `DESIGN.md` §1.3 ``，是自指不是跨文档）、以及行内代码里的 `§99`
+# 和那条指向不存在文件的样例链接（引用写法本身，不查）。
 
 def self_test() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="doc-links-self-test-"))

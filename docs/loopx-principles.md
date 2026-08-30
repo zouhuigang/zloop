@@ -77,7 +77,7 @@ Registered ──▶ Ready ──▶ QuotaCheck ──┬──▶ UserGate     
                               Running ──▶ Writeback（产物 + 验证）──▶ refresh-state + spend ──▶ Ready
                                                                             └──▶ Done（目标终态）
 ```
-（来源：`state-interaction-model.md` "Operational Control Loop" 的状态图；代码对应 `control_plane/quota/should_run*.py` 与 `interaction_contract.py`，见 `loopx-scheduling-notes.md` §1、§3。）
+（来源：`state-interaction-model.md` "Operational Control Loop" 的状态图；代码对应 `control_plane/quota/should_run*.py` 与 `interaction_contract.py`，见 [`loopx-scheduling-notes.md` §1 簇 A](loopx-scheduling-notes.md#1-簇-a配额--should-run-引擎)、[§3 簇 D](loopx-scheduling-notes.md#3-簇-d交互契约引导事务与难用根因)。）
 
 作者给"长时执行"的操作定义（"Long-Running Todo Execution"）是**一串紧凑转移，而不是"接着上次继续"的无界循环**：
 
@@ -449,7 +449,7 @@ loopx 没有 `Host` 基类。每个宿主是 `host_loop_activation.py` 里一个
 ### 4.3 这套思路的边界
 
 - **它假设模型足够自律**去执行写回协议。硬强制只存在于 Claude `--harden` 钩子和 headless run-once；Codex App / Codex `/goal` / Gemini / Cursor 全靠 prompt。当模型不写回，控制面只能事后靠 typed 指纹发现"没进展"。
-- **它用大量结构化字段换取可审计性**，代价是每轮 20–30K 的 JSON、约 50 个 todo 元数据字段、497 种 schema_version——对单人单机场景是纯税（见 `loopx-scheduling-notes.md` §3.3）。
+- **它用大量结构化字段换取可审计性**，代价是每轮 20–30K 的 JSON、约 50 个 todo 元数据字段、497 种 schema_version——对单人单机场景是纯税（见 [`loopx-scheduling-notes.md` §3.3](loopx-scheduling-notes.md#33-难用的-9-条结构性根因有证据)）。
 - **语义记忆缺席**。跨轮传的是分类和哈希，不是"上次为什么这么判断"；OpenViking / reward memory 是可选外挂。长期项目里"教训"的沉淀依赖模型主动把它写进 ACTIVE_GOAL_STATE.md 的 Operating Contract 或 todo note。
 - **多 agent 的容错是人肉的**。没有自动接管、没有心跳超时再分配，一个 agent 消失，它认领的 todo 要等人来解。
 

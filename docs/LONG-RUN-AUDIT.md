@@ -1,6 +1,6 @@
 # zloop 长程运行差距审计（对照 loopx）
 
-> 目标：**指派一个长程任务后，zloop 能长时间运行而不出问题。** 本文逐项对照 loopx 为"长时运行"设计的机制（见 `loopx-principles.md` §1），核对 zloop 0.2 的现状，给出风险等级与处置。
+> 目标：**指派一个长程任务后，zloop 能长时间运行而不出问题。** 本文逐项对照 loopx 为"长时运行"设计的机制（见 [`loopx-principles.md` §1 长时运行与上下文管理](loopx-principles.md#1-长时运行与上下文管理)），核对 zloop 0.2 的现状，给出风险等级与处置。
 > 事实来源：zloop 源码（`src/runner.rs`、`tick.rs`、`state.rs`、`phase.rs`）与本机 `claude 2.1.247` / `codex-cli 0.147.0` 的 `--help`。
 > 日期：2026-08-27。第 2 节的处置结果与第 3 节的 soak 实测由后续轮次追加。
 
